@@ -6,7 +6,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
-import { accept, workerEndpoint } from '../src/receiver.mjs';
+import { accept } from '../src/receiver.mjs';
+import { workerEndpoint } from '../src/ipc.mjs';
 
 test('Windows pipe names are deterministic per private root and do not embed filesystem separators', () => {
   const a = workerEndpoint('C:\\Users\\Name With Spaces\\ü', 'worker', 'win32');
@@ -45,6 +46,16 @@ async function setup() {
     close: async () => { if (owner.listening) await new Promise(resolve => owner.close(resolve));
       await rm(root, { recursive: true, force: true }); } };
 }
+
+test('an unsupported persisted protocol is refused before receipt claim or injection', async () => {
+  const s = await setup();
+  try {
+    await s.persist('supervisor.json', { ...s.state, schemaVersion: 999 });
+    await assert.rejects(accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version), { code: 'UNSUPPORTED_FORMAT' });
+    assert.deepEqual(s.sent, []);
+    await assert.rejects(readJson(join(s.root, `receipt-${s.action.id}.json`)), { code: 'ENOENT' });
+  } finally { await s.close(); }
+});
 
 test('exact stop accepted once; duplicate send cannot start another turn', async () => {
   const s = await setup();

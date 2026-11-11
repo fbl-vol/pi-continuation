@@ -10,7 +10,7 @@ import { atomicJson, readJson } from '../src/store.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
-import { ownerAlive } from '../src/receiver.mjs';
+import { ownerAlive } from '../src/ipc.mjs';
 
 async function eventually(predicate) {
   for (let i = 0; i < 100; i++) {

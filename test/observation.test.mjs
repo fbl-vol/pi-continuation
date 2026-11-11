@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { bindObservation } from '../src/observation.mjs';
 
@@ -23,6 +24,35 @@ function fakePi(sessionId, sessionFile) {
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
   return { pi, ctx, notices, entries, emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
+
+test('failed initial observation leaves registration inert and reports failure instead of success', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const s = fakePi('session', '/sessions/session.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const append = s.pi.appendEntry;
+    s.pi.appendEntry = (type, data) => {
+      append(type, data);
+      mkdirSync(join(root, `observation-${data.workerId}.json`));
+    };
+    const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await s.pi.command(checkpoint, s.ctx);
+    assert.equal(observer.registered, false);
+    assert.equal(s.notices.length, 1);
+    assert.equal(s.notices[0][1], 'error');
+    assert.match(s.notices[0][0], /persist observation failed/);
+    assert.doesNotMatch(s.notices[0][0], /registered paused/);
+    assert.equal(s.notices[0][0].includes(root), false);
+  } finally {
+    await s.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('registration starts paused and a fork cannot inherit it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));

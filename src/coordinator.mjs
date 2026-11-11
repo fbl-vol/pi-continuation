@@ -1,10 +1,10 @@
-import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
-import { workerEndpoint, ownerAlive } from './receiver.mjs';
-import { currentSession } from './observation.mjs';
+import { listenJson, ownerAlive } from './ipc.mjs';
+import { currentSession } from './session.mjs';
+import { readSupervisor, readObservation } from './contracts.mjs';
+import { diagnostics } from './diagnostics.mjs';
 import { snapshot, sameOccupant } from './herdr.mjs';
 
 export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
@@ -14,6 +14,10 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   let generation = 0;
   let humanPending = false;
   let uiPromptActive = false;
+  const report = diagnostics('coordinator');
+  const listen = (record, ctx) => listenJson(root, record.id,
+    notice => acceptNotice(record, ctx, notice), error => report('accept notice', error, ctx));
+
   pi.on('input', event => {
     if (event.source === 'interactive' || event.source === 'rpc') {
       generation++;
@@ -33,9 +37,9 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     try {
       const record = await readJson(join(root, `coordinator-${entry.id}.json`));
       if (record.sessionId !== entry.sessionId || record.sessionFile !== currentSession(ctx).file) return;
-      coordinator = record;
       close = await listen(record, ctx);
-    } catch { coordinator = undefined; }
+      coordinator = record;
+    } catch (error) { report('restore registration', error, ctx); }
   });
 
   async function completionCurrent(state, notice) {
@@ -45,69 +49,43 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const live = await snapshot(socketPath);
     const agent = live.agents.find(a => a.pane_id === worker.paneId);
     if (!sameOccupant(agent, worker) || agent.agent_status !== 'idle') return false;
-    const observation = await readJson(join(root, `observation-${notice.workerId}.json`));
+    const observation = await readObservation(root, notice.workerId);
     return observation.stop === notice.stop && observation.outcome === 'completed' &&
       observation.session?.id === worker.sessionId && observation.session?.file === worker.sessionFile;
   }
 
-  async function listen(record, ctx) {
-    const address = workerEndpoint(root, record.id);
-    const server = net.createServer(socket => {
-      let input = '';
-      socket.on('data', async chunk => {
-        input += chunk.toString();
-        if (input.length > 8192) { socket.destroy(); return; }
-        const end = input.indexOf('\n');
-        if (end < 0) return;
-        socket.removeAllListeners('data');
-        try {
-          const notice = JSON.parse(input.slice(0, end));
-          const state = await readJson(join(root, 'supervisor.json'));
-          const owner = await readJson(join(root, 'supervisor.lock'));
-          const route = state.routes?.[notice.route];
-          const now = currentSession(ctx);
-          const version = generation;
-          if (!await ownerAlive(root, owner.token) ||
-              state.paused || route?.paused || route?.coordinator?.id !== record.id ||
-              notice.ownerToken !== owner.token || owner.token !== state.ownerToken ||
-              now.id !== record.sessionId || now.file !== record.sessionFile ||
-              notice.id !== state.notices?.[notice.id]?.id || state.notices[notice.id].status !== 'sending') {
-            socket.end('{"accepted":false}\n'); return;
-          }
-          if (humanPending || uiPromptActive || !ctx.isIdle()) {
-            // No receipt was claimed and no effect can have happened. This is
-            // retryable, unlike a disconnect or a rejection after acceptance.
-            socket.end(JSON.stringify({ accepted: false, deferred: true, id: notice.id }) + '\n');
-            return;
-          }
-          if (!await completionCurrent(state, notice)) {
-            socket.end(JSON.stringify({ accepted: false, stale: true, id: notice.id }) + '\n');
-            return;
-          }
-          await claim(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'accepted' });
-          const completionStillCurrent = await completionCurrent(state, notice);
-          const latest = await readJson(join(root, 'supervisor.json'));
-          if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
-              latest.routes?.[notice.route]?.coordinator?.id !== record.id ||
-              humanPending || uiPromptActive || !ctx.isIdle() || generation !== version || currentSession(ctx).leaf !== now.leaf) {
-            socket.end('{"accepted":false}\n'); return;
-          }
-          pi.sendMessage({ customType: 'pi-continuation-notice', display: true,
-            content: `Material ${notice.kind} notice for registered worker ${notice.workerId}: ${notice.text}. This is information, not approval authority.` },
-          { triggerTurn: true });
-          await atomicJson(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'sent' });
-          socket.end(JSON.stringify({ accepted: true, id: notice.id }) + '\n');
-        } catch { socket.end('{"accepted":false}\n'); }
-      });
-    });
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(address, () => { server.off('error', reject); resolve(); });
-    });
-    return async () => {
-      await new Promise(resolve => server.close(resolve));
-      if (process.platform !== 'win32') await rm(address, { force: true });
-    };
+  async function acceptNotice(record, ctx, notice) {
+    const state = await readSupervisor(root);
+    const owner = await readJson(join(root, 'supervisor.lock'));
+    const route = state.routes?.[notice.route];
+    const now = currentSession(ctx);
+    const version = generation;
+    if (!await ownerAlive(root, owner.token) ||
+        state.paused || route?.paused || route?.coordinator?.id !== record.id ||
+        notice.ownerToken !== owner.token || owner.token !== state.ownerToken ||
+        now.id !== record.sessionId || now.file !== record.sessionFile ||
+        notice.id !== state.notices?.[notice.id]?.id || state.notices[notice.id].status !== 'sending') {
+      return { accepted: false };
+    }
+    if (humanPending || uiPromptActive || !ctx.isIdle()) {
+      // No receipt claimed or effect attempted: retryable, unlike post-acceptance rejection.
+      return { accepted: false, deferred: true, id: notice.id };
+    }
+    if (!await completionCurrent(state, notice)) return { accepted: false, stale: true, id: notice.id };
+
+    await claim(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'accepted' });
+    const completionStillCurrent = await completionCurrent(state, notice);
+    const latest = await readSupervisor(root);
+    if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
+        latest.routes?.[notice.route]?.coordinator?.id !== record.id ||
+        humanPending || uiPromptActive || !ctx.isIdle() || generation !== version || currentSession(ctx).leaf !== now.leaf) {
+      return { accepted: false };
+    }
+    pi.sendMessage({ customType: 'pi-continuation-notice', display: true,
+      content: `Material ${notice.kind} notice for registered worker ${notice.workerId}: ${notice.text}. This is information, not approval authority.` },
+    { triggerTurn: true });
+    await atomicJson(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'sent' });
+    return { accepted: true, id: notice.id };
   }
 
   pi.registerCommand('continuation-coordinator', {
@@ -117,15 +95,17 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
         throw new Error('Requires a Herdr-managed Pi TUI');
       if (coordinator) { ctx.ui.notify(`Coordinator already registered: ${coordinator.id}`); return; }
       if (!await ctx.ui.confirm('Register coordinator?', 'Receive material notices in this exact session; no continuation or approval authority.')) return;
-      await ensureRoot(root);
-      const session = currentSession(ctx);
-      coordinator = { id: randomUUID(), sessionId: session.id, sessionFile: session.file,
-        cwd: ctx.cwd, paneId };
-      await atomicJson(join(root, `coordinator-${coordinator.id}.json`), coordinator);
-      pi.appendEntry('pi-continuation-coordinator', { id: coordinator.id,
-        sessionId: session.id, paneId });
-      close = await listen(coordinator, ctx);
-      ctx.ui.notify(`Coordinator ${coordinator.id} registered`);
+      try {
+        await ensureRoot(root);
+        const session = currentSession(ctx);
+        const record = { id: randomUUID(), sessionId: session.id, sessionFile: session.file,
+          cwd: ctx.cwd, paneId };
+        await atomicJson(join(root, `coordinator-${record.id}.json`), record);
+        pi.appendEntry('pi-continuation-coordinator', { id: record.id, sessionId: session.id, paneId });
+        close = await listen(record, ctx);
+        coordinator = record;
+        ctx.ui.notify(`Coordinator ${record.id} registered`);
+      } catch (error) { throw report('register', error); }
     },
   });
   pi.on('session_shutdown', async () => { generation++; coordinator = undefined; await close?.(); close = undefined; });

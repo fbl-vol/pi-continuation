@@ -1,55 +1,25 @@
-import net from 'node:net';
-import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { rm } from 'node:fs/promises';
 import { readJson, atomicJson, claim } from './store.mjs';
-import { currentSession } from './observation.mjs';
-
-export function workerEndpoint(root, workerId, platform = process.platform) {
-  const rootId = createHash('sha256').update(root).digest('hex').slice(0, 16);
-  return platform === 'win32' ? `\\\\.\\pipe\\pi-continuation-${rootId}-${workerId}` :
-    join(root, `worker-${workerId}.sock`);
-}
+import { currentSession } from './session.mjs';
+import { listenJson, ownerAlive } from './ipc.mjs';
+import { readSupervisor, readObservation, isId } from './contracts.mjs';
+import { diagnostics } from './diagnostics.mjs';
 
 // Never start this listener without an explicitly registered native worker session.
-export async function receive(root, worker, pi, context, stopVersion, isHeld) {
-  const address = workerEndpoint(root, worker.workerId);
-  const server = net.createServer(socket => {
-    let input = '';
-    socket.on('data', async chunk => {
-      input += chunk.toString('utf8');
-      if (input.length > 8192) { socket.destroy(); return; }
-      const end = input.indexOf('\n');
-      if (end < 0) return;
-      const line = input.slice(0, end);
-      socket.removeAllListeners('data');
-      let action;
-      try { action = JSON.parse(line); }
-      catch { socket.end('{"accepted":false}\n'); return; }
-      try {
-        const response = await accept(root, worker, action, context, pi, stopVersion, isHeld);
-        socket.end(JSON.stringify(response) + '\n');
-      } catch { socket.end('{"accepted":false}\n'); }
-    });
-  });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(address, () => { server.off('error', reject); resolve(); });
-  });
-  return async () => {
-    await new Promise(resolve => server.close(resolve));
-    if (process.platform !== 'win32') await rm(address, { force: true });
-  };
+export function receive(root, worker, pi, context, stopVersion, isHeld) {
+  const report = diagnostics('worker');
+  return listenJson(root, worker.workerId,
+    action => accept(root, worker, action, context, pi, stopVersion, isHeld),
+    error => report('accept continuation', error, context));
 }
 
 export async function accept(root, worker, action, ctx, pi, stopVersion = () => 0,
   isHeld = () => false) {
-  if (!action || typeof action.id !== 'string' || !/^[a-f0-9-]{36}$/.test(action.id))
-    return { accepted: false, reason: 'invalid action' };
-  const state = await readJson(join(root, 'supervisor.json'));
+  if (!action || !isId(action.id)) return { accepted: false, reason: 'invalid action' };
+  const state = await readSupervisor(root);
   const owner = await readJson(join(root, 'supervisor.lock'));
   const binding = state.workers?.[worker.workerId];
-  const observation = await readJson(join(root, `observation-${worker.workerId}.json`));
+  const observation = await readObservation(root, worker.workerId);
   const intent = await readJson(join(root, `intent-${action.id}.json`));
   const session = currentSession(ctx);
   const version = stopVersion();
@@ -77,7 +47,7 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
     if (error.code === 'EEXIST') return { accepted: false, reason: 'duplicate action' };
     throw error;
   }
-  const latest = await readJson(join(root, 'supervisor.json'));
+  const latest = await readSupervisor(root);
   if (latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
       !ctx.isIdle() || isHeld() || stopVersion() !== version || currentSession(ctx).leaf !== session.leaf) {
@@ -88,21 +58,4 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
     display: true }, { triggerTurn: true });
   await atomicJson(join(root, `receipt-${action.id}.json`), { id: action.id, status: 'sent' });
   return { accepted: true, id: action.id };
-}
-
-export async function ownerAlive(root, token) {
-  return new Promise(resolve => {
-    const socket = net.createConnection(workerEndpoint(root, 'supervisor'));
-    let buffer = '';
-    const timer = setTimeout(() => done(false), 1000);
-    const done = ok => { clearTimeout(timer); socket.destroy(); resolve(ok); };
-    socket.on('connect', () => socket.write(`${token}\n`));
-    socket.on('data', chunk => {
-      buffer += chunk.toString();
-      if (buffer.includes('\n')) done(buffer.slice(0, buffer.indexOf('\n')) === token);
-      if (buffer.length > 128) done(false);
-    });
-    socket.on('error', () => done(false));
-    socket.on('end', () => done(false));
-  });
 }
