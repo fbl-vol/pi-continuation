@@ -121,7 +121,10 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     assert.match(queuedNotice.content[0].text, /pending/);
     coordinatorAgent.agent_status = 'idle';
     subscription.write(JSON.stringify({ event: 'pane.agent_status_changed', data: {} }) + '\n');
-    for (let i = 0; i < 40 && coordinatorMessages.length === 0; i++) await wait(10);
+    for (let i = 0; i < 100; i++) {
+      if (Object.values((await readJson(join(root, 'supervisor.json'))).notices)[0].status === 'sent') break;
+      await wait(10);
+    }
     assert.equal(coordinatorMessages.length, 1);
     assert.equal(Object.values((await readJson(join(root, 'supervisor.json'))).notices)[0].status, 'sent');
     coordinatorAgent.agent_status = 'working';

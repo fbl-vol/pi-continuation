@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
+import { endpoint } from '../src/herdr.mjs';
 
 const waitFor = async predicate => {
   for (let index = 0; index < 100; index++) {
@@ -18,7 +19,7 @@ const waitFor = async predicate => {
 
 test('one corrective wake then only the unresolved worker is suspended', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
-  const socketPath = join(root, 'herdr.sock');
+  const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const workerId = randomUUID();
   const sessionFile = '/sessions/repair.jsonl';
   const crashedWorker = randomUUID();
@@ -58,7 +59,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
         sessionKind: 'path', sessionValue: sessionFile, paused: false },
         [crashedWorker]: { route: 'w1', paused: false, paneId: 'w1:p9', sessionId: 'other' } },
       handled: {}, inflight: { [crashedWorker]: { id: pendingAction, stop: randomUUID() } } });
-    await new Promise(resolve => herdr.listen(socketPath, resolve));
+    await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
     bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
     await pi.command('init', ctx);
     await waitFor(() => messages.length === 1);

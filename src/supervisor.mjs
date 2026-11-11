@@ -469,6 +469,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   });
   pi.on('session_shutdown', async () => {
     watcher?.close(); closeEvents?.(); subscriptionLive = false;
+    await serial; // Finish any queued receipt/notice before releasing the owner and state root.
     if (closeOwner) {
       const token = state.ownerToken;
       await closeOwner(); closeOwner = undefined;
