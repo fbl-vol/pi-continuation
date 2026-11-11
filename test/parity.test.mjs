@@ -232,8 +232,10 @@ test('coordinator loss is a sticky route pause, while worker loss is worker-loca
   coordinatorAgent.agent_session.value = '/sessions/replaced.jsonl';
   s.event();
   await eventually(async () => (await s.state()).routes.w.paused);
-  assert.equal((await s.state()).paused, false);
-  assert.equal((await s.state()).workers[s.worker.id].paused, false);
+  const afterCoordinatorLoss = await s.state();
+  assert.equal(afterCoordinatorLoss.paused, false,
+    JSON.stringify({ reason: afterCoordinatorLoss.reason, failure: afterCoordinatorLoss.failure }));
+  assert.equal(afterCoordinatorLoss.workers[s.worker.id].paused, false);
   coordinatorAgent.agent_session.value = s.coordinator.sessionFile;
   s.event();
   await s.command('status');
