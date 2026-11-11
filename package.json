@@ -14,9 +14,46 @@
   "bugs": {
     "url": "https://github.com/fbl-vol/pi-continuation/issues"
   },
-  "keywords": ["pi-package", "pi", "herdr", "supervision", "continuation"],
-  "files": ["README.md", "LICENSE"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "herdr",
+    "supervision",
+    "continuation"
+  ],
+  "files": [
+    "README.md",
+    "LICENSE",
+    "docs/contract.md",
+    "src/extension.ts",
+    "src/bindings.mjs",
+    "src/contracts.mjs",
+    "src/diagnostics.mjs",
+    "src/ipc.mjs",
+    "src/policy.mjs",
+    "src/session.mjs",
+    "src/coordinator.mjs",
+    "src/herdr.mjs",
+    "src/observation.mjs",
+    "src/receiver.mjs",
+    "src/store.mjs",
+    "src/subscription.mjs",
+    "src/supervisor.mjs"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check:package": "node scripts/check-package.mjs"
+  },
   "pi": {
-    "extensions": []
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "devDependencies": {
+    "typebox": "^1.4.3"
   }
 }
