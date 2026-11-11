@@ -86,7 +86,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     const binding = entries.at(-1)?.data;
     if (!binding || binding.sessionId !== session.id || binding.paneId !== paneId) return;
     if (!await launchGuard()) {
-      ctx.ui.notify('Continuation worker disabled: start Pi with this extension as its first explicit -e path', 'error');
+      ctx.ui.notify('Continuation worker disabled: start Pi with -e <extension file> as its first option', 'error');
       return;
     }
     try {
@@ -118,7 +118,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
       }
       if (!await launchGuard()) {
-        ctx.ui.notify('Start Pi with this extension as its first explicit -e path before registering', 'error');
+        ctx.ui.notify('Start Pi with -e <extension file> as its first option before registering', 'error');
         return;
       }
       if (worker) { ctx.ui.notify(`Already registered: ${worker.workerId} (observation only)`, 'info'); return; }

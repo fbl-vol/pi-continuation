@@ -171,7 +171,7 @@ test('registration refuses a worker launched after another extension', async () 
     await worker.emit('session_start');
     await worker.pi.command(checkpoint, worker.ctx);
     assert.equal(worker.entries.length, 0);
-    assert.match(worker.notices[0][0], /first explicit -e/);
+    assert.match(worker.notices[0][0], /first option/);
     assert.equal(worker.terminalInput.size, 0);
   } finally {
     await worker.emit('session_shutdown');
@@ -203,7 +203,7 @@ test('a registered worker restart without the first-extension guard stays inert'
     await restarted.emit('agent_settled', { aborted: false });
     assert.equal(observer.registered, false);
     assert.equal(restarted.terminalInput.size, 0);
-    assert.match(restarted.notices[0][0], /worker disabled.*first explicit -e/);
+    assert.match(restarted.notices[0][0], /worker disabled.*first option/);
     const saved = JSON.parse(await readFile(join(root, `observation-${workerId}.json`)));
     assert.equal(saved.outcome, 'unknown');
   } finally {
