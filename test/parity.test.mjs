@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +43,9 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   const observation = { outcome: 'completed', stop, version: 0,
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf' } };
   await writeFile(worker.checkpoint, 'State: backlog empty\nValidated result');
+  // Match real registration: persisted checkpoint pins are canonical even when
+  // the OS temporary directory itself is a symlink (for example on macOS).
+  worker.checkpoint = await realpath(worker.checkpoint);
   await atomicJson(join(root, `worker-${worker.id}.json`), worker);
   await atomicJson(join(root, `observation-${worker.id}.json`), observation);
   await atomicJson(join(root, `coordinator-${coordinator.id}.json`), coordinator);
@@ -111,6 +114,7 @@ test('pre-acceptance coordinator rejection stays pending, then delivers once wit
   const s = await fixture(t, { coordinatorInput: true });
   await s.disposition('notify', 'completion');
   let state = await s.state();
+  assert.equal(Object.values(state.notices)[0].kind, 'completion');
   assert.equal(Object.values(state.notices)[0].status, 'pending');
   assert.equal(state.routes.w.paused, false);
   assert.equal(s.notices.length, 0);
@@ -130,6 +134,7 @@ test('completion superseded during handoff is rejected by the recipient without 
     return true;
   };
   await s.disposition('notify', 'completion');
+  assert.equal(Object.values((await s.state()).notices)[0].kind, 'completion');
   assert.equal(Object.values((await s.state()).notices)[0].status, 'stale');
   assert.equal((await s.state()).routes.w.paused, false);
   assert.equal(s.notices.length, 0);
