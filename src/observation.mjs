@@ -33,14 +33,18 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let pendingWrite = Promise.resolve();
   const startReceiver = async ctx => {
     if (!worker) return;
-    closeReceiver = await receive(root, worker, pi, ctx, () => stopVersion, () => hold);
+    closeReceiver = await receive(root, worker, pi, ctx, () => stopVersion, () => hold || !worker);
   };
-  pi.on('input', event => {
-    if (event.source === 'interactive' || event.source === 'rpc') stopVersion++;
+  pi.on('input', (event, ctx) => {
+    if (event.source !== 'interactive' && event.source !== 'rpc') return;
+    stopVersion++;
+    if (worker) return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null });
   });
   const observe = value => {
     const owner = worker;
-    pendingWrite = pendingWrite.then(() => atomicJson(`${root}/observation-${owner.workerId}.json`, value))
+    // Hold is independent of activity: a new turn must not erase an unresolved stop.
+    const saved = { ...value, hold, version: stopVersion };
+    pendingWrite = pendingWrite.then(() => atomicJson(`${root}/observation-${owner.workerId}.json`, saved))
       .catch(() => { if (worker === owner) worker = undefined; });
     return pendingWrite;
   };
@@ -50,8 +54,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopVersion++;
     void observe({ session: currentSession(ctx), outcome: 'approval', stop: null, version: stopVersion });
   });
-  pi.on('tool_execution_end', event => {
-    if (event.isError && worker) { hold = true; stopVersion++; }
+  pi.on('tool_execution_end', (event, ctx) => {
+    if (!event.isError || !worker) return;
+    hold = true;
+    stopVersion++;
+    return observe({ session: currentSession(ctx), outcome: 'error', stop: null });
   });
 
   pi.on('session_start', async (_event, ctx) => {
@@ -70,9 +77,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         worker = record;
         try {
           const prior = await readJson(`${root}/observation-${worker.workerId}.json`);
-          hold = ['aborted', 'approval', 'error'].includes(prior.outcome);
+          // Older observations lack durable hold state. Require inspection rather than
+          // infer that a previous working/unknown observation cleared a hold.
+          hold = prior.hold !== false || ['aborted', 'approval', 'error'].includes(prior.outcome);
           if (Number.isSafeInteger(prior.version) && prior.version >= 0) stopVersion = prior.version;
-        } catch { hold = false; }
+        } catch { hold = true; }
         if (!ctx.isIdle()) previousAssistantId = lastAssistantId(ctx);
         await startReceiver(ctx);
       }
@@ -100,6 +109,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       pi.appendEntry('pi-continuation-worker', { workerId: record.workerId,
         sessionId: record.sessionId, paneId });
       worker = record;
+      await observe({ session, outcome: 'unknown', stop: null });
       await startReceiver(ctx);
       ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
     },
@@ -110,7 +120,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (!worker) return;
     previousAssistantId = lastAssistantId(ctx);
     // Every new turn invalidates the previous stop, including a human prompt.
-    void observe({ session: currentSession(ctx), outcome: 'working', stop: null });
+    return observe({ session: currentSession(ctx), outcome: 'working', stop: null });
   });
   pi.on('agent_settled', async (event, ctx) => {
     if (!worker || ctx.mode !== 'tui') return;
@@ -135,6 +145,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   pi.on('session_shutdown', async () => {
     stopVersion++;
     worker = undefined;
+    await pendingWrite;
     await closeReceiver?.();
     closeReceiver = undefined;
   });

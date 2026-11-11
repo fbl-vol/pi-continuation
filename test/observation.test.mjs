@@ -16,7 +16,10 @@ function fakePi(sessionId, sessionFile) {
   const ctx = { mode: 'tui', cwd: '/project', sessionManager, isIdle: () => true,
     ui: { confirm: async () => true, notify: (...args) => notices.push(args) } };
   const pi = { on: (name, fn) => handlers.set(name, fn),
-    registerCommand: (name, definition) => { if (name === 'continuation-worker') pi.command = definition.handler; },
+    registerCommand: (name, definition) => {
+      if (name === 'continuation-worker') pi.command = definition.handler;
+      if (name === 'continuation-worker-clear-hold') pi.clearHold = definition.handler;
+    },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
   return { pi, ctx, notices, entries, emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
@@ -44,7 +47,9 @@ test('registration starts paused and a fork cannot inherit it', async () => {
     bindObservation(fork.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
     await fork.emit('session_start', { reason: 'fork' });
     await fork.emit('agent_settled', { aborted: false });
-    await assert.rejects(readFile(join(root, `observation-${workerId}.json`)), { code: 'ENOENT' });
+    const observed = JSON.parse(await readFile(join(root, `observation-${workerId}.json`)));
+    assert.equal(observed.session.id, 'original');
+    assert.equal(observed.outcome, 'unknown');
   } finally {
     await original.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
@@ -72,6 +77,43 @@ test('same-session reload restores sticky abort hold and closes old receiver', a
     await next.emit('session_start', { reason: 'reload' });
     assert.equal(receiver.registered, true);
     assert.equal(receiver.hold, true);
+  } finally {
+    await next.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('sticky hold survives a subsequent working observation and restart until explicitly cleared', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('same', '/sessions/same.jsonl');
+  const next = fakePi('same', '/sessions/same.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    await first.emit('agent_settled', { aborted: true });
+    await first.emit('agent_start');
+    await first.emit('session_shutdown');
+    next.entries.push(...first.entries);
+    const observer = bindObservation(next.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await next.emit('session_start', { reason: 'startup' });
+    assert.equal(observer.hold, true);
+    await next.emit('agent_start');
+    next.entries.push({ type: 'message', id: 'new', message: { role: 'assistant', stopReason: 'stop' } });
+    await next.emit('agent_settled', { aborted: false });
+    const id = first.entries[0].data.workerId;
+    const observation = () => readFile(join(root, `observation-${id}.json`), 'utf8').then(JSON.parse);
+    assert.equal((await observation()).outcome, 'approval');
+    await next.pi.clearHold('', next.ctx);
+    assert.equal(observer.hold, false);
+    assert.equal((await observation()).stop, null);
+    assert.equal((await observation()).hold, false);
   } finally {
     await next.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;

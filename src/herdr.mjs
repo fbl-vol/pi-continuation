@@ -55,6 +55,6 @@ export function sameOccupant(agent, binding) {
   return agent?.agent === 'pi' && agent.pane_id === binding.paneId &&
     agent.terminal_id === binding.terminalId &&
     agent.workspace_id === binding.workspaceId && agent.tab_id === binding.tabId &&
-    agent.cwd === binding.cwd && ref?.source === 'herdr:pi' && ref.agent === 'pi' &&
+    (agent.foreground_cwd || agent.cwd) === binding.cwd && ref?.source === 'herdr:pi' && ref.agent === 'pi' &&
     ref.kind === binding.sessionKind && ref.value === binding.sessionValue;
 }

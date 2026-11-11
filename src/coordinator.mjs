@@ -53,12 +53,18 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
           const route = state.routes?.[notice.route];
           const now = currentSession(ctx);
           const version = generation;
-          if (!await ownerAlive(root, owner.token) || humanPending || uiPromptActive || !ctx.isIdle() ||
+          if (!await ownerAlive(root, owner.token) ||
               state.paused || route?.paused || route?.coordinator?.id !== record.id ||
               notice.ownerToken !== owner.token || owner.token !== state.ownerToken ||
               now.id !== record.sessionId || now.file !== record.sessionFile ||
               notice.id !== state.notices?.[notice.id]?.id || state.notices[notice.id].status !== 'sending') {
             socket.end('{"accepted":false}\n'); return;
+          }
+          if (humanPending || uiPromptActive || !ctx.isIdle()) {
+            // No receipt was claimed and no effect can have happened. This is
+            // retryable, unlike a disconnect or a rejection after acceptance.
+            socket.end(JSON.stringify({ accepted: false, deferred: true, id: notice.id }) + '\n');
+            return;
           }
           await claim(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'accepted' });
           const latest = await readJson(join(root, 'supervisor.json'));

@@ -21,10 +21,10 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const sessionFile = '/sessions/test.jsonl';
   const record = { workerId, paneId: 'w1:p1', sessionId: 'session-test', sessionFile,
     checkpoint, cwd: '/project', paused: true };
-  const stop = randomUUID();
+  let stop = randomUUID();
   const siblingId = randomUUID();
   const sibling = { ...record, workerId: siblingId, paneId: 'w2:p1',
-    sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl' };
+    sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl', checkpoint: join(root, 'sibling.md') };
   const siblingStop = randomUUID();
   const observation = { outcome: 'completed', stop, version: 0,
     session: { id: record.sessionId, file: sessionFile, leaf: 'leaf' } };
@@ -69,6 +69,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   process.env.HERDR_ENV = '1';
   try {
     await writeFile(checkpoint, 'in progress: completed concrete result A');
+    await writeFile(sibling.checkpoint, 'in progress: completed sibling result');
     await atomicJson(join(root, `worker-${workerId}.json`), record);
     await atomicJson(join(root, `observation-${workerId}.json`), observation);
     await atomicJson(join(root, `coordinator-${coordinatorId}.json`), coordinatorRecord);
@@ -129,6 +130,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     assert.equal(Object.values((await readJson(join(root, 'supervisor.json'))).notices)[0].status, 'sent');
     coordinatorAgent.agent_status = 'working';
     await writeFile(checkpoint, 'State: backlog empty\nconcrete result A');
+    await pi.command('activate worker ' + workerId, ctx);
     const completion = await pi.tool('call', { workerId, stop,
       action: 'notify', kind: 'completion', evidence: 'concrete result A' }, undefined, undefined, ctx);
     assert.match(completion.content[0].text, /pending/);
@@ -141,6 +143,11 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     }
     assert.equal(coordinatorMessages.length, 1);
     assert.ok(Object.values((await readJson(join(root, 'supervisor.json'))).notices).some(n => n.status === 'stale'));
+    // A material blocker is a disposition and holds the worker. Only explicit
+    // activation and a new stop permit this later, separate batch to continue.
+    await pi.command('activate worker ' + workerId, ctx);
+    stop = randomUUID();
+    observation.stop = stop;
     await atomicJson(join(root, `observation-${workerId}.json`), observation);
     const attention = messages.find(m => !Array.isArray(m) && m.message.customType === 'pi-continuation-attention');
     assert.match(attention.message.content, new RegExp(workerId));
