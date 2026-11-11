@@ -15,7 +15,7 @@ import { readJson } from './store.mjs';
  * @typedef {NativeBinding & {workerId: string, route: string, checkpoint?: string,
  *   paused: boolean, reason?: string}} WorkerBinding
  * @typedef {{paused: boolean, coordinator?: NativeBinding & {id: string}, reason?: string}} Route
- * @typedef {{id: string, workerId: string, stop?: string, route: string,
+ * @typedef {{id: string, workerId: string, stop?: string, route: string, reportHash?: string,
  *   kind: 'completion'|'blocker'|'decision', text: string,
  *   status: 'pending'|'sending'|'sent'|'stale'|'uncertain'|'resolved'}} Notice
  * @typedef {{id: string, workerId: string, stop: string, ownerToken: string,
@@ -84,6 +84,8 @@ export function decodeSupervisor(record) {
   }
   for (const [id, notice] of Object.entries(state.notices)) {
     if (notice.id !== id || typeof notice.workerId !== 'string' || typeof notice.text !== 'string' ||
+        (notice.reportHash !== undefined && (typeof notice.reportHash !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(notice.reportHash))) ||
         !Object.hasOwn(state.routes, notice.route) ||
         !['completion', 'blocker', 'decision'].includes(notice.kind) ||
         !['pending', 'sending', 'sent', 'stale', 'uncertain', 'resolved'].includes(notice.status)) invalid();

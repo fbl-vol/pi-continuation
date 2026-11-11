@@ -29,6 +29,18 @@ test('unknown versions and malformed authority fields fail instead of acquiring 
     { code: 'INVALID_RECORD' });
 });
 
+test('old completion notices remain readable, but malformed report hashes cannot be persisted', () => {
+  const state = newSupervisor();
+  state.routes.r = { paused: false };
+  state.notices.n = { id: 'n', workerId: 'w', route: 'r', kind: 'completion',
+    text: 'Review finished', status: 'pending' };
+  assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
+  state.notices.n.reportHash = 'invalid';
+  assert.throws(() => decodeSupervisor(state), { code: 'INVALID_RECORD' });
+  state.notices.n.reportHash = 'a'.repeat(64);
+  assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
+});
+
 test('observation decoding never invents a generation or clears a legacy hold', () => {
   const old = { outcome: 'working', stop: null, session: { id: 's', file: '/session' } };
   const decoded = decodeObservation(old);

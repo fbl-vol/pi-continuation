@@ -2,14 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
+import { checkpointHash } from '../src/policy.mjs';
 import { ownerAlive } from '../src/ipc.mjs';
 
 async function eventually(predicate) {
@@ -43,7 +44,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   const stop = randomUUID();
   const observation = { outcome: 'completed', stop, version: 0, hold: false,
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf' } };
-  await writeFile(worker.checkpoint, 'State: backlog empty\nValidated result');
+  await writeFile(worker.checkpoint, '# Work report\nValidated result\nAll assigned tasks and follow-ups completed.');
   // Match real registration: persisted checkpoint pins are canonical even when
   // the OS temporary directory itself is a symlink (for example on macOS).
   worker.checkpoint = await realpath(worker.checkpoint);
@@ -54,12 +55,14 @@ async function fixture(t, { coordinatorInput = false } = {}) {
     workers: { [worker.id]: worker }, routes: { w: { paused: false, coordinator } }, handled: {} });
   const sockets = new Set();
   const subscriptions = new Set();
+  let snapshotHook = () => {};
   const herdr = net.createServer(socket => {
     sockets.add(socket);
     socket.on('close', () => { sockets.delete(socket); subscriptions.delete(socket); });
     socket.once('data', data => {
       const req = JSON.parse(data.toString());
       if (req.method === 'events.subscribe') subscriptions.add(socket);
+      else snapshotHook();
       socket.write(JSON.stringify({ id: req.id, result: req.method === 'events.subscribe' ?
         { type: 'subscription_started' } : { type: 'session_snapshot', snapshot: { protocol: 22, agents } } }) + '\n');
     });
@@ -104,9 +107,11 @@ async function fixture(t, { coordinatorInput = false } = {}) {
       return next;
     },
     state: () => readJson(join(root, 'supervisor.json')),
+    onSnapshot: fn => { snapshotHook = fn; },
     command: args => command(args, ctx),
-    disposition: (action, kind) => tool('call', { workerId: worker.id, stop, action, kind,
-      evidence: 'Validated result' }, undefined, undefined, ctx),
+    disposition: async (action, kind, reportHash) => tool('call', { workerId: worker.id, stop, action, kind,
+      evidence: 'Validated result', reportHash: reportHash ?? checkpointHash(await readFile(worker.checkpoint, 'utf8')) },
+    undefined, undefined, ctx),
     event: () => { for (const socket of subscriptions) socket.write(JSON.stringify({ event: 'pane.updated' }) + '\n'); },
   };
 }
@@ -124,6 +129,23 @@ test('pre-acceptance coordinator rejection stays pending, then delivers once wit
   await eventually(async () => Object.values((await s.state()).notices)[0].status === 'sent');
   assert.equal(s.notices.length, 1);
   assert.equal(s.wakes.length, 0);
+});
+
+test('a queued completion notice is discarded if the report changes without a new stop', async t => {
+  const s = await fixture(t, { coordinatorInput: true });
+  await s.disposition('notify', 'completion');
+  await writeFile(s.worker.checkpoint, '# Work report\nValidated result\nFollow-up reopened.');
+  s.ch.get('agent_settled')();
+  s.event();
+  await eventually(async () => Object.values((await s.state()).notices)[0].status === 'stale');
+  assert.equal(s.notices.length, 0);
+  assert.equal((await s.state()).routes.w.paused, false);
+  assert.equal((await s.state()).handled[s.worker.id], undefined);
+  await writeFile(s.worker.checkpoint, '# Work report\nValidated result\nFollow-up closed.');
+  await s.disposition('notify', 'completion');
+  const notices = Object.values((await s.state()).notices);
+  assert.deepEqual(notices.map(n => n.status), ['stale', 'sent']);
+  assert.equal(s.notices.length, 1);
 });
 
 test('completion superseded during handoff is rejected by the recipient without a route pause', async t => {
@@ -154,6 +176,37 @@ test('a changed checkpoint path isolates the worker instead of reading another a
   assert.equal(state.routes.w.paused, false);
   assert.match(state.workers[s.worker.id].reason, /checkpoint/);
   assert.match((await s.disposition('resume')).content[0].text, /Paused/);
+});
+
+test('a report edit during handoff is rejected before claiming a receipt', async t => {
+  const s = await fixture(t);
+  let checks = 0;
+  s.cctx.isIdle = () => {
+    if (++checks === 1) writeFileSync(s.worker.checkpoint, '# Work report\nValidated result\nFollow-up reopened.');
+    return true;
+  };
+  await s.disposition('notify', 'completion');
+  const notice = Object.values((await s.state()).notices)[0];
+  assert.equal(notice.status, 'stale');
+  assert.equal((await s.state()).routes.w.paused, false);
+  await assert.rejects(readJson(join(s.root, `receipt-${notice.id}.json`)), { code: 'ENOENT' });
+  assert.equal(s.notices.length, 0);
+});
+
+test('report changes after receipt claim suspend the completion notice without retry', async t => {
+  const s = await fixture(t);
+  s.onSnapshot(() => {
+    const notices = Object.values(JSON.parse(readFileSync(join(s.root, 'supervisor.json'))).notices);
+    const notice = notices.find(n => n.kind === 'completion' && n.status === 'sending');
+    if (notice && existsSync(join(s.root, `receipt-${notice.id}.json`)))
+      writeFileSync(s.worker.checkpoint, '# Work report\nValidated result\nFollow-up reopened.');
+  });
+  await s.disposition('notify', 'completion');
+  const notice = Object.values((await s.state()).notices)[0];
+  assert.equal(notice.status, 'uncertain');
+  assert.equal((await s.state()).routes.w.paused, true);
+  assert.equal((await readJson(join(s.root, `receipt-${notice.id}.json`))).status, 'accepted');
+  assert.equal(s.notices.length, 0);
 });
 
 test('post-acceptance coordinator race remains uncertain and is never retried', async t => {
@@ -266,6 +319,15 @@ test('an observation without an explicit cleared hold cannot be acknowledged or 
   assert.equal((await s.disposition('notify', 'completion')).content[0].text, 'Stale or ineligible stop');
   assert.equal((await s.state()).handled[s.worker.id], undefined);
   assert.deepEqual((await s.state()).notices, {});
+});
+
+test('acknowledgement rejects a changed report without consuming the stop', async t => {
+  const s = await fixture(t);
+  const oldHash = checkpointHash(await readFile(s.worker.checkpoint, 'utf8'));
+  await writeFile(s.worker.checkpoint, '# Work report\nValidated result\nAll assigned tasks complete; formatting revised.');
+  assert.match((await s.disposition('acknowledge', undefined, oldHash)).content[0].text, /changed/);
+  assert.equal((await s.state()).handled[s.worker.id], undefined);
+  assert.match((await s.disposition('acknowledge')).content[0].text, /acknowledged/);
 });
 
 test('acknowledgement records completion without lifting any pause', async t => {

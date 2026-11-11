@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
@@ -10,6 +10,7 @@ import { receive } from '../src/receiver.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
+import { checkpointHash } from '../src/policy.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -132,7 +133,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     await writeFile(checkpoint, 'State: backlog empty\nconcrete result A');
     await pi.command('activate worker ' + workerId, ctx);
     const completion = await pi.tool('call', { workerId, stop,
-      action: 'notify', kind: 'completion', evidence: 'concrete result A' }, undefined, undefined, ctx);
+      action: 'notify', kind: 'completion', evidence: 'concrete result A',
+      reportHash: checkpointHash(await readFile(checkpoint, 'utf8')) }, undefined, undefined, ctx);
     assert.match(completion.content[0].text, /pending/);
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: randomUUID() });
     coordinatorAgent.agent_status = 'idle';
