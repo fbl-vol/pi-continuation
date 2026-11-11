@@ -4,17 +4,23 @@ import { resolve } from 'node:path';
 import { atomicJson, defaultRoot, ensureRoot, readJson } from './store.mjs';
 import { receive } from './receiver.mjs';
 import { currentSession } from './session.mjs';
-import { SCHEMA_VERSION, readObservation } from './contracts.mjs';
+import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 
 export function stopObservation(ctx, aborted, hold, version, previousAssistantId) {
   const session = currentSession(ctx);
   const last = [...ctx.sessionManager.getBranch()].reverse().find(e =>
     e.type === 'message' && e.message?.role === 'assistant');
-  const outcome = aborted ? 'aborted' : last?.id !== previousAssistantId &&
-    last?.message?.stopReason === 'error' ? 'error' : hold ? 'approval' :
-    last?.id !== previousAssistantId && last?.message?.stopReason === 'stop' ? 'completed' : 'unknown';
-  return { session, outcome, stop: randomUUID(), version, at: new Date().toISOString() };
+  const fresh = last && last.id !== previousAssistantId;
+  const reply = fresh && Array.isArray(last.message?.content) ? last.message.content
+    .filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text).join('\n').trim() : '';
+  const replyAvailable = reply.length > 0 && Buffer.byteLength(reply, 'utf8') <= MAX_FINAL_REPLY_BYTES;
+  const completed = fresh && last.message?.stopReason === 'stop';
+  const outcome = aborted ? 'aborted' : fresh && last.message?.stopReason === 'error' ? 'error' :
+    hold || (completed && !replyAvailable) ? 'approval' : completed ? 'completed' : 'unknown';
+  return { session, outcome, stop: randomUUID(), version, at: new Date().toISOString(),
+    ...(replyAvailable ? { finalReply: reply } : {}) };
 }
 
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
@@ -161,7 +167,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (event.aborted || [...ctx.sessionManager.getBranch()].reverse().find(e =>
       e.type === 'message' && e.message?.role === 'assistant')?.message?.stopReason === 'error') hold = true;
     try {
-      await observe(stopObservation(ctx, event.aborted, hold, stopVersion, previousAssistantId), ctx);
+      const stopped = stopObservation(ctx, event.aborted, hold, stopVersion, previousAssistantId);
+      if (stopped.outcome === 'approval') hold = true;
+      await observe(stopped, ctx);
     } catch (error) { worker = undefined; report('observe settled turn', error, ctx); }
   });
   pi.registerCommand('continuation-worker-clear-hold', {
@@ -185,6 +193,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     closeReceiver = undefined;
   });
   // UI prompts and tool errors hold subsequent stops until explicitly inspected.
-  // Prose-only approval requests have no host signal; do not classify them as permission.
+  // Prose-only approval requests have no host signal; the pinned reply is
+  // supervisor review evidence, never permission by itself.
   return { get registered() { return !!worker; }, get hold() { return hold; } };
 }

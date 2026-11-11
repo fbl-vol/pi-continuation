@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
+import { MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
 
 const bindObservation = (pi, options) => bindWorkerObservation(pi,
   { ...options, launchGuard: () => true });
@@ -246,6 +247,53 @@ test('raw user input holds a worker before Pi handles a built-in dialog', async 
   assert.equal(worker.terminalInput.size, 0);
 });
 
+test('an exact final reply is captured; oversized replies hold instead of hiding a request', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved work remains');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'new-answer', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Progress made. Can I deploy?' }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    const saved = () => readFile(join(root, `observation-${id}.json`), 'utf8').then(JSON.parse);
+    assert.equal((await saved()).outcome, 'completed');
+    assert.equal((await saved()).hold, false);
+    assert.equal((await saved()).finalReply, 'Progress made. Can I deploy?');
+
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'oversized', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'é'.repeat(MAX_FINAL_REPLY_BYTES) }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    assert.equal(observer.hold, true);
+    assert.equal((await saved()).outcome, 'approval');
+    assert.equal((await saved()).hold, true);
+    assert.equal((await saved()).finalReply, undefined);
+
+    await worker.pi.clearHold('', worker.ctx);
+    assert.equal(observer.hold, false);
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'empty', message: { role: 'assistant',
+      stopReason: 'stop', content: [] } });
+    await worker.emit('agent_settled', { aborted: false });
+    assert.equal((await saved()).outcome, 'approval');
+    assert.equal((await saved()).hold, true);
+    assert.equal((await saved()).finalReply, undefined);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a provider failure without a new assistant message cannot reuse an old completed stop', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');
@@ -264,6 +312,7 @@ test('a provider failure without a new assistant message cannot reuse an old com
     await worker.emit('agent_settled', { aborted: false });
     const observed = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
     assert.equal(observed.outcome, 'unknown');
+    assert.equal(observed.finalReply, undefined);
   } finally {
     await worker.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;

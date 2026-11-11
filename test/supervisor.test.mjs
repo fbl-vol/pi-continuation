@@ -28,6 +28,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl', checkpoint: join(root, 'sibling.md') };
   const siblingStop = randomUUID();
   const observation = { outcome: 'completed', stop, version: 0, hold: false,
+    finalReply: 'Synthetic worker reports progress; approved work remains.',
     session: { id: record.sessionId, file: sessionFile, leaf: 'leaf' } };
   const agent = { pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1',
     terminal_id: 'terminal', cwd: '/project', agent: 'pi', agent_status: 'idle',
@@ -154,6 +155,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     const attention = messages.find(m => !Array.isArray(m) && m.message.customType === 'pi-continuation-attention');
     assert.match(attention.message.content, new RegExp(workerId));
     assert.match(attention.message.content, new RegExp(siblingId));
+    assert.match(attention.message.content, /Synthetic worker reports progress/);
+    assert.match(attention.message.content, /final reply can request user approval/i);
     const answer = await pi.tool('call', { workerId, stop, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
     assert.match(answer.content[0].text, /delivered/);

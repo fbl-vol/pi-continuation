@@ -9,11 +9,15 @@ function existingNotice(state, workerId, stop, kind) {
     n.kind === kind && !(kind === 'completion' && n.status === 'stale'));
 }
 
-export function planDisposition(state, args, checkpoint) {
+export function planDisposition(state, args, checkpoint, finalReply = '') {
   const reject = message => ({ kind: 'reject', message });
-  if (!checkpoint.trim()) return reject('Empty checkpoint; hold');
   const evidence = args.evidence.trim();
-  if (!checkpoint.includes(evidence)) return reject('Evidence is absent from the current checkpoint');
+  const materialHold = args.action === 'pause' ||
+    (args.action === 'notify' && ['blocker', 'decision'].includes(args.kind));
+  if (!checkpoint.trim() && !(materialHold && finalReply.trim()))
+    return reject('Empty checkpoint and no final reply; hold');
+  if (!checkpoint.includes(evidence) && !(materialHold && finalReply.includes(evidence)))
+    return reject('Evidence is absent from the current checkpoint or eligible final reply');
   const worker = state.workers[args.workerId];
   const completion = args.action === 'acknowledge' ||
     (args.action === 'notify' && args.kind === 'completion');

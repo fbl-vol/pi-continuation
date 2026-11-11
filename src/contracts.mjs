@@ -8,7 +8,7 @@ import { readJson } from './store.mjs';
  *
  * @typedef {{id: string, file: string, leaf?: string}} SessionIdentity
  * @typedef {{schemaVersion?: number, session: SessionIdentity, outcome: string,
- *   stop: string|null, version?: number, hold?: boolean, at?: string}} Observation
+ *   stop: string|null, version?: number, hold?: boolean, finalReply?: string, at?: string}} Observation
  * @typedef {{sessionId: string, sessionFile: string, paneId: string, cwd: string,
  *   terminalId: string, workspaceId: string, tabId: string,
  *   sessionKind: string, sessionValue: string}} NativeBinding
@@ -31,6 +31,7 @@ import { readJson } from './store.mjs';
  */
 
 export const SCHEMA_VERSION = 1;
+export const MAX_FINAL_REPLY_BYTES = 8192;
 export const isId = value => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const invalid = () => { throw Object.assign(new Error('Invalid continuation record'), { code: 'INVALID_RECORD' }); };
@@ -111,8 +112,13 @@ export function decodeObservation(record) {
   if ((version === 1 || record.version !== undefined) &&
       (!Number.isSafeInteger(record.version) || record.version < 0)) invalid();
   if (record.hold !== undefined && typeof record.hold !== 'boolean') invalid();
-  // Missing hold is never permission; do not invent a missing stop generation.
-  return { ...record, hold: record.hold !== false || ['aborted', 'approval', 'error'].includes(record.outcome) };
+  if (record.finalReply !== undefined && (typeof record.finalReply !== 'string' ||
+      Buffer.byteLength(record.finalReply, 'utf8') > MAX_FINAL_REPLY_BYTES)) invalid();
+  // An old completed stop without its final answer cannot be reviewed for a
+  // prose-only approval request. Never make missing evidence resumable.
+  const replyMissing = record.outcome === 'completed' && !record.finalReply?.trim();
+  return { ...record, hold: record.hold !== false || replyMissing ||
+    ['aborted', 'approval', 'error'].includes(record.outcome) };
 }
 
 export async function readObservation(root, workerId) {

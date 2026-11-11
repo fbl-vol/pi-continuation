@@ -47,6 +47,21 @@ test('narrative completion requires an exact cited report and current hash for e
   }
 });
 
+test('a prose-only approval can justify a decision but never a resume or completion', () => {
+  const s = state();
+  const reply = 'Progress is ready. Can I deploy to production?';
+  const checkpoint = 'Progress is ready; deployment awaits a user decision.';
+  const evidence = 'Can I deploy to production?';
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'decision', evidence },
+    checkpoint, reply).notice.text, evidence);
+  assert.equal(planDisposition(s, { ...resume, action: 'pause', evidence }, checkpoint, reply).kind, 'pause');
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'decision', evidence },
+    '', reply).notice.text, evidence);
+  assert.equal(planDisposition(s, { ...resume, evidence }, checkpoint, reply).kind, 'reject');
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'completion', evidence,
+    reportHash: checkpointHash(checkpoint) }, checkpoint, reply).kind, 'reject');
+});
+
 test('human rearming preserves other pauses, budgets and successful delivery guards', () => {
   const s = state();
   s.budgets.w = { count: 2, hash: 'h' };

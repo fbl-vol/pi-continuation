@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeSupervisor, decodeObservation, newSupervisor } from '../src/contracts.mjs';
+import { decodeSupervisor, decodeObservation, newSupervisor, MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
 
 test('legacy normalization preserves pauses, pending work and conservative no-resend guards without rewriting input', () => {
   const legacy = { paused: true, workers: { w: { route: 'r', paused: true } },
@@ -39,6 +39,17 @@ test('old completion notices remain readable, but malformed report hashes cannot
   assert.throws(() => decodeSupervisor(state), { code: 'INVALID_RECORD' });
   state.notices.n.reportHash = 'a'.repeat(64);
   assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
+});
+
+test('a completed stop without a bounded final reply is held for inspection', () => {
+  const stop = { schemaVersion: 1, outcome: 'completed', stop: 'stop', version: 1,
+    session: { id: 's', file: '/session' }, hold: false };
+  assert.equal(decodeObservation(stop).hold, true);
+  assert.equal(decodeObservation({ ...stop, finalReply: 'Can I deploy?' }).hold, false);
+  assert.equal(decodeObservation({ ...stop, finalReply: '  ' }).hold, true);
+  assert.throws(() => decodeObservation({ ...stop, finalReply: 'é'.repeat(MAX_FINAL_REPLY_BYTES) }),
+    { code: 'INVALID_RECORD' });
+  assert.throws(() => decodeObservation({ ...stop, finalReply: 42 }), { code: 'INVALID_RECORD' });
 });
 
 test('observation decoding never invents a generation or clears a legacy hold', () => {

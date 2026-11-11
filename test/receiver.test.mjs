@@ -26,6 +26,7 @@ async function setup() {
   const state = { paused: false, ownerToken: token, ownerPid: process.pid, routes: { w1: { paused: false } },
     workers: { [worker.workerId]: { route: 'w1', paused: false, sessionId: worker.sessionId } } };
   const observation = { outcome: 'completed', stop: action.stop, version: 0, hold: false,
+    finalReply: 'Synthetic result: continue the approved task.',
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf-1' } };
   const persist = (name, value) => atomicJson(join(root, name), value);
   await persist('supervisor.json', state);
@@ -74,6 +75,17 @@ test('a legacy observation without an explicit cleared hold cannot start a conti
   const s = await setup();
   try {
     const { hold, ...legacy } = s.observation;
+    await s.persist(`observation-${s.worker.workerId}.json`, legacy);
+    assert.equal((await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version)).accepted, false);
+    assert.deepEqual(s.sent, []);
+    await assert.rejects(readJson(join(s.root, `receipt-${s.action.id}.json`)), { code: 'ENOENT' });
+  } finally { await s.close(); }
+});
+
+test('a completed legacy stop without the worker final reply cannot be resumed', async () => {
+  const s = await setup();
+  try {
+    const { finalReply, ...legacy } = s.observation;
     await s.persist(`observation-${s.worker.workerId}.json`, legacy);
     assert.equal((await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version)).accepted, false);
     assert.deepEqual(s.sent, []);

@@ -46,6 +46,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   worker.checkpoint = join(root, 'checkpoint.md');
   const stop = randomUUID();
   const observation = { outcome: 'completed', stop, version: 0, hold: false,
+    finalReply: 'Synthetic result: continue approved work.',
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf' } };
   await writeFile(worker.checkpoint, '# Work report\nValidated result\nAll assigned tasks and follow-ups completed.');
   // Match real registration: persisted checkpoint pins are canonical even when
@@ -112,12 +113,30 @@ async function fixture(t, { coordinatorInput = false } = {}) {
     state: () => readJson(join(root, 'supervisor.json')),
     onSnapshot: fn => { snapshotHook = fn; },
     command: args => command(args, ctx),
-    disposition: async (action, kind, reportHash) => tool('call', { workerId: worker.id, stop, action, kind,
-      evidence: 'Validated result', reportHash: reportHash ?? checkpointHash(await readFile(worker.checkpoint, 'utf8')) },
+    disposition: async (action, kind, reportHash, evidence = 'Validated result') => tool('call',
+      { workerId: worker.id, stop, action, kind, evidence,
+        reportHash: reportHash ?? checkpointHash(await readFile(worker.checkpoint, 'utf8')) },
     undefined, undefined, ctx),
     event: () => { for (const socket of subscriptions) socket.write(JSON.stringify({ event: 'pane.updated' }) + '\n'); },
   };
 }
+
+test('a final-reply approval question can suspend the worker and route an exact decision', async t => {
+  const s = await fixture(t);
+  const question = 'Can I deploy to production?';
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`),
+    { ...s.observation, finalReply: question });
+  assert.match((await s.disposition('resume', undefined, undefined, question)).content[0].text,
+    /Evidence is absent/);
+  const result = await s.disposition('notify', 'decision', undefined, question);
+  assert.match(result.content[0].text, /Material notice/);
+  const state = await s.state();
+  assert.equal(state.workers[s.worker.id].paused, true);
+  assert.equal(Object.values(state.notices)[0].text, question);
+  assert.equal(Object.values(state.notices)[0].kind, 'decision');
+  assert.equal(state.resumed[s.worker.id], undefined);
+  assert.equal(state.inflight[s.worker.id], undefined);
+});
 
 test('pre-acceptance coordinator rejection stays pending, then delivers once without a model wake', async t => {
   const s = await fixture(t, { coordinatorInput: true });
