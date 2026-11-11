@@ -92,7 +92,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return observation;
   };
   const attention = async () => {
-    if (!active() || !subscriptionLive || state.paused) return [];
+    if (!active() || !allowExperimentalActivation || !subscriptionLive || state.paused) return [];
     const result = [];
     for (const [id, binding] of Object.entries(state.workers)) {
       if (binding.paused || state.routes[binding.route]?.paused) continue;
@@ -109,7 +109,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return result;
   };
   const flushNotices = async () => {
-    if (!active() || !subscriptionLive || state.paused || !lastSnapshot) return;
+    if (!active() || !allowExperimentalActivation || !subscriptionLive || state.paused || !lastSnapshot) return;
     for (const notice of Object.values(state.notices ?? {})) {
       if (notice.status !== 'pending') continue;
       const route = state.routes[notice.route];
@@ -135,7 +135,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   };
   const wake = async ctx => {
     await flushNotices();
-    if (!active() || !subscriptionLive || !ctx.isIdle() || wakePending) return;
+    if (!active() || !allowExperimentalActivation || !subscriptionLive || !ctx.isIdle() || wakePending) return;
     const pending = await attention();
     if (!pending.length) return;
     for (const { id, stop } of pending) {
@@ -219,6 +219,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               notice.status = 'uncertain';
             }
           }
+          if (!allowExperimentalActivation) state.paused = true;
           state.ownerToken = token;
           state.ownerPid = process.pid;
           await commit();
@@ -344,6 +345,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       const text = await queue(async () => {
         if (!active() || !uuid(args.workerId) || !uuid(args.stop) || !args.evidence.trim())
           return 'No active owner or missing evidence';
+        if (!allowExperimentalActivation) return 'Activation disabled: prompt-hold boundary unverified';
         const binding = state.workers[args.workerId];
         if (!binding || state.paused || binding.paused || state.routes[binding.route]?.paused) return 'Paused';
         lastSnapshot = await snapshot(socketPath);

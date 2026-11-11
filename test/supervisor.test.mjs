@@ -161,6 +161,14 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     assert.match(thirdAnswer.content[0].text, /Two nudges/);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[workerId].paused, true);
     assert.equal(messages.filter(m => Array.isArray(m)).length, 2);
+    await handlers.get('session_shutdown')();
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
+    await pi.command('init', ctx);
+    assert.equal((await readJson(join(root, 'supervisor.json'))).paused, true);
+    assert.equal((await pi.tool('call', { workerId: siblingId, stop: siblingStop,
+      action: 'resume', evidence: 'concrete result A' }, undefined, undefined, ctx)).content[0].text,
+    'Activation disabled: prompt-hold boundary unverified');
+    assert.equal(messages.filter(m => Array.isArray(m)).length, 2);
   } finally {
     await handlers.get('session_shutdown')?.();
     await stopWorker?.();
