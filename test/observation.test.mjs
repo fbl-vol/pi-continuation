@@ -1,0 +1,136 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { bindObservation } from '../src/observation.mjs';
+
+function fakePi(sessionId, sessionFile) {
+  const handlers = new Map();
+  const entries = [];
+  const sessionManager = {
+    getSessionId: () => sessionId, getSessionFile: () => sessionFile,
+    getLeafId: () => 'leaf', getBranch: () => entries,
+  };
+  const notices = [];
+  const ctx = { mode: 'tui', cwd: '/project', sessionManager, isIdle: () => true,
+    ui: { confirm: async () => true, notify: (...args) => notices.push(args) } };
+  const pi = { on: (name, fn) => handlers.set(name, fn),
+    registerCommand: (name, definition) => { if (name === 'continuation-worker') pi.command = definition.handler; },
+    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
+  return { pi, ctx, notices, entries, emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
+}
+
+test('registration starts paused and a fork cannot inherit it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const original = fakePi('original', '/sessions/original.jsonl');
+  const fork = fakePi('fork', '/sessions/fork.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(original.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await original.emit('session_start');
+    await original.pi.command(checkpoint, original.ctx);
+    const workerId = original.entries[0].data.workerId;
+    const registered = JSON.parse(await readFile(join(root, `worker-${workerId}.json`)));
+    assert.equal(registered.paused, true);
+    assert.equal(registered.sessionId, 'original');
+
+    fork.entries.push(original.entries[0]);
+    bindObservation(fork.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await fork.emit('session_start', { reason: 'fork' });
+    await fork.emit('agent_settled', { aborted: false });
+    await assert.rejects(readFile(join(root, `observation-${workerId}.json`)), { code: 'ENOENT' });
+  } finally {
+    await original.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('same-session reload restores sticky abort hold and closes old receiver', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('same', '/sessions/same.jsonl');
+  const next = fakePi('same', '/sessions/same.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    await first.emit('agent_settled', { aborted: true });
+    await first.emit('session_shutdown');
+    next.entries.push(...first.entries);
+    const receiver = bindObservation(next.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await next.emit('session_start', { reason: 'reload' });
+    assert.equal(receiver.registered, true);
+    assert.equal(receiver.hold, true);
+  } finally {
+    await next.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a provider failure without a new assistant message cannot reuse an old completed stop', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  worker.entries.push({ type: 'message', id: 'old-assistant',
+    message: { role: 'assistant', stopReason: 'stop' } });
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    await worker.emit('agent_start');
+    await worker.emit('agent_settled', { aborted: false });
+    const observed = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(observed.outcome, 'unknown');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('aborted and UI prompt stops are held and working invalidates previous stop', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  worker.entries.push({ type: 'message', id: 'assistant-1', message: { role: 'assistant', stopReason: 'stop' } });
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    const observation = () => readFile(join(root, `observation-${id}.json`), 'utf8').then(JSON.parse);
+    await worker.emit('agent_settled', { aborted: true });
+    assert.equal((await observation()).outcome, 'aborted');
+    await worker.emit('ui_prompt_start');
+    await worker.emit('agent_settled', { aborted: false });
+    assert.equal((await observation()).outcome, 'approval');
+    await worker.emit('agent_start');
+    // Flush the queued atomic write without depending on a timer.
+    await worker.emit('agent_settled', { aborted: true });
+    assert.equal((await observation()).outcome, 'aborted');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
