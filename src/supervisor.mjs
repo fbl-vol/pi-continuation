@@ -73,9 +73,25 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   let serial = Promise.resolve();
   // Serialize snapshots too: a slower old rename must not overwrite a human pause.
   let writes = Promise.resolve();
+  let persistenceFailed = false;
   const commit = () => {
     const saved = structuredClone(state);
-    const writing = writes.then(() => atomicJson(stateFile(root), saved));
+    const writing = writes.then(async () => {
+      if (persistenceFailed) saved.paused = true;
+      try { await atomicJson(stateFile(root), saved); }
+      catch (error) {
+        // Fence every entry point, including human commands outside the model queue.
+        // A failed pause must not leave receivers trusting the old active snapshot.
+        persistenceFailed = true;
+        state.paused = true;
+        subscriptionLive = false;
+        closeEvents?.();
+        const closing = closeOwner;
+        closeOwner = undefined;
+        await closing?.();
+        throw error;
+      }
+    });
     // Keep the error visible to this caller, but allow the fail-closed pause write.
     writes = writing.catch(() => {});
     return writing;
@@ -87,15 +103,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       state.paused = true;
       state.reason = 'Internal error: global continuation paused for inspection';
       try { await commit(); }
-      catch {
-        // If even the pause cannot persist, withdraw the live owner endpoint.
-        // Retain the lock and any intents for inspection; never pretend to recover.
-        subscriptionLive = false;
-        closeEvents?.();
-        const closing = closeOwner;
-        closeOwner = undefined;
-        await closing?.();
-      }
+      catch { /* commit already withdrew the owner; lock/intents remain for inspection. */ }
       return state.reason;
     });
     return serial;

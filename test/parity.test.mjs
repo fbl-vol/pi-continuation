@@ -243,6 +243,17 @@ test('unpersistable pause withdraws the owner endpoint and retains the recovery 
   assert.equal(s.wakes.length + s.notices.length, 0);
 });
 
+test('a failed human pause also withdraws the owner instead of leaving the old active snapshot authoritative', async t => {
+  const s = await fixture(t);
+  const owner = await readJson(join(s.root, 'supervisor.lock'));
+  await rm(join(s.root, 'supervisor.json'));
+  await mkdir(join(s.root, 'supervisor.json'));
+  await assert.rejects(s.command('pause global'));
+  assert.equal(await ownerAlive(s.root, owner.token), false);
+  assert.deepEqual(await readJson(join(s.root, 'supervisor.lock')), owner);
+  assert.equal(s.wakes.length + s.notices.length, 0);
+});
+
 test('acknowledgement records completion without lifting any pause', async t => {
   const s = await fixture(t);
   await s.command(`pause worker ${s.worker.id}`);
