@@ -175,7 +175,10 @@ test('a changed checkpoint path isolates the worker instead of reading another a
   assert.equal(state.workers[other.id].paused, false);
   assert.equal(state.routes.w.paused, false);
   assert.match(state.workers[s.worker.id].reason, /checkpoint/);
-  assert.match((await s.disposition('resume')).content[0].text, /Paused/);
+  const disposition = (await s.disposition('resume')).content[0].text;
+  const afterMismatch = await s.state();
+  assert.match(disposition, /Paused/,
+    JSON.stringify({ reason: afterMismatch.reason, failure: afterMismatch.failure }));
 });
 
 test('a report edit during handoff is rejected before claiming a receipt', async t => {
