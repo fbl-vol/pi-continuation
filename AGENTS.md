@@ -3,6 +3,28 @@
 This is a public, personal project owned by `fbl-vol`, separate from any employer
 or customer repository. Read README.md for current implementation status.
 
+## Repository-scoped delivery autonomy
+
+The user explicitly authorizes agents assigned to this project to implement the
+agreed scope, start independent read-only reviews, evaluate and fix in-scope review
+findings, rerun validation, create coherent commits, and push code to the personal
+GitHub repository `fbl-vol/pi-continuation` without asking again for each step.
+They may create task branches and pull requests as part of this delivery. Keep one
+implementation writer; review agents must not edit source or delegate further.
+The implementation owner coordinates review, finding dispositions, verification,
+and GitHub delivery. Record the reviewed revision, material findings and their
+dispositions, checks, and remaining evidence gaps. Self-review is not independent
+review. Do not bypass failing hooks/checks, force-push, or auto-merge.
+
+This autonomy does not authorize npm publication, live package installation,
+worker registration or migration of existing supervisors, deployments, secret
+access, worktrees, unrelated repositories, or a material change to the agreed
+product/safety contract. Those actions retain their separate scoped approval
+requirements. Cross-platform support must reflect actual verification, not only
+mocked tests.
+
+## Engineering boundaries
+
 - Keep the public source generic. Never copy private skills, project instructions,
   checkpoints, session records, credentials, machine configuration, or customer
   details into this repository or its Git history.
