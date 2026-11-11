@@ -57,7 +57,8 @@ async function ownerServer(root, token) {
   };
 }
 
-export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH } = {}) {
+export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
+  allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
   let state;
   let closeOwner;
   let closeEvents;
@@ -312,6 +313,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       }
       if (verb === 'activate' || verb === 'pause') {
         const enabled = verb === 'activate';
+        if (enabled && !allowExperimentalActivation)
+          throw new Error('Activation disabled: Pi prompt-hold timing is not proven safe for real workers');
         if (enabled && !subscriptionLive) throw new Error('Herdr subscription lost; restart owner and inspect before activation');
         if (enabled && ((kind === 'worker' && state.inflight[id]) ||
             (kind === 'route' && Object.values(state.notices).some(n => n.route === id && n.status === 'uncertain'))))

@@ -15,7 +15,7 @@ These mechanisms have **only isolated local tests** so far. The packed artifact 
 
 Run `npm ci --legacy-peer-deps`, `npm test`, and `npm pack --dry-run`. Tests use fake Pi contexts, fake Herdr sockets, local loopback sockets, temporary files and competing child processes; they do not touch real workers. CI schedules isolated tests and payload checks on Linux, macOS, and Windows, but a scheduled check is not a passed platform result. Pi 1.5.0 and Herdr 0.9.5 (protocol 22) are the current development baseline, not a verified cross-platform support matrix. The package has one explicitly listed extension entrypoint and an explicit npm file allowlist; tests, local plans and checkpoint files are excluded.
 
-For a **separately authorized disposable** installation only, Pi accepts a local package with `pi install /absolute/path/to/pi-continuation` (this changes Pi settings). The intended TUI command sequence is:
+For a **separately authorized disposable** installation only, Pi accepts a local package with `pi install /absolute/path/to/pi-continuation` (this changes Pi settings). Activation is **disabled by default** because the prompt-hold race is not proven safe. Only a separately authorized disposable test can opt in by starting the test supervisor with `PI_CONTINUATION_EXPERIMENTAL_ACTIVATION=1`; this flag is not a safety fix or permission to bind real workers. The intended TUI command sequence for such a disposable test is:
 
 1. In each existing worker, `/continuation-worker <existing-checkpoint-path>`; save its displayed worker ID. A registration is observation-only and paused.
 2. In an existing coordinator if desired, `/continuation-coordinator`; save its displayed coordinator ID.

@@ -38,12 +38,14 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     terminal_id: 'coordinator-terminal', agent_session: { ...agent.agent_session,
       value: coordinatorRecord.sessionFile }, agent_status: 'working' };
   let subscription;
+  const subscriptionRequests = [];
   const siblingAgent = { ...agent, pane_id: sibling.paneId, tab_id: 'w2:t1',
     workspace_id: 'w2', terminal_id: 'terminal-two',
     agent_session: { ...agent.agent_session, value: sibling.sessionFile } };
   const herdr = net.createServer(socket => socket.once('data', data => {
     const req = JSON.parse(data.toString());
     if (req.method === 'events.subscribe') {
+      subscriptionRequests.push(req.params.subscriptions);
       subscription = socket;
       socket.write(JSON.stringify({ id: req.id, result: { type: 'subscription_started' } }) + '\n');
     } else if (req.method === 'session.snapshot') {
@@ -93,11 +95,19 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     bindCoordinator(coordinatorPi, { root, paneId: coordinatorRecord.paneId });
     await coordinatorHandlers.get('session_start')({}, coordinatorCtx);
     stopCoordinator = () => coordinatorHandlers.get('session_shutdown')();
-    bindSupervisor(pi, { root, socketPath: herdrPath });
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
+    await pi.command('init', ctx);
+    await pi.command(`add ${workerId} w1`, ctx);
+    await assert.rejects(pi.command(`activate worker ${workerId}`, ctx), /Activation disabled/);
+    assert.equal((await readJson(join(root, 'supervisor.json'))).workers[workerId].paused, true);
+    await handlers.get('session_shutdown')();
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: true });
     await pi.command('init', ctx);
     await pi.command(`add ${workerId} w1`, ctx);
     await pi.command(`add ${siblingId} w2`, ctx);
     await pi.command(`coordinator w1 ${coordinatorId}`, ctx);
+    assert.deepEqual(subscriptionRequests.at(-1).filter(s => s.type === 'pane.agent_status_changed')
+      .map(s => s.pane_id).sort(), ['w1:p1', 'w1:p2', 'w2:p1']);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[workerId].paused, true);
     await pi.command('activate worker ' + workerId, ctx);
     await pi.command('activate route w1', ctx);

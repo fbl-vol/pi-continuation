@@ -59,7 +59,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
         [crashedWorker]: { route: 'w1', paused: false, paneId: 'w1:p9', sessionId: 'other' } },
       handled: {}, inflight: { [crashedWorker]: { id: pendingAction, stop: randomUUID() } } });
     await new Promise(resolve => herdr.listen(socketPath, resolve));
-    bindSupervisor(pi, { root, socketPath });
+    bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
     await pi.command('init', ctx);
     await waitFor(() => messages.length === 1);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[crashedWorker].paused, true);
