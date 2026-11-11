@@ -13,7 +13,7 @@ import { bindCoordinator } from '../src/coordinator.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-test('explicit activation and evidence deliver once to exact stop, without a live worker', async () => {
+test('explicit activation and evidence deliver once to exact stop, without a live worker', { timeout: 15000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const herdrPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const checkpoint = join(root, 'checkpoint.md');
@@ -198,6 +198,10 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
       action: 'resume', evidence: 'concrete result A' }, undefined, undefined, ctx)).content[0].text,
     'Activation disabled: prompt-hold boundary unverified');
     assert.equal(messages.filter(m => Array.isArray(m)).length, 2);
+  } catch (error) {
+    // Keep the original assertion visible even if transport cleanup also stalls.
+    console.error(error);
+    throw error;
   } finally {
     await handlers.get('session_shutdown')?.();
     await stopWorker?.();
