@@ -41,7 +41,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   worker.workerId = worker.id;
   worker.checkpoint = join(root, 'checkpoint.md');
   const stop = randomUUID();
-  const observation = { outcome: 'completed', stop, version: 0,
+  const observation = { outcome: 'completed', stop, version: 0, hold: false,
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf' } };
   await writeFile(worker.checkpoint, 'State: backlog empty\nValidated result');
   // Match real registration: persisted checkpoint pins are canonical even when
@@ -252,6 +252,20 @@ test('a failed human pause also withdraws the owner instead of leaving the old a
   assert.equal(await ownerAlive(s.root, owner.token), false);
   assert.deepEqual(await readJson(join(s.root, 'supervisor.lock')), owner);
   assert.equal(s.wakes.length + s.notices.length, 0);
+});
+
+test('an observation without an explicit cleared hold cannot be acknowledged or resumed', async t => {
+  const s = await fixture(t);
+  const { hold, ...legacy } = s.observation;
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`), legacy);
+  assert.equal((await s.disposition('acknowledge')).content[0].text, 'Stale or ineligible stop');
+  assert.equal((await s.disposition('resume')).content[0].text, 'Stale or ineligible stop');
+  assert.equal((await s.disposition('notify', 'completion')).content[0].text, 'Stale or ineligible stop');
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`),
+    { ...s.observation, outcome: 'approval', hold: true });
+  assert.equal((await s.disposition('notify', 'completion')).content[0].text, 'Stale or ineligible stop');
+  assert.equal((await s.state()).handled[s.worker.id], undefined);
+  assert.deepEqual((await s.state()).notices, {});
 });
 
 test('acknowledgement records completion without lifting any pause', async t => {

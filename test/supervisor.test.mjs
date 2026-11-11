@@ -26,7 +26,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const sibling = { ...record, workerId: siblingId, paneId: 'w2:p1',
     sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl', checkpoint: join(root, 'sibling.md') };
   const siblingStop = randomUUID();
-  const observation = { outcome: 'completed', stop, version: 0,
+  const observation = { outcome: 'completed', stop, version: 0, hold: false,
     session: { id: record.sessionId, file: sessionFile, leaf: 'leaf' } };
   const agent = { pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1',
     terminal_id: 'terminal', cwd: '/project', agent: 'pi', agent_status: 'idle',

@@ -78,7 +78,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       return null;
     const observation = await readObservation(root, workerId);
     if (observation.session.id !== binding.sessionId || observation.session.file !== binding.sessionFile ||
-        observation.outcome !== 'completed' || !observation.stop) return null;
+        observation.outcome !== 'completed' || observation.hold || !observation.stop) return null;
     return observation;
   };
   const checkpointPath = workerId => pinnedCheckpoint(root, workerId, state.workers[workerId]);
@@ -445,6 +445,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'Worker observation unreadable; only that worker paused';
         }
         if (!observation || observation.stop !== args.stop ||
+            (args.action === 'notify' && args.kind === 'completion' &&
+              (observation.outcome !== 'completed' || observation.hold)) ||
             (args.action === 'resume' && state.resumed[args.workerId] === args.stop) ||
             (args.action !== 'notify' && state.handled[args.workerId] === args.stop))
           return 'Stale or ineligible stop';
