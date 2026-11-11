@@ -1,0 +1,22 @@
+{
+  "name": "@fbl-vol/pi-continuation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Explicit, bounded continuation supervision for Pi workers in Herdr.",
+  "type": "module",
+  "license": "MIT",
+  "author": "fbl-vol",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fbl-vol/pi-continuation.git"
+  },
+  "homepage": "https://github.com/fbl-vol/pi-continuation#readme",
+  "bugs": {
+    "url": "https://github.com/fbl-vol/pi-continuation/issues"
+  },
+  "keywords": ["pi-package", "pi", "herdr", "supervision", "continuation"],
+  "files": ["README.md", "LICENSE"],
+  "pi": {
+    "extensions": []
+  }
+}
