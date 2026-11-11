@@ -10,7 +10,8 @@ const cli = ['node', 'pi'];
 test('only an explicit first extension matching the worker guard qualifies', async () => {
   assert.equal(await firstExtensionIs(extension, [...cli, '-e', extension, '-e', other]), true);
   assert.equal(await firstExtensionIs(extension, [...cli, '--extension', extension]), true);
-  assert.equal(await firstExtensionIs(extension, [...cli, `--extension=${extension}`]), true);
+  assert.equal(await firstExtensionIs(extension, [...cli, `--extension=${extension}`]), false);
+  assert.equal(await firstExtensionIs(extension, [...cli, '--name', '-e', extension]), false);
   assert.equal(await firstExtensionIs(extension, [...cli, '-e', other, '-e', extension]), false);
   assert.equal(await firstExtensionIs(extension, [...cli, '-e', 'builtin:mcp', '-e', extension]), false);
   assert.equal(await firstExtensionIs(extension, [...cli, '--', '-e', extension]), false);

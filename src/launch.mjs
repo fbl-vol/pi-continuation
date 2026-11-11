@@ -2,16 +2,11 @@ import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 // Pi loads explicit -e extensions ahead of discovered packages, in CLI order.
-// Our synchronous ui_prompt_start listener must be first: a preceding handler
-// can stall notification while an approval dialog is already open.
+// Require the guard as the first *option*, not the first matching raw argv:
+// another option may consume "-e" as its value without Pi loading this file.
 export async function firstExtensionIs(extensionFile, argv = process.argv) {
-  let source;
-  for (let i = 2; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === '--') break;
-    if (flag === '-e' || flag === '--extension') { source = argv[i + 1]; break; }
-    if (flag.startsWith('--extension=')) { source = flag.slice('--extension='.length); break; }
-  }
+  if (argv[2] !== '-e' && argv[2] !== '--extension') return false;
+  const source = argv[3];
   if (!source || source.startsWith('builtin:')) return false;
   try { return await realpath(resolve(source)) === await realpath(extensionFile); }
   catch { return false; }
