@@ -14,10 +14,13 @@ import { checkpointHash } from '../src/policy.mjs';
 import { ownerAlive } from '../src/ipc.mjs';
 
 async function eventually(predicate) {
-  for (let i = 0; i < 100; i++) {
+  // Polling the same JSON file too aggressively can contend with atomic replacement
+  // on Windows; the deadline bounds a genuinely missing state without a 1s CI race.
+  const deadline = Date.now() + 5000;
+  do {
     if (await predicate()) return;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  } while (Date.now() < deadline);
   assert.fail('Expected state did not arrive');
 }
 
