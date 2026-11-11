@@ -23,7 +23,8 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
   const intent = await readJson(join(root, `intent-${action.id}.json`));
   const session = currentSession(ctx);
   const version = stopVersion();
-  if (observation.version !== version || isHeld() || !await ownerAlive(root, owner.token))
+  if (observation.version !== version || observation.hold || isHeld() ||
+      !await ownerAlive(root, owner.token))
     return { accepted: false, reason: 'stop changed or supervisor unavailable' };
   // Persist the one-use receipt, then recheck current state and stop generation.
   // The final eligibility check and message injection have no intervening await.
@@ -48,8 +49,12 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
     throw error;
   }
   const latest = await readSupervisor(root);
+  const latestObservation = await readObservation(root, worker.workerId);
   if (latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
+      latestObservation.hold || latestObservation.version !== version ||
+      latestObservation.stop !== action.stop || latestObservation.session.id !== session.id ||
+      latestObservation.session.file !== session.file || latestObservation.session.leaf !== session.leaf ||
       !ctx.isIdle() || isHeld() || stopVersion() !== version || currentSession(ctx).leaf !== session.leaf) {
     return { accepted: false, reason: 'session changed after receipt' };
   }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
@@ -24,7 +25,7 @@ async function setup() {
   const action = { id: randomUUID(), ownerToken: token, workerId: worker.workerId, stop: randomUUID() };
   const state = { paused: false, ownerToken: token, ownerPid: process.pid, routes: { w1: { paused: false } },
     workers: { [worker.workerId]: { route: 'w1', paused: false, sessionId: worker.sessionId } } };
-  const observation = { outcome: 'completed', stop: action.stop, version: 0,
+  const observation = { outcome: 'completed', stop: action.stop, version: 0, hold: false,
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf-1' } };
   const persist = (name, value) => atomicJson(join(root, name), value);
   await persist('supervisor.json', state);
@@ -66,6 +67,33 @@ test('exact stop accepted once; duplicate send cannot start another turn', async
     const repeated = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version);
     assert.equal(repeated.accepted, false);
     assert.equal(s.sent.length, 1);
+  } finally { await s.close(); }
+});
+
+test('a legacy observation without an explicit cleared hold cannot start a continuation', async () => {
+  const s = await setup();
+  try {
+    const { hold, ...legacy } = s.observation;
+    await s.persist(`observation-${s.worker.workerId}.json`, legacy);
+    assert.equal((await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version)).accepted, false);
+    assert.deepEqual(s.sent, []);
+    await assert.rejects(readJson(join(s.root, `receipt-${s.action.id}.json`)), { code: 'ENOENT' });
+  } finally { await s.close(); }
+});
+
+test('a persisted approval hold after the first check blocks delivery after receipt claim', async () => {
+  const s = await setup();
+  try {
+    let checks = 0;
+    s.ctx.isIdle = () => {
+      if (++checks === 1) writeFileSync(join(s.root, `observation-${s.worker.workerId}.json`),
+        JSON.stringify({ ...s.observation, hold: true }));
+      return true;
+    };
+    const result = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version);
+    assert.equal(result.accepted, false);
+    assert.equal((await readJson(join(s.root, `receipt-${s.action.id}.json`))).status, 'accepted');
+    assert.deepEqual(s.sent, []);
   } finally { await s.close(); }
 });
 
