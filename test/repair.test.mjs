@@ -54,7 +54,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
     });
     await atomicJson(join(root, 'supervisor.json'), { paused: false, routes: { w1: { paused: false } },
       workers: { [workerId]: { workerId, route: 'w1', paneId: agent.pane_id,
-        sessionId: 'native', sessionFile, cwd: agent.cwd, terminalId: agent.terminal_id,
+        sessionId: 'native', sessionFile, checkpoint, cwd: agent.cwd, terminalId: agent.terminal_id,
         workspaceId: agent.workspace_id, tabId: agent.tab_id,
         sessionKind: 'path', sessionValue: sessionFile, paused: false },
         [crashedWorker]: { route: 'w1', paused: false, paneId: 'w1:p9', sessionId: 'other' } },

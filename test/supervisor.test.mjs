@@ -93,7 +93,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
         getSessionFile: () => coordinatorRecord.sessionFile, getLeafId: () => 'coordinator-leaf',
         getBranch: () => [{ type: 'custom', customType: 'pi-continuation-coordinator',
           data: { id: coordinatorId, sessionId: coordinatorRecord.sessionId, paneId: coordinatorRecord.paneId } }] } };
-    bindCoordinator(coordinatorPi, { root, paneId: coordinatorRecord.paneId });
+    bindCoordinator(coordinatorPi, { root, paneId: coordinatorRecord.paneId, socketPath: herdrPath });
     await coordinatorHandlers.get('session_start')({}, coordinatorCtx);
     stopCoordinator = () => coordinatorHandlers.get('session_shutdown')();
     bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
@@ -168,6 +168,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     const secondAnswer = await pi.tool('call', { workerId, stop: second, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
     assert.match(secondAnswer.content[0].text, /delivered/);
+    coordinatorAgent.agent_status = 'working';
     const third = randomUUID();
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: third });
     const thirdAnswer = await pi.tool('call', { workerId, stop: third, action: 'resume', evidence: 'concrete result A' },
@@ -175,6 +176,20 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     assert.match(thirdAnswer.content[0].text, /Two nudges/);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[workerId].paused, true);
     assert.equal(messages.filter(m => Array.isArray(m)).length, 2);
+    const exhausted = Object.values((await readJson(join(root, 'supervisor.json'))).notices)
+      .filter(n => n.stop === third && n.kind === 'blocker');
+    assert.equal(exhausted.length, 1);
+    assert.equal(exhausted[0].status, 'pending');
+    assert.equal((await readJson(join(root, 'supervisor.json'))).routes.w1.paused, false);
+    const noticesBefore = coordinatorMessages.length;
+    coordinatorAgent.agent_status = 'idle';
+    subscription.write(JSON.stringify({ event: 'pane.agent_status_changed', data: {} }) + '\n');
+    for (let i = 0; i < 100; i++) {
+      if ((await readJson(join(root, 'supervisor.json'))).notices[exhausted[0].id].status === 'sent') break;
+      await wait(10);
+    }
+    assert.equal(coordinatorMessages.length, noticesBefore + 1);
+    assert.equal((await readJson(join(root, 'supervisor.json'))).notices[exhausted[0].id].status, 'sent');
     await handlers.get('session_shutdown')();
     bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
     await pi.command('init', ctx);

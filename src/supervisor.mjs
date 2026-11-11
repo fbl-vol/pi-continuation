@@ -99,6 +99,14 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         observation.outcome !== 'completed' || !observation.stop) return null;
     return observation;
   };
+  const checkpointPath = async workerId => {
+    const binding = state.workers[workerId];
+    const record = await readJson(join(root, `worker-${workerId}.json`));
+    const path = await realpath(record.checkpoint);
+    if (!binding.checkpoint || path !== binding.checkpoint || !(await stat(path)).isFile())
+      throw new Error('Registered checkpoint identity changed');
+    return path;
+  };
   const isolateUnavailable = async () => {
     if (!active() || !lastSnapshot) return;
     let changed = false;
@@ -118,8 +126,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       if (!sameOccupant(agent, binding)) reason = 'Worker identity unavailable';
       else {
         try {
-          const record = await readJson(join(root, `worker-${id}.json`));
-          if (!(await stat(record.checkpoint)).isFile()) throw new Error('Not a file');
+          await checkpointPath(id);
         } catch { reason = 'Worker checkpoint unavailable'; }
       }
       if (!reason) continue;
@@ -174,6 +181,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
       try {
         const receipt = await sendAction(root, { ...notice, ownerToken: state.ownerToken }, route.coordinator.id);
+        if (receipt.accepted === false && receipt.stale === true && receipt.id === notice.id) {
+          notice.status = 'stale';
+          await commit();
+          continue;
+        }
         if (receipt.accepted === false && receipt.deferred === true && receipt.id === notice.id) {
           notice.status = 'pending';
           await commit();
@@ -200,10 +212,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const evidence = [];
     for (const { id, stop } of pending) {
       try {
-        const record = await readJson(join(root, `worker-${id}.json`));
-        const checkpoint = (await readFile(record.checkpoint, 'utf8')).slice(0, 4096);
+        const path = await checkpointPath(id);
+        const checkpoint = (await readFile(path, 'utf8')).slice(0, 4096);
         evidence.push({ id, outcome: stop.outcome, stop: stop.stop,
-          checkpointPath: record.checkpoint, checkpoint });
+          checkpointPath: path, checkpoint });
       } catch {
         state.workers[id].paused = true;
       }
@@ -280,6 +292,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           state.repair ??= {};
           state.notices ??= {};
           state.inflight ??= {};
+          for (const [workerId, binding] of Object.entries(state.workers)) {
+            if (binding.checkpoint) continue;
+            // Older bindings did not pin checkpoint identity; observation is safe,
+            // but continuing from a newly pinned path needs explicit activation.
+            binding.paused = true;
+            binding.reason = 'Checkpoint binding requires inspection and activation';
+            try {
+              const record = await readJson(join(root, `worker-${workerId}.json`));
+              binding.checkpoint = await realpath(record.checkpoint);
+            } catch { /* Remain paused until the missing binding is repaired. */ }
+          }
           for (const workerId of Object.keys(state.inflight)) {
             if (state.workers[workerId]) state.workers[workerId].paused = true;
           }
@@ -468,8 +491,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'Stale or ineligible stop';
         let checkpoint;
         try {
-          const record = await readJson(join(root, `worker-${args.workerId}.json`));
-          checkpoint = await readFile(record.checkpoint, 'utf8');
+          checkpoint = await readFile(await checkpointPath(args.workerId), 'utf8');
         } catch {
           binding.paused = true; await commit();
           return 'Worker checkpoint unreadable; only that worker paused';
@@ -514,7 +536,19 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           !previous.checkpoint?.includes(args.evidence.trim());
         const count = newResult ? 0 : previous?.count ?? 0;
         if (count >= 2) {
-          binding.paused = true; await commit();
+          binding.paused = true;
+          binding.reason = 'Two nudges without evidenced progress';
+          state.handled[args.workerId] = args.stop;
+          state.dispositions[args.workerId] = { stop: args.stop, action: 'blocker' };
+          if (state.routes[binding.route]?.coordinator && !Object.values(state.notices).some(n =>
+              n.workerId === args.workerId && n.stop === args.stop && n.kind === 'blocker')) {
+            const noticeId = randomUUID();
+            state.notices[noticeId] = { id: noticeId, workerId: args.workerId, stop: args.stop,
+              kind: 'blocker', text: binding.reason + '; inspect before resuming',
+              route: binding.route, status: 'pending' };
+          }
+          await commit();
+          await flushNotices();
           return 'Two nudges without evidenced progress; worker paused';
         }
         if (_signal?.aborted || state.paused || binding.paused || state.routes[binding.route]?.paused)

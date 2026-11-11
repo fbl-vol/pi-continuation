@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
@@ -68,7 +69,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
       customType: 'pi-continuation-coordinator', data: coordinator }],
   } };
   bindCoordinator({ on: (name, fn) => ch.set(name, fn), registerCommand: () => {},
-    sendMessage: message => notices.push(message) }, { root, paneId: coordinator.paneId });
+    sendMessage: message => notices.push(message) }, { root, paneId: coordinator.paneId, socketPath });
   await ch.get('session_start')({}, cctx);
   if (coordinatorInput) ch.get('input')({ source: 'interactive' });
   const ctx = { mode: 'tui', isIdle: () => false,
@@ -118,6 +119,35 @@ test('pre-acceptance coordinator rejection stays pending, then delivers once wit
   await eventually(async () => Object.values((await s.state()).notices)[0].status === 'sent');
   assert.equal(s.notices.length, 1);
   assert.equal(s.wakes.length, 0);
+});
+
+test('completion superseded during handoff is rejected by the recipient without a route pause', async t => {
+  const s = await fixture(t);
+  s.cctx.isIdle = () => {
+    writeFileSync(join(s.root, `observation-${s.worker.id}.json`), JSON.stringify({
+      ...s.observation, outcome: 'working', stop: null,
+    }));
+    return true;
+  };
+  await s.disposition('notify', 'completion');
+  assert.equal(Object.values((await s.state()).notices)[0].status, 'stale');
+  assert.equal((await s.state()).routes.w.paused, false);
+  assert.equal(s.notices.length, 0);
+});
+
+test('a changed checkpoint path isolates the worker instead of reading another assignment', async t => {
+  const s = await fixture(t, { coordinatorInput: true });
+  const other = await s.createWorker();
+  await s.command(`add ${other.id} w`);
+  await s.command(`activate worker ${other.id}`);
+  await atomicJson(join(s.root, `worker-${s.worker.id}.json`), { ...s.worker, checkpoint: other.checkpoint });
+  s.event();
+  await eventually(async () => (await s.state()).workers[s.worker.id].paused);
+  const state = await s.state();
+  assert.equal(state.workers[other.id].paused, false);
+  assert.equal(state.routes.w.paused, false);
+  assert.match(state.workers[s.worker.id].reason, /checkpoint/);
+  assert.match((await s.disposition('resume')).content[0].text, /Paused/);
 });
 
 test('post-acceptance coordinator race remains uncertain and is never retried', async t => {

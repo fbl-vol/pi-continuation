@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
 import { workerEndpoint, ownerAlive } from './receiver.mjs';
 import { currentSession } from './observation.mjs';
+import { snapshot, sameOccupant } from './herdr.mjs';
 
-export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID } = {}) {
+export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
+  socketPath = process.env.HERDR_SOCKET_PATH } = {}) {
   let close;
   let coordinator;
   let generation = 0;
@@ -35,6 +37,18 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       close = await listen(record, ctx);
     } catch { coordinator = undefined; }
   });
+
+  async function completionCurrent(state, notice) {
+    if (notice.kind !== 'completion') return true;
+    const worker = state.workers?.[notice.workerId];
+    if (!worker) return false;
+    const live = await snapshot(socketPath);
+    const agent = live.agents.find(a => a.pane_id === worker.paneId);
+    if (!sameOccupant(agent, worker) || agent.agent_status !== 'idle') return false;
+    const observation = await readJson(join(root, `observation-${notice.workerId}.json`));
+    return observation.stop === notice.stop && observation.outcome === 'completed' &&
+      observation.session?.id === worker.sessionId && observation.session?.file === worker.sessionFile;
+  }
 
   async function listen(record, ctx) {
     const address = workerEndpoint(root, record.id);
@@ -66,9 +80,14 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
             socket.end(JSON.stringify({ accepted: false, deferred: true, id: notice.id }) + '\n');
             return;
           }
+          if (!await completionCurrent(state, notice)) {
+            socket.end(JSON.stringify({ accepted: false, stale: true, id: notice.id }) + '\n');
+            return;
+          }
           await claim(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'accepted' });
+          const completionStillCurrent = await completionCurrent(state, notice);
           const latest = await readJson(join(root, 'supervisor.json'));
-          if (latest.paused || latest.routes?.[notice.route]?.paused ||
+          if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
               latest.routes?.[notice.route]?.coordinator?.id !== record.id ||
               humanPending || uiPromptActive || !ctx.isIdle() || generation !== version || currentSession(ctx).leaf !== now.leaf) {
             socket.end('{"accepted":false}\n'); return;
