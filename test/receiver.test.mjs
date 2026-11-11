@@ -58,6 +58,19 @@ test('exact stop accepted once; duplicate send cannot start another turn', async
   } finally { await s.close(); }
 });
 
+test('approval hold opening after persisted receipt rejects injection', async () => {
+  const s = await setup();
+  try {
+    let held = false;
+    let checks = 0;
+    s.ctx.isIdle = () => { if (++checks === 2) held = true; return true; };
+    const result = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version, () => held);
+    assert.equal(result.accepted, false);
+    assert.equal((await readJson(join(s.root, `receipt-${s.action.id}.json`))).status, 'accepted');
+    assert.deepEqual(s.sent, []);
+  } finally { await s.close(); }
+});
+
 test('human input begun before receipt cannot inherit a prior stop', async () => {
   const s = await setup();
   try {

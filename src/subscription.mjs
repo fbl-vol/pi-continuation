@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { endpoint, snapshot } from './herdr.mjs';
 
 // Subscribe before the first read. Events only invalidate a snapshot, never replay onto it.
-export function observe(socketPath, onSnapshot, onDisconnect) {
+export function observe(socketPath, onSnapshot, onDisconnect, paneIds = []) {
   const id = randomUUID();
   const socket = net.createConnection(endpoint(socketPath));
   let buffer = '';
@@ -37,8 +37,9 @@ export function observe(socketPath, onSnapshot, onDisconnect) {
     finally { reading = false; }
   };
   socket.on('connect', () => socket.write(JSON.stringify({ id, method: 'events.subscribe', params: {
-    subscriptions: [{ type: 'pane.agent_status_changed' }, { type: 'pane.updated' },
-      { type: 'pane.agent_detected' }, { type: 'pane.closed' }, { type: 'pane.exited' }, { type: 'workspace.closed' }],
+    subscriptions: [{ type: 'pane.updated' }, { type: 'pane.agent_detected' },
+      { type: 'pane.closed' }, { type: 'pane.exited' }, { type: 'workspace.closed' },
+      ...[...new Set(paneIds)].map(pane_id => ({ type: 'pane.agent_status_changed', pane_id }))],
   } }) + '\n'));
   socket.on('data', chunk => {
     buffer += chunk.toString('utf8');

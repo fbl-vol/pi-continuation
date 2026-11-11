@@ -35,7 +35,8 @@
     "src/supervisor.mjs"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "scripts": {
     "test": "node --test",

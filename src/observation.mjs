@@ -33,7 +33,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let pendingWrite = Promise.resolve();
   const startReceiver = async ctx => {
     if (!worker) return;
-    closeReceiver = await receive(root, worker, pi, ctx, () => stopVersion);
+    closeReceiver = await receive(root, worker, pi, ctx, () => stopVersion, () => hold);
   };
   pi.on('input', event => {
     if (event.source === 'interactive' || event.source === 'rpc') stopVersion++;
@@ -44,8 +44,15 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       .catch(() => { if (worker === owner) worker = undefined; });
     return pendingWrite;
   };
-  pi.on('ui_prompt_start', () => { hold = true; });
-  pi.on('tool_execution_end', event => { if (event.isError) hold = true; });
+  pi.on('ui_prompt_start', (_event, ctx) => {
+    if (!worker) return; // Registration's own confirmation is not a worker approval hold.
+    hold = true;
+    stopVersion++;
+    void observe({ session: currentSession(ctx), outcome: 'approval', stop: null, version: stopVersion });
+  });
+  pi.on('tool_execution_end', event => {
+    if (event.isError && worker) { hold = true; stopVersion++; }
+  });
 
   pi.on('session_start', async (_event, ctx) => {
     worker = undefined;

@@ -63,16 +63,25 @@ test('one corrective wake then only the unresolved worker is suspended', async (
     await pi.command('init', ctx);
     await waitFor(() => messages.length === 1);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[crashedWorker].paused, true);
-    handlers.get('agent_start')();
+    handlers.get('before_agent_start')({ messageType: 'user' });
+    handlers.get('agent_settled')({}, ctx);
+    assert.equal(messages.length, 1);
+    assert.equal((await readJson(join(root, 'supervisor.json'))).repair[workerId].count, 0);
+    handlers.get('before_agent_start')({ messageType: 'custom',
+      message: { customType: 'pi-continuation-attention' } });
     handlers.get('agent_settled')({}, ctx);
     await waitFor(() => messages.length === 2);
-    handlers.get('agent_start')();
+    handlers.get('before_agent_start')({ messageType: 'custom',
+      message: { customType: 'pi-continuation-attention' } });
     handlers.get('agent_settled')({}, ctx);
     await waitFor(async () => (await readJson(join(root, 'supervisor.json'))).workers[workerId].paused);
     assert.equal(messages.length, 2);
     const state = await readJson(join(root, 'supervisor.json'));
     assert.equal(state.repair[workerId].failure, 'Unresolved after corrective wake');
     assert.equal(state.routes.w1.paused, false);
+    await handlers.get('session_shutdown')();
+    await pi.command('init', ctx);
+    assert.notEqual((await readJson(join(root, 'supervisor.lock'))).token, state.ownerToken);
   } finally {
     await handlers.get('session_shutdown')?.();
     await new Promise(resolve => herdr.close(resolve));

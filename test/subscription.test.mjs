@@ -22,7 +22,7 @@ test('events_lost invalidates subscription instead of replaying a partial histor
   try {
     await new Promise(resolve => server.listen(endpoint(socketPath), resolve));
     const error = await new Promise(resolve => {
-      const close = observe(socketPath, () => {}, resolve);
+      const close = observe(socketPath, () => {}, resolve, ['w1:p1']);
       close.ready.catch(resolve);
     });
     assert.match(error.message, /events_lost/);
@@ -41,7 +41,9 @@ test('subscribe before snapshot; overlapping events cause another authoritative 
     const req = JSON.parse(chunk.toString());
     if (req.method === 'events.subscribe') {
       subscription = socket;
-      assert.ok(req.params.subscriptions.some(s => s.type === 'pane.agent_status_changed'));
+      assert.ok(req.params.subscriptions.some(s => s.type === 'pane.agent_status_changed' && s.pane_id === 'w1:p1'));
+      assert.ok(req.params.subscriptions.every(s => s.type !== 'pane.agent_status_changed' ||
+        typeof s.pane_id === 'string'));
       socket.write(JSON.stringify({ id: req.id, result: { type: 'subscription_started' } }) + '\n');
     } else {
       assert.equal(req.method, 'session.snapshot');
@@ -59,7 +61,7 @@ test('subscribe before snapshot; overlapping events cause another authoritative 
       close = observe(socketPath, state => {
         seen.push(state.agents[0].pane_id);
         if (seen.length === 2) resolve();
-      }, reject);
+      }, reject, ['w1:p1']);
     });
     close();
     assert.deepEqual(seen, ['p1', 'p2']);

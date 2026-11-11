@@ -30,12 +30,14 @@ test('registration starts paused and a fork cannot inherit it', async () => {
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
-    bindObservation(original.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    const observer = bindObservation(original.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    original.ctx.ui.confirm = async () => { await original.emit('ui_prompt_start'); return true; };
     await original.emit('session_start');
     await original.pi.command(checkpoint, original.ctx);
     const workerId = original.entries[0].data.workerId;
     const registered = JSON.parse(await readFile(join(root, `worker-${workerId}.json`)));
     assert.equal(registered.paused, true);
+    assert.equal(observer.hold, false);
     assert.equal(registered.sessionId, 'original');
 
     fork.entries.push(original.entries[0]);

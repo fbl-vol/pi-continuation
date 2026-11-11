@@ -12,7 +12,7 @@ export function workerEndpoint(root, workerId, platform = process.platform) {
 }
 
 // Never start this listener without an explicitly registered native worker session.
-export async function receive(root, worker, pi, context, stopVersion) {
+export async function receive(root, worker, pi, context, stopVersion, isHeld) {
   const address = workerEndpoint(root, worker.workerId);
   const server = net.createServer(socket => {
     let input = '';
@@ -27,7 +27,7 @@ export async function receive(root, worker, pi, context, stopVersion) {
       try { action = JSON.parse(line); }
       catch { socket.end('{"accepted":false}\n'); return; }
       try {
-        const response = await accept(root, worker, action, context, pi, stopVersion);
+        const response = await accept(root, worker, action, context, pi, stopVersion, isHeld);
         socket.end(JSON.stringify(response) + '\n');
       } catch { socket.end('{"accepted":false}\n'); }
     });
@@ -42,7 +42,8 @@ export async function receive(root, worker, pi, context, stopVersion) {
   };
 }
 
-export async function accept(root, worker, action, ctx, pi, stopVersion = () => 0) {
+export async function accept(root, worker, action, ctx, pi, stopVersion = () => 0,
+  isHeld = () => false) {
   if (!action || typeof action.id !== 'string' || !/^[a-f0-9-]{36}$/.test(action.id))
     return { accepted: false, reason: 'invalid action' };
   const state = await readJson(join(root, 'supervisor.json'));
@@ -52,10 +53,10 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
   const intent = await readJson(join(root, `intent-${action.id}.json`));
   const session = currentSession(ctx);
   const version = stopVersion();
-  if (observation.version !== version || !await ownerAlive(root, owner.token))
+  if (observation.version !== version || isHeld() || !await ownerAlive(root, owner.token))
     return { accepted: false, reason: 'stop changed or supervisor unavailable' };
-  // The whole check-to-injection interval is synchronous after these reads. If
-  // anything changes during the reads, the worker's stop identity is checked again.
+  // Persist the one-use receipt, then recheck current state and stop generation.
+  // The final eligibility check and message injection have no intervening await.
   if (ctx.mode !== 'tui' || !ctx.isIdle() || owner.token !== state.ownerToken ||
       owner.token !== action.ownerToken || owner.pid !== state.ownerPid ||
       state.paused ||
@@ -79,7 +80,7 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
   const latest = await readJson(join(root, 'supervisor.json'));
   if (latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
-      !ctx.isIdle() || stopVersion() !== version || currentSession(ctx).leaf !== session.leaf) {
+      !ctx.isIdle() || isHeld() || stopVersion() !== version || currentSession(ctx).leaf !== session.leaf) {
     return { accepted: false, reason: 'session changed after receipt' };
   }
   pi.sendMessage({ customType: 'pi-continuation',
