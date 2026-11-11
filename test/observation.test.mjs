@@ -14,15 +14,18 @@ function fakePi(sessionId, sessionFile) {
     getLeafId: () => 'leaf', getBranch: () => entries,
   };
   const notices = [];
+  const terminalInput = new Set();
   const ctx = { mode: 'tui', cwd: '/project', sessionManager, isIdle: () => true,
-    ui: { confirm: async () => true, notify: (...args) => notices.push(args) } };
+    ui: { confirm: async () => true, notify: (...args) => notices.push(args),
+      onTerminalInput: handler => { terminalInput.add(handler); return () => terminalInput.delete(handler); } } };
   const pi = { on: (name, fn) => handlers.set(name, fn),
     registerCommand: (name, definition) => {
       if (name === 'continuation-worker') pi.command = definition.handler;
       if (name === 'continuation-worker-clear-hold') pi.clearHold = definition.handler;
     },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
-  return { pi, ctx, notices, entries, emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
+  return { pi, ctx, notices, entries, terminalInput,
+    emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
 
 test('failed initial observation leaves registration inert and reports failure instead of success', async () => {
@@ -150,6 +153,38 @@ test('sticky hold survives a subsequent working observation and restart until ex
     else process.env.HERDR_ENV = prior;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('raw user input holds a worker before Pi handles a built-in dialog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    assert.equal(worker.terminalInput.size, 1);
+
+    for (const input of worker.terminalInput) input('/model');
+    assert.equal(observer.hold, true);
+    worker.entries.push({ type: 'message', id: 'finished',
+      message: { role: 'assistant', stopReason: 'stop' } });
+    await worker.emit('agent_settled', { aborted: false });
+    const observed = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(observed.outcome, 'approval');
+    assert.equal(observed.hold, true);
+    assert.notEqual(observed.stop, null);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.equal(worker.terminalInput.size, 0);
 });
 
 test('a provider failure without a new assistant message cannot reuse an old completed stop', async () => {

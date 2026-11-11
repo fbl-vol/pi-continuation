@@ -27,6 +27,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   const lastAssistantId = ctx => [...ctx.sessionManager.getBranch()].reverse().find(e =>
     e.type === 'message' && e.message?.role === 'assistant')?.id;
   let closeReceiver;
+  let stopTerminalInput;
   let pendingWrite = Promise.resolve();
   const startReceiver = async ctx => {
     if (!worker) return;
@@ -50,6 +51,16 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       });
     return pendingWrite;
   };
+  const watchTerminalInput = ctx => {
+    // This callback runs before Pi handles built-in menus and dialogs, which do
+    // not emit ui_prompt_start. Any human interaction invalidates the stop.
+    stopTerminalInput = ctx.ui.onTerminalInput(() => {
+      if (!worker || hold) return;
+      hold = true;
+      stopVersion++;
+      void observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+    });
+  };
   pi.on('ui_prompt_start', (_event, ctx) => {
     if (!worker) return; // Registration's own confirmation is not a worker approval hold.
     hold = true;
@@ -64,6 +75,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   });
 
   pi.on('session_start', async (_event, ctx) => {
+    stopTerminalInput?.();
+    stopTerminalInput = undefined;
     worker = undefined;
     if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') return;
     // A fork/new session has a different ID. A copied session entry never binds it.
@@ -83,9 +96,15 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           if (Number.isSafeInteger(prior.version) && prior.version >= 0) stopVersion = prior.version;
         } catch (error) { hold = true; report('restore observation', error, ctx); }
         if (!ctx.isIdle()) previousAssistantId = lastAssistantId(ctx);
+        watchTerminalInput(ctx);
         await startReceiver(ctx);
       }
-    } catch (error) { worker = undefined; report('restore registration', error, ctx); }
+    } catch (error) {
+      worker = undefined;
+      stopTerminalInput?.();
+      stopTerminalInput = undefined;
+      report('restore registration', error, ctx);
+    }
   });
 
   pi.registerCommand('continuation-worker', {
@@ -110,8 +129,13 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         sessionId: record.sessionId, paneId });
       worker = record;
       if (!await observe({ session, outcome: 'unknown', stop: null }, ctx)) return;
-      try { await startReceiver(ctx); }
-      catch (error) { worker = undefined; throw report('start receiver', error); }
+      try { watchTerminalInput(ctx); await startReceiver(ctx); }
+      catch (error) {
+        worker = undefined;
+        stopTerminalInput?.();
+        stopTerminalInput = undefined;
+        throw report('start receiver', error);
+      }
       ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
     },
   });
@@ -146,6 +170,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   pi.on('session_shutdown', async () => {
     stopVersion++;
     worker = undefined;
+    stopTerminalInput?.();
+    stopTerminalInput = undefined;
     await pendingWrite;
     await closeReceiver?.();
     closeReceiver = undefined;
