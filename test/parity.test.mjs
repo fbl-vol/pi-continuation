@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,7 @@ import { atomicJson, readJson } from '../src/store.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
+import { ownerAlive } from '../src/receiver.mjs';
 
 async function eventually(predicate) {
   for (let i = 0; i < 100; i++) {
@@ -228,6 +229,18 @@ test('explicit worker reactivation rearms a paused disposition once without lift
   assert.equal(state.workers[s.worker.id].paused, false);
   await s.command(`activate worker ${s.worker.id}`);
   assert.deepEqual(await s.state(), state);
+});
+
+test('unpersistable pause withdraws the owner endpoint and retains the recovery lock', async t => {
+  const s = await fixture(t);
+  const owner = await readJson(join(s.root, 'supervisor.lock'));
+  // A real temporary-filesystem failure, not a fake successful pause write.
+  await rm(join(s.root, 'supervisor.json'));
+  await mkdir(join(s.root, 'supervisor.json'));
+  assert.match((await s.disposition('acknowledge')).content[0].text, /Internal error/);
+  assert.equal(await ownerAlive(s.root, owner.token), false);
+  assert.deepEqual(await readJson(join(s.root, 'supervisor.lock')), owner);
+  assert.equal(s.wakes.length + s.notices.length, 0);
 });
 
 test('acknowledgement records completion without lifting any pause', async t => {

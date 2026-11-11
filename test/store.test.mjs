@@ -44,20 +44,22 @@ test('replacement retries only bounded Windows sharing failures, without repeati
 test('atomic snapshots remain readable while a writer replaces them', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const file = join(root, 'state.json');
-  let done = false;
   try {
     await atomicJson(file, { version: 0 });
     await Promise.all([
       (async () => {
-        try { for (let version = 1; version <= 30; version++) await atomicJson(file, { version }); }
-        finally { done = true; }
+        for (let version = 1; version <= 30; version++) await atomicJson(file, { version });
       })(),
       ...Array.from({ length: 3 }, async () => {
-        while (!done) assert.ok(Number.isInteger((await readJson(file)).version));
+        // A bounded burst models concurrent observations. Continuous readers can
+        // starve replacement on Windows; sustained sharing failures must surface,
+        // not extend retries forever (the retry-policy test covers that limit).
+        for (let read = 0; read < 30; read++)
+          assert.ok(Number.isInteger((await readJson(file)).version));
       }),
     ]);
     assert.equal((await readJson(file)).version, 30);
-  } finally { done = true; await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('real processes cannot both own a claim; release requires the owner token', async () => {
