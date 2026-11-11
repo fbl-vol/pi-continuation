@@ -75,16 +75,28 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   let writes = Promise.resolve();
   const commit = () => {
     const saved = structuredClone(state);
-    writes = writes.then(() => atomicJson(stateFile(root), saved));
-    return writes;
+    const writing = writes.then(() => atomicJson(stateFile(root), saved));
+    // Keep the error visible to this caller, but allow the fail-closed pause write.
+    writes = writing.catch(() => {});
+    return writing;
   };
   const notify = (ctx, message, level = 'info') => ctx.ui.notify(message, level);
   const active = () => !!state && !!closeOwner;
   const queue = work => {
     serial = serial.then(work).catch(async () => {
       state.paused = true;
-      await commit();
-      return 'Internal error: global continuation paused for inspection';
+      state.reason = 'Internal error: global continuation paused for inspection';
+      try { await commit(); }
+      catch {
+        // If even the pause cannot persist, withdraw the live owner endpoint.
+        // Retain the lock and any intents for inspection; never pretend to recover.
+        subscriptionLive = false;
+        closeEvents?.();
+        const closing = closeOwner;
+        closeOwner = undefined;
+        await closing?.();
+      }
+      return state.reason;
     });
     return serial;
   };
@@ -244,7 +256,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       subscriptionLive = false;
       lastSnapshot = undefined;
       state.paused = true;
-      void commit();
+      void queue(() => commit());
     }, paneIds);
     await closeEvents.ready;
     subscriptionLive = true;
@@ -346,7 +358,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               observed.stop && observed.stop !== state.handled[workerId] ?
                 'disposition pending' : 'await new work' };
         }
-        notify(ctx, JSON.stringify({ globalPaused: state.paused, subscriptionLive,
+        notify(ctx, JSON.stringify({ globalPaused: state.paused, globalReason: state.reason, subscriptionLive,
           routes: state.routes, workers, notices: state.notices }).slice(0, 6000)); return;
       }
       if (verb === 'coordinator') {
@@ -599,7 +611,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (event.aborted) {
       state.paused = true;
       attentionTurn = [];
-      return commit();
+      return queue(() => commit());
     }
     const attempted = attentionTurn;
     attentionTurn = [];

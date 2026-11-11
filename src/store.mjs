@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, open, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const defaultRoot = () => join(homedir(), '.pi-continuation');
 
@@ -25,9 +26,25 @@ export async function atomicJson(path, value) {
     const file = await open(temporary, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(value) + '\n'); await file.sync(); }
     finally { await file.close(); }
-    await rename(temporary, path);
+    await replaceFile(temporary, path);
     await syncDirectory(dirname(path));
   } finally { await rm(temporary, { force: true }); }
+}
+
+// Windows can temporarily reject replacement while a reader/scanner holds the
+// destination. Retry only the rename of this already-synced snapshot, never the
+// operation which produced it (in particular, never a message delivery).
+export async function replaceFile(source, destination, {
+  platform = process.platform, move = rename, wait = delay,
+} = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { await move(source, destination); return; }
+    catch (error) {
+      if (platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 5)
+        throw error;
+      await wait(25 * 2 ** attempt);
+    }
+  }
 }
 
 // Exclusive creation: no second owner may rewrite or 'recover' a live claim.
