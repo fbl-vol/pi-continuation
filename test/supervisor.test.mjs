@@ -156,6 +156,10 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
       undefined, undefined, ctx);
     assert.match(answer.content[0].text, /delivered/);
     assert.equal(messages.filter(m => Array.isArray(m)).length, 1);
+    // A later material disposition must not erase the delivery guard for this stop.
+    await pi.tool('call', { workerId, stop, action: 'notify', kind: 'decision',
+      evidence: 'concrete result A' }, undefined, undefined, ctx);
+    await pi.command('activate worker ' + workerId, ctx);
     const repeat = await pi.tool('call', { workerId, stop, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
     assert.match(repeat.content[0].text, /Stale/);

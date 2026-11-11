@@ -195,6 +195,20 @@ test('explicit worker reactivation rearms a paused disposition once without lift
   assert.deepEqual(await s.state(), state);
 });
 
+test('acknowledgement records completion without lifting any pause', async t => {
+  const s = await fixture(t);
+  await s.command(`pause worker ${s.worker.id}`);
+  await s.command('pause route w');
+  await s.command('pause global');
+  assert.match((await s.disposition('acknowledge')).content[0].text, /acknowledged/);
+  const state = await s.state();
+  assert.equal(state.handled[s.worker.id], s.observation.stop);
+  assert.equal(state.workers[s.worker.id].paused, true);
+  assert.equal(state.routes.w.paused, true);
+  assert.equal(state.paused, true);
+  assert.equal(s.wakes.length + s.notices.length, 0);
+});
+
 test('supervisor Escape pauses globally rather than scheduling a corrective turn', async t => {
   const s = await fixture(t);
   s.ctx.isIdle = () => true;

@@ -273,6 +273,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             throw new Error('A worker or coordinator cannot become the supervisor');
           state.supervisorSession = supervisorSession;
           state.dispositions ??= {};
+          // Older handled stops do not distinguish acknowledgement from delivery.
+          // Conservatively retain their no-resend guard during source upgrades.
+          state.resumed ??= { ...state.handled };
           state.budgets ??= {};
           state.repair ??= {};
           state.notices ??= {};
@@ -394,6 +397,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!await ctx.ui.confirm('Resolve ambiguous action?',
           `After inspecting receipt and worker state, mark old stop ${intent.stop} handled without retry. Worker remains paused.`)) return;
         state.handled[kind] = intent.stop;
+        state.resumed[kind] = intent.stop;
         delete state.inflight[kind];
         await commit(); return;
       }
@@ -439,10 +443,12 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'No active owner or missing evidence';
         if (!allowExperimentalActivation) return 'Activation disabled: prompt-hold boundary unverified';
         const binding = state.workers[args.workerId];
-        if (!binding || state.paused || binding.paused || state.routes[binding.route]?.paused) return 'Paused';
+        if (!binding || (args.action !== 'acknowledge' &&
+            (state.paused || binding.paused || state.routes[binding.route]?.paused))) return 'Paused';
         lastSnapshot = await snapshot(socketPath);
         await isolateUnavailable();
-        if (binding.paused || state.routes[binding.route]?.paused) return 'Paused';
+        if (args.action !== 'acknowledge' &&
+            (binding.paused || state.routes[binding.route]?.paused)) return 'Paused';
         let observation;
         try {
           if (args.action === 'notify' || args.action === 'pause') {
@@ -457,6 +463,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'Worker observation unreadable; only that worker paused';
         }
         if (!observation || observation.stop !== args.stop ||
+            (args.action === 'resume' && state.resumed[args.workerId] === args.stop) ||
             (args.action !== 'notify' && state.handled[args.workerId] === args.stop))
           return 'Stale or ineligible stop';
         let checkpoint;
@@ -526,6 +533,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             throw new Error('Receipt not confirmed');
           state.handled[args.workerId] = args.stop;
           state.dispositions[args.workerId] = { stop: args.stop, action: 'resume' };
+          state.resumed[args.workerId] = args.stop;
           delete state.inflight[args.workerId];
           state.budgets[args.workerId] = { count: count + 1, hash, checkpoint };
           await commit();
