@@ -18,7 +18,7 @@ export function stopObservation(ctx, aborted, hold, version, previousAssistantId
 }
 
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID } = {}) {
+  paneId = process.env.HERDR_PANE_ID, launchGuard = () => false } = {}) {
   let worker;
   const report = diagnostics('worker');
   let hold = false;
@@ -85,6 +85,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       e.customType === 'pi-continuation-worker');
     const binding = entries.at(-1)?.data;
     if (!binding || binding.sessionId !== session.id || binding.paneId !== paneId) return;
+    if (!await launchGuard()) {
+      ctx.ui.notify('Continuation worker disabled: start Pi with this extension as its first explicit -e path', 'error');
+      return;
+    }
     try {
       await ensureRoot(root);
       const record = await readJson(`${root}/worker-${binding.workerId}.json`);
@@ -112,6 +116,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     handler: async (argument, ctx) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
+      }
+      if (!await launchGuard()) {
+        ctx.ui.notify('Start Pi with this extension as its first explicit -e path before registering', 'error');
+        return;
       }
       if (worker) { ctx.ui.notify(`Already registered: ${worker.workerId} (observation only)`, 'info'); return; }
       const checkpoint = resolve(ctx.cwd, argument.trim());

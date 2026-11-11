@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { bindObservation } from '../src/observation.mjs';
+import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
+
+const bindObservation = (pi, options) => bindWorkerObservation(pi,
+  { ...options, launchGuard: () => true });
 
 function fakePi(sessionId, sessionFile) {
   const handlers = new Map();
@@ -149,6 +152,62 @@ test('sticky hold survives a subsequent working observation and restart until ex
     assert.equal((await observation()).hold, false);
   } finally {
     await next.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('registration refuses a worker launched after another extension', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindWorkerObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1',
+      launchGuard: () => false });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    assert.equal(worker.entries.length, 0);
+    assert.match(worker.notices[0][0], /first explicit -e/);
+    assert.equal(worker.terminalInput.size, 0);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a registered worker restart without the first-extension guard stays inert', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('native', '/sessions/native.jsonl');
+  const restarted = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    const workerId = first.entries.at(-1).data.workerId;
+    await first.emit('session_shutdown');
+
+    restarted.entries.push(...first.entries);
+    const observer = bindWorkerObservation(restarted.pi, { root, socketPath: 'socket',
+      paneId: 'w1:p1', launchGuard: () => false });
+    await restarted.emit('session_start');
+    await restarted.emit('agent_settled', { aborted: false });
+    assert.equal(observer.registered, false);
+    assert.equal(restarted.terminalInput.size, 0);
+    assert.match(restarted.notices[0][0], /worker disabled.*first explicit -e/);
+    const saved = JSON.parse(await readFile(join(root, `observation-${workerId}.json`)));
+    assert.equal(saved.outcome, 'unknown');
+  } finally {
+    await restarted.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = prior;
     await rm(root, { recursive: true, force: true });
