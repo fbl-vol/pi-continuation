@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
 import { MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
+import { readWorkerRegistration } from '../src/bindings.mjs';
 
 const bindObservation = (pi, options) => bindWorkerObservation(pi,
   { ...options, launchGuard: () => true });
@@ -32,7 +32,7 @@ function fakePi(sessionId, sessionFile) {
     emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
 
-test('failed initial observation leaves registration inert and reports failure instead of success', async () => {
+test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');
   await writeFile(checkpoint, 'unfinished');
@@ -40,18 +40,15 @@ test('failed initial observation leaves registration inert and reports failure i
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
-    const append = s.pi.appendEntry;
-    s.pi.appendEntry = (type, data) => {
-      append(type, data);
-      mkdirSync(join(root, `observation-${data.workerId}.json`));
-    };
+    s.pi.appendEntry = () => { throw Object.assign(new Error('test append failure'), { code: 'EIO' }); };
     const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
     await s.pi.command(checkpoint, s.ctx);
     assert.equal(observer.registered, false);
     assert.equal(s.notices.length, 1);
     assert.equal(s.notices[0][1], 'error');
-    assert.match(s.notices[0][0], /persist observation failed/);
+    assert.match(s.notices[0][0], /register worker failed/);
     assert.doesNotMatch(s.notices[0][0], /registered paused/);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
     assert.equal(s.notices[0][0].includes(root), false);
   } finally {
     await s.emit('session_shutdown');
@@ -89,6 +86,38 @@ test('registration starts paused and a fork cannot inherit it', async () => {
     assert.equal(observed.outcome, 'unknown');
   } finally {
     await original.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('plain registration persists an unheld observation across a same-session reload', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('same', '/sessions/same.jsonl');
+  const next = fakePi('same', '/sessions/same.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    assert.equal((await readWorkerRegistration(root, id)).checkpoint, checkpoint);
+    const saved = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(saved.hold, false);
+    assert.equal(saved.stop, null);
+    await first.emit('session_shutdown');
+    next.entries.push(first.entries.at(-1));
+    const observer = bindObservation(next.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await next.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, false);
+  } finally {
+    await first.emit('session_shutdown');
+    await next.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = prior;
     await rm(root, { recursive: true, force: true });
@@ -245,6 +274,190 @@ test('raw user input holds a worker before Pi handles a built-in dialog', async 
     await rm(root, { recursive: true, force: true });
   }
   assert.equal(worker.terminalInput.size, 0);
+});
+
+test('an explicit first turn is published and sent only after the provisional receiver is ready', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint -- with spaces.md');
+  await writeFile(join(root, 'checkpoint'), 'Unrelated task');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    assert.equal(observer.registered, true);
+    assert.equal(JSON.parse(await readFile(join(root, `worker-${id}.json`))).checkpoint, checkpoint);
+    assert.equal(JSON.parse(await readFile(join(root, `ready-${id}.json`))).sessionId, 'native');
+    assert.deepEqual(messages, ['Begin approved task.']);
+    await worker.emit('before_agent_start', { messageType: 'user', prompt: 'Begin approved task.' });
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'initial-answer', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Progress made.' }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    const saved = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(saved.outcome, 'completed');
+    assert.equal(saved.hold, false);
+    assert.equal(saved.finalReply, 'Progress made.');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an initial message handled without a run is not restored as an eligible worker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  worker.pi.sendUserMessage = () => {}; // Pi may handle extension input without starting a run.
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    const before = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(before.bootstrapPending, true);
+    assert.equal(before.hold, true);
+    assert.equal(before.stop, null);
+    await worker.emit('session_shutdown');
+
+    const restarted = fakePi('native', '/sessions/native.jsonl');
+    restarted.entries.push(worker.entries.at(-1));
+    const observer = bindObservation(restarted.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await restarted.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, true);
+    await restarted.emit('session_shutdown');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a prompt hold acquired during provisional setup aborts without sending or publishing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  let leafReads = 0;
+  worker.ctx.sessionManager.getLeafId = () => {
+    if (++leafReads === 3) void worker.emit('ui_prompt_start');
+    return 'leaf';
+  };
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const start = `--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`;
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(worker.entries, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    worker.ctx.sessionManager.getLeafId = () => 'leaf';
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, true);
+    assert.deepEqual(messages, ['Begin approved task.']);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a prompt starting synchronously during the session append cannot authorize initial delivery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const append = worker.pi.appendEntry;
+    worker.pi.appendEntry = (...args) => { append(...args); void worker.emit('ui_prompt_start'); };
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    // A stale session entry is inert without a matching record; a later valid
+    // registration would append a new entry after the user inspects the prompt.
+    assert.equal(worker.entries.length, 1);
+    const id = worker.entries[0].data.workerId;
+    // Simulate both unlink operations failing after the session entry append.
+    // The missing commit marker must still prevent restore of the stale record.
+    await writeFile(join(root, `worker-${id}.json`), JSON.stringify({ workerId: id,
+      sessionId: 'native', sessionFile: '/sessions/native.jsonl', paneId: 'w1:p1',
+      checkpoint, cwd: '/project', requiresReady: true }));
+    await writeFile(join(root, `observation-${id}.json`), JSON.stringify({
+      schemaVersion: 1, session: { id: 'native', file: '/sessions/native.jsonl' },
+      outcome: 'unknown', stop: null, hold: false, version: 0 }));
+    const resumed = fakePi('native', '/sessions/native.jsonl');
+    resumed.entries.push(worker.entries[0]);
+    const restored = bindObservation(resumed.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await resumed.emit('session_start');
+    assert.equal(restored.registered, false);
+    await assert.rejects(readWorkerRegistration(root, id), { code: 'ENOENT' });
+    await resumed.emit('session_shutdown');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a busy first-turn race cancels registration so the user can retry explicitly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  let idleCalls = 0;
+  worker.ctx.isIdle = () => ++idleCalls !== 2;
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const start = `--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`;
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(worker.entries, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, true);
+    assert.deepEqual(messages, ['Begin approved task.']);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('an exact final reply is captured; oversized replies hold instead of hiding a request', async () => {

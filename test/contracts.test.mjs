@@ -50,6 +50,8 @@ test('a completed stop without a bounded final reply is held for inspection', ()
   assert.throws(() => decodeObservation({ ...stop, finalReply: 'é'.repeat(MAX_FINAL_REPLY_BYTES) }),
     { code: 'INVALID_RECORD' });
   assert.throws(() => decodeObservation({ ...stop, finalReply: 42 }), { code: 'INVALID_RECORD' });
+  assert.throws(() => decodeObservation({ ...stop, bootstrapPending: 'yes' }), { code: 'INVALID_RECORD' });
+  assert.equal(decodeObservation({ ...stop, finalReply: 'Progress', bootstrapPending: true }).hold, true);
 });
 
 test('observation decoding never invents a generation or clears a legacy hold', () => {

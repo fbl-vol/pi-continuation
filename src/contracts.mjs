@@ -8,7 +8,8 @@ import { readJson } from './store.mjs';
  *
  * @typedef {{id: string, file: string, leaf?: string}} SessionIdentity
  * @typedef {{schemaVersion?: number, session: SessionIdentity, outcome: string,
- *   stop: string|null, version?: number, hold?: boolean, finalReply?: string, at?: string}} Observation
+ *   stop: string|null, version?: number, hold?: boolean, bootstrapPending?: boolean,
+ *   finalReply?: string, at?: string}} Observation
  * @typedef {{sessionId: string, sessionFile: string, paneId: string, cwd: string,
  *   terminalId: string, workspaceId: string, tabId: string,
  *   sessionKind: string, sessionValue: string}} NativeBinding
@@ -112,12 +113,14 @@ export function decodeObservation(record) {
   if ((version === 1 || record.version !== undefined) &&
       (!Number.isSafeInteger(record.version) || record.version < 0)) invalid();
   if (record.hold !== undefined && typeof record.hold !== 'boolean') invalid();
+  if (record.bootstrapPending !== undefined && typeof record.bootstrapPending !== 'boolean') invalid();
   if (record.finalReply !== undefined && (typeof record.finalReply !== 'string' ||
       Buffer.byteLength(record.finalReply, 'utf8') > MAX_FINAL_REPLY_BYTES)) invalid();
   // An old completed stop without its final answer cannot be reviewed for a
   // prose-only approval request. Never make missing evidence resumable.
   const replyMissing = record.outcome === 'completed' && !record.finalReply?.trim();
   return { ...record, hold: record.hold !== false || replyMissing ||
+    (record.bootstrapPending === true && record.stop !== null) ||
     ['aborted', 'approval', 'error'].includes(record.outcome) };
 }
 

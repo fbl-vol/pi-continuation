@@ -37,6 +37,7 @@
     "src/herdr.mjs",
     "src/observation.mjs",
     "src/receiver.mjs",
+    "src/registration.mjs",
     "src/store.mjs",
     "src/subscription.mjs",
     "src/supervisor.mjs"
