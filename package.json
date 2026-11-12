@@ -36,6 +36,7 @@
     "src/coordinator.mjs",
     "src/herdr.mjs",
     "src/observation.mjs",
+    "src/ownership.mjs",
     "src/receiver.mjs",
     "src/registration.mjs",
     "src/store.mjs",

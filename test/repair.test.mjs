@@ -21,7 +21,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const workerId = randomUUID();
-  const sessionFile = '/sessions/repair.jsonl';
+  const sessionFile = join(root, 'repair.jsonl');
   const crashedWorker = randomUUID();
   const pendingAction = randomUUID();
   const checkpoint = join(root, 'checkpoint.md');
@@ -45,6 +45,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const previous = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
+    await writeFile(sessionFile, '{}\n');
     await writeFile(checkpoint, 'State: in progress');
     await atomicJson(join(root, `worker-${workerId}.json`), {
       workerId, paneId: agent.pane_id, sessionId: 'native', sessionFile, checkpoint, cwd: agent.cwd,

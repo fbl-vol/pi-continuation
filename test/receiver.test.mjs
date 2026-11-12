@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { accept } from '../src/receiver.mjs';
 import { workerEndpoint } from '../src/ipc.mjs';
+import { prepareHandoff, rollbackHandoff } from '../src/ownership.mjs';
 
 test('Windows pipe names are deterministic per private root and do not embed filesystem separators', () => {
   const a = workerEndpoint('C:\\Users\\Name With Spaces\\ü', 'worker', 'win32');
@@ -18,13 +19,33 @@ test('Windows pipe names are deterministic per private root and do not embed fil
   assert.equal(a, workerEndpoint('C:\\Users\\Name With Spaces\\ü', 'worker', 'win32'));
 });
 
+async function attachTestHandoff(s) {
+  const sessionFile = join(s.root, 'session.jsonl');
+  const checkpoint = join(s.root, 'checkpoint.md');
+  writeFileSync(sessionFile, '{}\n');
+  writeFileSync(checkpoint, 'Existing task evidence');
+  const handoff = await prepareHandoff(join(s.root, 'ownership'), {
+    identity: { sessionId: randomUUID(), sessionFile, checkpoint },
+    target: { root: s.root, workerId: s.worker.workerId },
+  }, () => {});
+  Object.assign(s.worker, { sessionId: handoff.identity.sessionId, sessionFile: handoff.identity.sessionFile });
+  Object.assign(s.state.workers[s.worker.workerId], { sessionId: s.worker.sessionId,
+    sessionFile: s.worker.sessionFile, checkpoint: handoff.identity.checkpoint, handoff });
+  Object.assign(s.observation.session, { id: s.worker.sessionId, file: s.worker.sessionFile });
+  await s.persist('supervisor.json', s.state);
+  await s.persist(`observation-${s.worker.workerId}.json`, s.observation);
+  return handoff;
+}
+
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
-  const worker = { workerId: randomUUID(), sessionId: 'session-1', sessionFile: '/sessions/session-1.jsonl' };
+  const worker = { workerId: randomUUID(), sessionId: 'session-1', sessionFile: join(root, 'session-1.jsonl') };
+  writeFileSync(worker.sessionFile, '{}\n');
   const token = randomUUID();
   const action = { id: randomUUID(), ownerToken: token, workerId: worker.workerId, stop: randomUUID() };
   const state = { paused: false, ownerToken: token, ownerPid: process.pid, routes: { w1: { paused: false } },
-    workers: { [worker.workerId]: { route: 'w1', paused: false, sessionId: worker.sessionId } } };
+    workers: { [worker.workerId]: { route: 'w1', paused: false, sessionId: worker.sessionId,
+      sessionFile: worker.sessionFile } } };
   const observation = { outcome: 'completed', stop: action.stop, version: 0, hold: false,
     finalReply: 'Synthetic result: continue the approved task.',
     session: { id: worker.sessionId, file: worker.sessionFile, leaf: 'leaf-1' } };
@@ -68,6 +89,61 @@ test('exact stop accepted once; duplicate send cannot start another turn', async
     const repeated = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version);
     assert.equal(repeated.accepted, false);
     assert.equal(s.sent.length, 1);
+  } finally { await s.close(); }
+});
+
+test('a transferred worker holds the shared fence through injection and cannot roll back afterward', async () => {
+  const s = await setup();
+  try {
+    const handoff = await attachTestHandoff(s);
+    let rollback;
+    s.pi.sendMessage = (...args) => {
+      s.sent.push(args);
+      rollback = assert.rejects(rollbackHandoff(handoff,
+        () => assert.fail('rollback crossed worker injection')), /worker busy or abandoned lock/);
+    };
+    assert.equal((await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version)).accepted, true);
+    await rollback;
+    assert.equal(s.sent.length, 1);
+    await assert.rejects(rollbackHandoff(handoff, () => {}), /unused exact/);
+  } finally { await s.close(); }
+});
+
+test('omitting handoff attachment cannot inject into a reserved worker or spend rollback eligibility', async () => {
+  const s = await setup();
+  try {
+    const handoff = await attachTestHandoff(s);
+    delete s.state.workers[s.worker.workerId].handoff;
+    await s.persist('supervisor.json', s.state);
+    const result = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version);
+    assert.equal(result.accepted, false);
+    assert.equal(result.reason, 'ownership unavailable');
+    assert.deepEqual(s.sent, []);
+    await rollbackHandoff(handoff, () => {});
+  } finally { await s.close(); }
+});
+
+test('returning ownership to the old system fences a persisted active new worker', async () => {
+  const s = await setup();
+  try {
+    const handoff = await attachTestHandoff(s);
+    await rollbackHandoff(handoff, () => {});
+    const result = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version);
+    assert.equal(result.accepted, false);
+    assert.equal(result.reason, 'ownership unavailable');
+    assert.deepEqual(s.sent, []);
+    await assert.rejects(readJson(join(s.root, `receipt-${s.action.id}.json`)), { code: 'ENOENT' });
+  } finally { await s.close(); }
+});
+
+test('a witness cannot authorize a different new worker binding or root', async () => {
+  const s = await setup();
+  try {
+    const handoff = await attachTestHandoff(s);
+    handoff.target.workerId = randomUUID();
+    await s.persist('supervisor.json', s.state);
+    assert.equal((await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version)).accepted, false);
+    assert.deepEqual(s.sent, []);
   } finally { await s.close(); }
 });
 

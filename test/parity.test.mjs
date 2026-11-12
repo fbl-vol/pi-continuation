@@ -32,7 +32,8 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   process.env.HERDR_ENV = '1';
   const agents = [];
   function binding(id, paneId, workspaceId) {
-    const sessionFile = `/sessions/${id}.jsonl`;
+    const sessionFile = join(root, `${id}.jsonl`);
+    writeFileSync(sessionFile, '{}\n');
     const value = { id, paneId, sessionId: id, sessionFile, cwd: '/project',
       terminalId: id, workspaceId, tabId: `${workspaceId}:tab`, sessionKind: 'path', sessionValue: sessionFile };
     agents.push({ agent: 'pi', pane_id: paneId, terminal_id: id, workspace_id: workspaceId,

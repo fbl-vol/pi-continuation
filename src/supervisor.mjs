@@ -9,6 +9,7 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
+import { withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
   resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
@@ -102,8 +103,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       else {
         try {
           await checkpointPath(id);
+          await withWorkerHandoff(root, id, binding, {}, () => {});
         } catch (error) {
-          reason = 'Worker checkpoint unavailable';
+          reason = error.code === 'OWNERSHIP_FENCE' ? 'Worker ownership unavailable' : 'Worker checkpoint unavailable';
           report('read checkpoint', error, diagnosticContext);
           binding.failure = report.last;
         }
@@ -176,7 +178,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       notice.status = 'sending';
       await commit();
       try {
-        const receipt = await sendAction(root, { ...notice, ownerToken: state.ownerToken }, route.coordinator.id);
+        const receipt = await withWorkerHandoff(root, notice.workerId, state.workers[notice.workerId],
+          { effect: true }, () => sendAction(root, { ...notice, ownerToken: state.ownerToken }, route.coordinator.id));
         if (receipt.accepted === false && receipt.stale === true && receipt.id === notice.id) {
           if (notice.kind === 'completion') await staleCompletion(notice);
           else { notice.status = 'stale'; await commit(); }
@@ -191,8 +194,14 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!receipt.accepted || receipt.id !== notice.id || saved.status !== 'sent') throw new Error('Notice delivery uncertain');
         notice.status = 'sent';
       } catch (error) {
-        route.paused = true;
-        notice.status = 'uncertain';
+        if (error.code === 'OWNERSHIP_FENCE') {
+          state.workers[notice.workerId].paused = true;
+          state.workers[notice.workerId].reason = 'Worker ownership unavailable';
+          notice.status = 'pending'; // Definite pre-delivery rejection; no notice was accepted.
+        } else {
+          route.paused = true;
+          notice.status = 'uncertain';
+        }
         report('deliver notice', error, diagnosticContext);
         notice.failure = report.last;
       }
@@ -269,7 +278,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   });
 
   pi.registerCommand('continuation-supervisor', {
-    description: 'Explicit setup/status/control: init | status | add <worker-id> <route> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
+    description: 'Explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
     handler: async (args, ctx) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
@@ -380,6 +389,30 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         await subscribe(ctx);
         notify(ctx, 'Registered paused; activate scopes explicitly'); return;
       }
+      if (verb === 'handoff') {
+        const reference = JSON.parse(args.trim().slice(verb.length).trim());
+        const workerId = reference.target?.workerId;
+        const binding = state.workers[workerId];
+        if (!binding?.paused || binding.handoff || state.handled[workerId] || state.inflight[workerId] ||
+            state.budgets[workerId] || Object.values(state.notices).some(n => n.workerId === workerId))
+          throw new Error('Handoff requires a newly bound paused worker without prior dispositions');
+        if (!await ctx.ui.confirm('Attach selected ownership handoff?',
+          'Confirm the old adapter enforces this witness and you inspected its retained pauses, spent budget, pending notices and history. The current stop will not be replayed; the new budget starts exhausted until evidenced progress. No scope is activated.')) return;
+        const candidate = { ...binding, handoff: reference };
+        await withWorkerHandoff(root, workerId, candidate, {}, async () => {
+          const observation = await readObservation(root, workerId);
+          if (!observation.stop || observation.bootstrapPending || observation.outcome === 'working' ||
+              observation.session.id !== binding.sessionId || observation.session.file !== binding.sessionFile)
+            throw new Error('Handoff requires an observed exact settled stop; no initial-run inference');
+          const checkpoint = await readFile(await checkpointPath(workerId), 'utf8');
+          binding.handoff = reference;
+          state.handled[workerId] = observation.stop;
+          state.resumed[workerId] = observation.stop; // Never replay a stop the old owner may have delivered.
+          state.budgets[workerId] = { count: 2, hash: checkpointHash(checkpoint), checkpoint };
+          await commit();
+        });
+        notify(ctx, 'Ownership attached paused; old history retained, current stop not replayed'); return;
+      }
       if (verb === 'resolve-notice') {
         const notice = state.notices[kind];
         if (!uuid(kind) || notice?.status !== 'uncertain') throw new Error('Usage: resolve-notice <notice-id>');
@@ -410,8 +443,13 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!target) throw new Error('Unknown scope or id');
         if (!await ctx.ui.confirm(`${verb} ${kind}?`,
           `Set only ${kind} ${id ?? ''} to ${enabled ? 'active' : 'paused'}? Other pauses remain unchanged.`)) return;
-        setScopePaused(state, kind, id, !enabled);
-        await commit();
+        const updateScope = async () => {
+          setScopePaused(state, kind, id, !enabled);
+          await commit();
+        };
+        if (enabled && kind === 'worker')
+          await withWorkerHandoff(root, id, target, {}, updateScope);
+        else await updateScope();
         if (enabled) await reconcile(ctx);
         return;
       }

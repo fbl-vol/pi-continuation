@@ -19,13 +19,13 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const herdrPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const checkpoint = join(root, 'checkpoint.md');
   const workerId = randomUUID();
-  const sessionFile = '/sessions/test.jsonl';
+  const sessionFile = join(root, 'test.jsonl');
   const record = { workerId, paneId: 'w1:p1', sessionId: 'session-test', sessionFile,
     checkpoint, cwd: '/project', paused: true };
   let stop = randomUUID();
   const siblingId = randomUUID();
   const sibling = { ...record, workerId: siblingId, paneId: 'w2:p1',
-    sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl', checkpoint: join(root, 'sibling.md') };
+    sessionId: 'sibling-session', sessionFile: join(root, 'sibling.jsonl'), checkpoint: join(root, 'sibling.md') };
   const siblingStop = randomUUID();
   const observation = { outcome: 'completed', stop, version: 0, hold: false,
     finalReply: 'Synthetic worker reports progress; approved work remains.',
@@ -70,6 +70,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const original = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
+    await writeFile(sessionFile, '{}\n');
+    await writeFile(sibling.sessionFile, '{}\n');
     await writeFile(checkpoint, 'in progress: completed concrete result A');
     await writeFile(sibling.checkpoint, 'in progress: completed sibling result');
     await atomicJson(join(root, `worker-${workerId}.json`), record);
