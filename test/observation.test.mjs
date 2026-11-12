@@ -123,6 +123,53 @@ test('a new turn while clearing a prior hold leaves the worker held', async t =>
   assert.match(s.notices.at(-1)[0], /changed during confirmation/);
 });
 
+test('a prompt entirely inside early restore durably invalidates the old stop across another reload', async t => {
+  const first = await guardedFixture(t);
+  let next;
+  let reloaded;
+  try {
+    await first.pi.command(first.checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    await first.emit('agent_start');
+    first.entries.push({ id: 'saved-reply', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+    await first.emit('agent_settled');
+    const path = join(first.root, `observation-${id}.json`);
+    const before = JSON.parse(await readFile(path));
+    assert.equal(before.hold, false);
+    assert.ok(before.stop);
+    await first.emit('session_shutdown');
+
+    const permission = Promise.withResolvers();
+    next = fakePi('native', '/sessions/native.jsonl');
+    next.entries.push(...first.entries);
+    const restored = bindWorkerObservation(next.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1',
+      launchGuard: () => permission.promise });
+    const restoring = next.emit('session_start');
+    await next.ctx.ui.input('Approval while prior registration is being restored');
+    permission.resolve(true);
+    await restoring;
+    assert.equal(restored.hold, true);
+    const held = JSON.parse(await readFile(path));
+    assert.equal(held.hold, true);
+    assert.equal(held.stop, null);
+    assert.equal(held.outcome, 'unknown');
+    assert.ok(held.version > before.version);
+    await next.emit('session_shutdown');
+
+    reloaded = fakePi('native', '/sessions/native.jsonl');
+    reloaded.entries.push(...first.entries);
+    const again = bindObservation(reloaded.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1' });
+    await reloaded.emit('session_start');
+    assert.equal(again.hold, true);
+    assert.equal(again.registered, true);
+    assert.equal(JSON.parse(await readFile(path)).stop, null);
+  } finally {
+    await next?.emit('session_shutdown');
+    await reloaded?.emit('session_shutdown');
+  }
+});
+
 test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');

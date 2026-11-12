@@ -26,6 +26,20 @@ test('the checker rejects a mistaken resume despite valid checkpoint evidence an
   assert.equal(result.checked, 1);
 });
 
+test('outcome labels and unsupported notice kinds are not valid tool calls', () => {
+  const input = blindJudgmentCases();
+  for (const [caseId, index, action, kind] of [
+    ['case-6', 5, 'completion'], ['case-8', 7, 'decision'], ['case-2', 1, 'notify', 'pause'],
+  ]) {
+    const stop = evidence(input.cases[index]);
+    const result = checkJudgments([{ caseId, arguments: {
+      workerId: stop.id, stop: stop.stop, action, ...(kind ? { kind } : {}),
+      evidence: stop.checkpoint, reportHash: stop.reportHash,
+    } }]);
+    assert.ok(result.failures.includes(`${caseId}: arguments do not match the registered tool schema`));
+  }
+});
+
 test('permitted model choices still need exact identities, evidence and completion freshness', () => {
   const input = blindJudgmentCases();
   const question = evidence(input.cases[1]);

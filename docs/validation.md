@@ -6,7 +6,7 @@ These are development observations, **not replacement acceptance**. The required
 
 A blind read-only model exercise using `openai-codex/gpt-6-sol` selected acceptable dispositions for 12/12 synthetic stops. Cases cover unfinished approved work, explicit and implicit permission requests, conflicting checkpoint/reply evidence, review follow-ups, whole-assignment completion, blockers, ambiguity, historical quoted questions, injected instructions, aborts and provider errors. Expected outcomes were authored before the review and withheld from the reviewer.
 
-The inputs use the production attention formatter and registered tool description/schema. The checker requires exactly one result per case, an independently permitted outcome, exact synthetic worker/stop identity, and acceptance by the production evidence/freshness policy. It performs no effects.
+The inputs use the production attention formatter and registered tool description/schema. The checker requires exactly one result per case, arguments valid against the registered tool schema, an independently permitted outcome, exact synthetic worker/stop identity, and acceptance by the production evidence/freshness policy. It performs no effects.
 
 From a source checkout, repeat with a fresh independent reviewer:
 

@@ -132,12 +132,21 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       await readyWorkerRegistration(root, record);
       if (record.sessionId === session.id && record.paneId === paneId && record.sessionFile === session.file) {
         worker = record;
+        let promptInterrupted = false;
         try {
           const prior = await readObservation(root, worker.workerId);
-          hold = prior.hold || prior.bootstrapPending === true || prompts.blocked ||
-            prompts.revision !== restoreRevision;
-          if (Number.isSafeInteger(prior.version) && prior.version >= 0) stopVersion = prior.version;
+          promptInterrupted = prompts.blocked || prompts.revision !== restoreRevision;
+          hold = prior.hold || prior.bootstrapPending === true || promptInterrupted;
+          if (Number.isSafeInteger(prior.version) && prior.version >= 0)
+            stopVersion = Math.max(stopVersion, prior.version);
         } catch (error) { hold = true; report('restore observation', error, ctx); }
+        if (promptInterrupted) {
+          // Before worker assignment the guard has no observation to update.
+          // Invalidate the old eligible stop durably before exposing a receiver.
+          stopVersion++;
+          await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+          if (!worker) return;
+        }
         if (!ctx.isIdle()) previousAssistantId = lastAssistantId(ctx);
         watchTerminalInput(ctx);
         await startReceiver(ctx);
