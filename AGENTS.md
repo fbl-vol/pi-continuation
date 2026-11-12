@@ -3,6 +3,38 @@
 This is a public, personal project owned by `fbl-vol`, separate from any employer
 or customer repository. Read README.md for current implementation status.
 
+## User-controlled parity scope
+
+Deliver the existing continuation workflow as an ordinary Pi extension through
+normal Pi startup/loading, preserving established behavior and documented
+limitations. The bounded baseline and observable scenarios live in
+[docs/extension-parity.md](docs/extension-parity.md); do not create a parallel spec.
+No required SDK launcher, maintained Pi fork, exhaustive native UI interception,
+or stronger guarantees than the baseline. SDK experiments are archival/deferred,
+not parity delivery or acceptance.
+
+Actual approvals/user pauses, identity, bounded nudges, deduplication, ownership,
+material notices, history and independent review remain protected. A newly found
+weakness is not automatically required work: establish an actual baseline
+regression first. Any material change to user workflow, startup/install path,
+safety contract or these exclusions requires a user decision BEFORE
+implementation, with concrete evidence and the smallest alternative. Agents may
+update progress/plans, not expand product requirements. Do not silently weaken
+safeguards or turn prototype/test findings into requirements. Normal reversible
+in-scope implementation/testing needs no repeated approval.
+
+Before a milestone or material replan, the existing implementation checkpoint must
+identify the next concrete outcome and baseline scenario. When a scope monitor
+is bound, notify it at substantive milestone transitions/material replans and
+before delivery with outcome, baseline scenario, revision/patch identity and
+affected paths. Keep its exact binding/command private; no routine approval wait.
+A read-only scope monitor may inspect and steer back to this agreement; it cannot invent
+requirements, approve expansion, clear holds, edit source, launch agents or grant
+operational authority. Do not wait for it on routine steps. Refer genuine conflicts
+to the user while continuing unaffected work. Independent code review must check
+scope alignment; owner completion is not user acceptance. Whole-native-UI proof
+must not become a hidden acceptance gate.
+
 ## Repository-scoped delivery autonomy
 
 The user explicitly authorizes agents assigned to this project to implement the
