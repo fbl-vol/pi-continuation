@@ -20,7 +20,9 @@ function fakePi(sessionId, sessionFile) {
   const notices = [];
   const terminalInput = new Set();
   const ctx = { mode: 'tui', cwd: '/project', sessionManager, isIdle: () => true,
-    ui: { confirm: async () => true, notify: (...args) => notices.push(args),
+    ui: { confirm: async () => true, select: async () => undefined, input: async () => undefined,
+      editor: async () => undefined, custom: async () => undefined,
+      notify: (...args) => notices.push(args),
       onTerminalInput: handler => { terminalInput.add(handler); return () => terminalInput.delete(handler); } } };
   const pi = { on: (name, fn) => handlers.set(name, fn),
     registerCommand: (name, definition) => {
@@ -31,6 +33,95 @@ function fakePi(sessionId, sessionFile) {
   return { pi, ctx, notices, entries, terminalInput,
     emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
+
+async function guardedFixture(t, configure = () => {}) {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-prompt-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished approved work');
+  const s = fakePi('native', '/sessions/native.jsonl');
+  configure(s);
+  const sent = [];
+  s.pi.sendUserMessage = message => sent.push(message);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+  t.after(async () => {
+    await s.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  });
+  await s.emit('session_start');
+  return { ...s, root, checkpoint, observer, sent };
+}
+
+test('a fully overlapping approval during registration confirmation prevents first-turn publication', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      await worker.emit('ui_prompt_start'); // Only the outer span is visible to Pi listeners.
+      await worker.ctx.ui.input('Other approval');
+      await worker.emit('ui_prompt_end');
+      return true;
+    };
+  });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual((await readdir(s.root)).filter(name => /^(worker|observation|ready)-/.test(name)), []);
+});
+
+test('a prompt opening between confirmation resolution and the registration caller cannot inherit consent', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      // The inner continuation runs after guard.confirm checks its result but
+      // before the registration caller resumes. The dialog then closes before IO.
+      queueMicrotask(() => queueMicrotask(() => { void worker.ctx.ui.input('Other approval'); }));
+      return true;
+    };
+  });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual(s.entries, []);
+});
+
+test('a fully overlapping approval cannot be erased by hold-clear confirmation', async t => {
+  let overlap = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      await worker.emit('ui_prompt_start');
+      if (overlap) await worker.ctx.ui.input('Other approval');
+      await worker.emit('ui_prompt_end');
+      return true;
+    };
+  });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const id = s.entries.at(-1).data.workerId;
+  await s.emit('ui_prompt_start');
+  await s.emit('ui_prompt_end');
+  overlap = true;
+  await s.pi.clearHold('', s.ctx);
+  assert.equal(s.observer.hold, true);
+  assert.equal(JSON.parse(await readFile(join(s.root, `observation-${id}.json`))).hold, true);
+  assert.deepEqual(s.sent, []);
+});
+
+test('a new turn while clearing a prior hold leaves the worker held', async t => {
+  let interrupt = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      if (interrupt) await worker.emit('agent_start');
+      return true;
+    };
+  });
+  await s.pi.command(s.checkpoint, s.ctx);
+  await s.emit('ui_prompt_start');
+  await s.emit('ui_prompt_end');
+  interrupt = true;
+  await s.pi.clearHold('', s.ctx);
+  assert.equal(s.observer.hold, true);
+  assert.match(s.notices.at(-1)[0], /changed during confirmation/);
+});
 
 test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
@@ -372,6 +463,7 @@ test('a prompt hold acquired during provisional setup aborts without sending or 
     assert.deepEqual(worker.entries, []);
     assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
     worker.ctx.sessionManager.getLeafId = () => 'leaf';
+    await worker.emit('ui_prompt_end'); // Resolve the pending interaction before retrying.
     await worker.pi.command(start, worker.ctx);
     assert.equal(observer.registered, true);
     assert.deepEqual(messages, ['Begin approved task.']);

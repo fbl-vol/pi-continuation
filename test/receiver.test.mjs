@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { accept } from '../src/receiver.mjs';
+import { guardPromptUI } from '../src/prompt-guard.mjs';
 import { workerEndpoint } from '../src/ipc.mjs';
 import { prepareHandoff, rollbackHandoff } from '../src/ownership.mjs';
 
@@ -196,6 +197,26 @@ test('approval hold opening after persisted receipt rejects injection', async ()
     assert.equal((await readJson(join(s.root, `receipt-${s.action.id}.json`))).status, 'accepted');
     assert.deepEqual(s.sent, []);
   } finally { await s.close(); }
+});
+
+test('a synchronous shared-context prompt at the final receipt check rejects injection before lifecycle delivery', async () => {
+  const s = await setup();
+  let held = false;
+  const ui = Object.fromEntries(['select', 'confirm', 'input', 'editor', 'custom'].map(name =>
+    [name, async () => undefined]));
+  const guard = guardPromptUI(ui, () => { held = true; });
+  let leafReads = 0;
+  s.ctx.sessionManager.getLeafId = () => {
+    if (++leafReads === 2) void ui.input('Another extension requests approval');
+    return 'leaf-1';
+  };
+  try {
+    const result = await accept(s.root, s.worker, s.action, s.ctx, s.pi, s.version,
+      () => held || guard.blocked);
+    assert.equal(result.accepted, false);
+    assert.equal((await readJson(join(s.root, `receipt-${s.action.id}.json`))).status, 'accepted');
+    assert.deepEqual(s.sent, []);
+  } finally { guard.dispose(); await s.close(); }
 });
 
 test('human input begun before receipt cannot inherit a prior stop', async () => {

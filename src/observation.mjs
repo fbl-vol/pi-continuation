@@ -8,6 +8,7 @@ import { readyWorkerRegistration } from './bindings.mjs';
 import { commitReady } from './registration.mjs';
 import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
+import { guardPromptUI } from './prompt-guard.mjs';
 
 export function stopObservation(ctx, aborted, hold, version, previousAssistantId) {
   const session = currentSession(ctx);
@@ -38,9 +39,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     e.type === 'message' && e.message?.role === 'assistant')?.id;
   let closeReceiver;
   let stopTerminalInput;
+  let prompts;
+  let promptUI;
   let pendingWrite = Promise.resolve();
   const connectReceiver = (ctx, record) => receive(root, record, pi, ctx,
-    () => stopVersion, () => hold || worker !== record);
+    () => stopVersion, () => hold || worker !== record || !prompts || prompts.blocked);
   const startReceiver = async ctx => {
     if (worker) closeReceiver = await connectReceiver(ctx, worker);
   };
@@ -74,13 +77,26 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       void observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
     });
   };
-  pi.on('ui_prompt_start', (_event, ctx) => {
+  const externalPrompt = ctx => {
     if (preparing) { preparing.interrupted = true; stopVersion++; return; }
-    if (!worker) return; // Registration's own confirmation is not a worker approval hold.
+    if (!worker) return;
     hold = true;
     stopVersion++;
-    void observe({ session: currentSession(ctx), outcome: 'approval', stop: null, version: stopVersion }, ctx);
+    void observe({ session: currentSession(ctx), outcome: 'approval', stop: null }, ctx);
+  };
+  const promptsFor = ctx => {
+    if (!prompts) {
+      promptUI = ctx.ui;
+      prompts = guardPromptUI(promptUI, () => externalPrompt(ctx));
+    }
+    if (ctx.ui !== promptUI || !prompts.intact) throw new Error('Worker prompt guard unavailable');
+    return prompts;
+  };
+  pi.on('ui_prompt_start', (_event, ctx) => {
+    if (prompts) prompts.start();
+    else externalPrompt(ctx);
   });
+  pi.on('ui_prompt_end', () => prompts?.end());
   pi.on('tool_execution_end', (event, ctx) => {
     if (event.isError && preparing) { preparing.interrupted = true; stopVersion++; }
     if (!event.isError || !worker) return;
@@ -95,7 +111,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopTerminalInput?.();
     stopTerminalInput = undefined;
     worker = undefined;
+    prompts?.dispose(); prompts = undefined; promptUI = undefined;
     if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') return;
+    try { promptsFor(ctx); }
+    catch (error) { report('guard prompts', error, ctx); return; }
+    const restoreRevision = prompts.revision;
     // A fork/new session has a different ID. A copied session entry never binds it.
     const session = currentSession(ctx);
     const entries = ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
@@ -114,7 +134,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         worker = record;
         try {
           const prior = await readObservation(root, worker.workerId);
-          hold = prior.hold || prior.bootstrapPending === true;
+          hold = prior.hold || prior.bootstrapPending === true || prompts.blocked ||
+            prompts.revision !== restoreRevision;
           if (Number.isSafeInteger(prior.version) && prior.version >= 0) stopVersion = prior.version;
         } catch (error) { hold = true; report('restore observation', error, ctx); }
         if (!ctx.isIdle()) previousAssistantId = lastAssistantId(ctx);
@@ -135,6 +156,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
       }
+      let guard;
+      try { guard = promptsFor(ctx); }
+      catch (error) { report('guard prompts', error, ctx); return; }
+      const registrationRevision = guard.revision;
+      const registrationVersion = stopVersion;
       if (!await launchGuard()) {
         ctx.ui.notify('Start Pi with -e <extension file> as its first option before registering', 'error');
         return;
@@ -165,9 +191,15 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         ctx.ui.notify('Existing checkpoint path required', 'error'); return;
       }
       const session = currentSession(ctx);
-      if (!await ctx.ui.confirm('Register continuation worker?',
+      if (guard.blocked || guard.revision !== registrationRevision || stopVersion !== registrationVersion) {
+        ctx.ui.notify('Registration interrupted by another interaction; inspect before retrying.', 'warning'); return;
+      }
+      if (!await guard.confirm('Register continuation worker?',
         `Bind this session and checkpoint for observation?\n${checkpoint}${initialMessage ?
           '\nStart the explicitly supplied initial user message after registration?' : ''}`)) return;
+      if (stopVersion !== registrationVersion || guard.revision !== registrationRevision) {
+        ctx.ui.notify('Registration interrupted during confirmation; no message sent.', 'warning'); return;
+      }
       const record = { workerId: randomUUID(), sessionId: session.id, sessionFile: session.file,
         paneId, checkpoint, cwd: ctx.cwd, socketPath, paused: true, requiresReady: true };
       const candidate = { interrupted: false, version: stopVersion };
@@ -193,7 +225,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         receiver = await connectReceiver(ctx, record);
         const ready = (checkLeaf = true) => {
           const now = currentSession(ctx);
-          return !candidate.interrupted && candidate.version === stopVersion && !hold &&
+          return !candidate.interrupted && candidate.version === stopVersion && !hold && !guard.blocked &&
+            guard.revision === registrationRevision &&
             now.id === session.id && now.file === session.file && (!checkLeaf || now.leaf === session.leaf) &&
             (!initialMessage || ctx.isIdle());
         };
@@ -300,8 +333,20 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     description: 'Explicitly clear a worker hold after inspecting the stop; does not activate supervision',
     handler: async (_args, ctx) => {
       if (!worker || !hold || ctx.mode !== 'tui') return;
-      if (!await ctx.ui.confirm('Clear worker hold?',
-        'Only clear after resolving the user stop, failed tool or pending approval. Old stops cannot be resumed.')) return;
+      const guard = promptsFor(ctx);
+      const record = worker;
+      const version = stopVersion;
+      const session = currentSession(ctx);
+      if (!await guard.confirm('Clear worker hold?',
+        'Only clear after resolving the user stop, failed tool or pending approval. Old stops cannot be resumed.')) {
+        await pendingWrite;
+        return;
+      }
+      const now = currentSession(ctx);
+      if (worker !== record || stopVersion !== version || now.id !== session.id ||
+          now.file !== session.file || now.leaf !== session.leaf || !ctx.isIdle()) {
+        ctx.ui.notify('Worker changed during confirmation; hold retained.', 'warning'); return;
+      }
       hold = false;
       stopVersion++;
       await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
@@ -317,6 +362,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     await pendingWrite;
     await closeReceiver?.();
     closeReceiver = undefined;
+    prompts?.dispose(); prompts = undefined; promptUI = undefined;
   });
   // UI prompts and tool errors hold subsequent stops until explicitly inspected.
   // Prose-only approval requests have no host signal; the pinned reply is

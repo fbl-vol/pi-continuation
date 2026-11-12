@@ -72,7 +72,7 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
       latestObservation.hold || latestObservation.version !== version ||
       latestObservation.stop !== action.stop || latestObservation.session.id !== session.id ||
       latestObservation.session.file !== session.file || latestObservation.session.leaf !== session.leaf ||
-      !ctx.isIdle() || isHeld() || stopVersion() !== version || currentSession(ctx).leaf !== session.leaf) {
+      !ctx.isIdle() || currentSession(ctx).leaf !== session.leaf || isHeld() || stopVersion() !== version) {
     return { accepted: false, reason: 'session changed after receipt' };
   }
   pi.sendMessage({ customType: 'pi-continuation',
