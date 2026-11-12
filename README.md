@@ -28,6 +28,22 @@ Coordinator sessions may be in another workspace; the route still identifies the
 
 The supervisor model uses `continuation_disposition` to resume, acknowledge, pause, or issue one material notice per stop/kind. Resume and completion cite the pinned checkpoint; a blocker, decision or pause may cite the worker's pinned final reply. For completion, it must inspect the **whole assigned backlog**, cite an exact excerpt, and pass the full checkpoint's `reportHash` from its attention message. A standalone status marker is not required: narrative reports are interpreted by the model, while the extension checks the exact stop, cleared hold, cited evidence, unchanged report hash, and one-use disposition. A favorable review verdict alone is not proof that follow-up work is done. The hash rejects stale evidence; it does not prove the model's interpretation. Completion notices recheck the report at dispatch and at the recipient. An acknowledgement does not independently accept the assignment. Do not paste instructions disguised as model tool calls into the command line; activation is a TUI-confirmed human command only.
 
+## Experimental SDK worker host (source preparation)
+
+The package also declares `pi-continuation-worker`, an explicit SDK host tested against **unmodified Pi 1.5.2 on Linux**. It loads the continuation observer first through the public resource-loader API and preserves prompt observation for separate shortcut contexts and cached shared UI across reloads. The ordinary `pi -e` entry point does **not** acquire this coverage.
+
+For a **separately authorized disposable** environment with the SDK peer available:
+
+```sh
+node src/worker.mjs --session /path/to/existing-saved-session.jsonl
+```
+
+`--continue` uses native recent-session selection (creating a session if none exists); omitting both flags starts a new native session. An explicit session must already be a non-empty file. Its saved working directory and model are retained; metadata-only branches also retain explicit thinking settings instead of taking SDK defaults. An unavailable saved model or SDK fallback is refused. Unsupported flags and positional messages are rejected, not sent to a model. Importing the module or asking for help does not start a host. Registration, all activation scopes and ownership transfer remain separate explicit actions.
+
+Native settings/resource discovery, codemode, tool search and MCP factories are retained. The SDK helper requires the native process configuration directory (`PI_CODING_AGENT_DIR`, or Pi's default); filesystem aliases are accepted, but an unrelated custom root is refused before factories load. Project resources start untrusted; global `project_trust` handlers, native stored trust and explicit policy retain priority. Unknown projects need a human choice; only the explicit remember choice writes native trust. A replacement without a native trust UI or an existing decision stays untrusted rather than opening a concurrent console prompt. This is not Pi's configuration/package-management CLI. The native llama.cpp CLI extension has no public SDK factory here; `/llama` warns instead of becoming a model prompt, unless a configured extension supplies it.
+
+**Not accepted for existing workers.** The packed, symlinked executable was exercised through a real Linux PTY with temporary configuration and a synthetic paused registration, without a model request or real Herdr connection. This does not establish full native UI coverage, supervisor/worker judgment, Herdr runtime identity, selected-worker migration/recovery or macOS/Windows terminal behavior. No live installation or migration follows from these checks; activation remains default-off. See [validation](docs/validation.md#sdk-worker-host-source-preparation).
+
 ## Recovery and removal
 
 Worker holds are persisted independently of working/settled outcomes. A completed stop with a missing, blank or over-8-KiB final reply is held for inspection, including retained older observations; reply evidence cannot justify resuming or declaring completion without checkpoint evidence. Older supervisor bindings without a pinned checkpoint restart worker-paused and need inspection and activation. Missing or older observations without a durable hold flag require inspection and explicit hold clearing; a new turn or restart cannot clear them. A confirmed pre-acceptance busy rejection leaves a notice pending for a later event; failures after acceptance remain uncertain and cannot be retried. Escape in a supervisor turn pauses the global scope.

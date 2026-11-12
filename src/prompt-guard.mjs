@@ -6,6 +6,8 @@ const methods = ['select', 'confirm', 'input', 'editor', 'custom'];
  * fallback for other host contexts. This is not a prose classifier or authority.
  */
 export function guardPromptUI(ui, onExternalPrompt, scope) {
+  // A scope's base layer outlives this guard, including cached shared UI.
+  scope?.observeUI(ui);
   const originals = new Map();
   const wrappers = new Map();
   let external = 0;
@@ -42,7 +44,8 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
       const wrapped = (...args) => {
         if (disposed) return original.apply(ui, args);
         external++;
-        signal(); // Synchronous, including when nested inside our own confirmation.
+        // The host layer broadcasts once to every guard, before native display.
+        if (!scope) signal();
         try { return Promise.resolve(original.apply(ui, args)).finally(() => { external--; }); }
         catch (error) { external--; throw error; }
       };
@@ -70,7 +73,7 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
       const before = revision;
       own++;
       let accepted;
-      try { accepted = await originals.get('confirm').apply(ui, args); }
+      try { accepted = await (scope ? scope.confirmOwned(ui, ...args) : originals.get('confirm').apply(ui, args)); }
       finally { own--; }
       return accepted === true && intact() && !busy() && revision === before;
     },

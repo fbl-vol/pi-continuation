@@ -244,7 +244,7 @@ test('observed loss of the prompt guard durably invalidates a completed stop acr
   } finally { await next.emit('session_shutdown'); }
 });
 
-for (const transition of ['unchanged', 'unobserved prompt', 'new host', 'lost scope', 'added scope']) {
+for (const transition of ['unchanged', 'unobserved prompt', 'unobserved shared prompt', 'new host', 'lost scope', 'added scope']) {
   test(`scoped worker restore fences ${transition} without rearming a stale stop`, async t => {
     const scope = createPromptScope();
     const first = await guardedFixture(t, () => {}, {
@@ -270,6 +270,10 @@ for (const transition of ['unchanged', 'unobserved prompt', 'new host', 'lost sc
         handler: ctx => ctx.ui.input('other approval'),
       }]]) }] }).extensions[0].shortcuts.get('key').handler;
       await run(fakePi('unrelated', '/synthetic.jsonl').ctx);
+      assert.equal(JSON.parse(await readFile(path)).hold, false);
+    }
+    if (transition === 'unobserved shared prompt') {
+      await first.ctx.ui.input('cached shared approval after shutdown');
       assert.equal(JSON.parse(await readFile(path)).hold, false);
     }
     const nextScope = transition === 'lost scope' ? undefined :

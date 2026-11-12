@@ -4,6 +4,9 @@
   "private": true,
   "description": "Explicit, bounded continuation supervision for Pi workers in Herdr.",
   "type": "module",
+  "bin": {
+    "pi-continuation-worker": "./src/worker.mjs"
+  },
   "license": "MIT",
   "author": "fbl-vol",
   "repository": {
@@ -36,6 +39,9 @@
     "src/policy.mjs",
     "src/prompt-guard.mjs",
     "src/prompt-scope.mjs",
+    "src/project-trust.mjs",
+    "src/runtime.mjs",
+    "src/worker.mjs",
     "src/session.mjs",
     "src/coordinator.mjs",
     "src/herdr.mjs",
