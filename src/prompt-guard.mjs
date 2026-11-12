@@ -13,8 +13,17 @@ export function guardPromptUI(ui, onExternalPrompt) {
   let revision = 0;
   let lifecycleExternal = false;
   let disposed = false;
+  let invalidated = false;
   const signal = () => { revision++; onExternalPrompt(); };
-  const intact = () => !disposed && methods.every(name => ui[name] === wrappers.get(name));
+  const intact = () => {
+    if (disposed || invalidated) return false;
+    if (methods.every(name => ui[name] === wrappers.get(name))) return true;
+    // Once observation was lost, restoring the functions cannot restore consent
+    // or make the caller's old stop eligible again, including after reload.
+    invalidated = true;
+    signal();
+    return false;
+  };
   const busy = () => external > 0 || own > 0 || lifecycleExternal;
   const restore = () => {
     disposed = true;

@@ -170,6 +170,41 @@ test('a prompt entirely inside early restore durably invalidates the old stop ac
   }
 });
 
+test('observed loss of the prompt guard durably invalidates a completed stop across reload', async t => {
+  const first = await guardedFixture(t);
+  await first.pi.command(first.checkpoint, first.ctx);
+  const id = first.entries.at(-1).data.workerId;
+  await first.emit('agent_start');
+  first.entries.push({ id: 'saved-reply', type: 'message', message: { role: 'assistant',
+    stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+  await first.emit('agent_settled');
+  const path = join(first.root, `observation-${id}.json`);
+  const before = JSON.parse(await readFile(path));
+  assert.equal(before.hold, false);
+  assert.ok(before.stop);
+
+  const wrapped = first.ctx.ui.input;
+  first.ctx.ui.input = async () => undefined;
+  // An ordinary command checks guard integrity before any registration effect.
+  await first.pi.command(first.checkpoint, first.ctx);
+  first.ctx.ui.input = wrapped;
+  await first.emit('session_shutdown'); // Flush any hold write before restoring the same session.
+  const saved = JSON.parse(await readFile(path));
+  assert.equal(saved.hold, true);
+  assert.equal(saved.stop, null);
+  assert.ok(saved.version > before.version);
+
+  const next = fakePi('native', '/sessions/native.jsonl');
+  next.entries.push(...first.entries);
+  const observer = bindObservation(next.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1' });
+  try {
+    await next.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, true);
+    assert.equal(JSON.parse(await readFile(path)).stop, null);
+  } finally { await next.emit('session_shutdown'); }
+});
+
 test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');

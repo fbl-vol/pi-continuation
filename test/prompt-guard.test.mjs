@@ -78,8 +78,25 @@ test('UI replacement and disposal cannot silently rearm the old guard or overwri
   guard.dispose();
   assert.equal(ui.input, replacement);
   assert.equal(await cached('after shutdown'), true);
-  assert.equal(holds, 0);
+  assert.equal(holds, 1); // Observed integrity loss is sticky; disposal emits no additional hold.
   assert.notEqual(ui.input, original);
+});
+
+test('observed loss of a prompt wrapper cannot be erased by putting the wrapper back', async () => {
+  let holds = 0;
+  const ui = uiWith(async () => true);
+  const guard = guardPromptUI(ui, () => { holds++; });
+  const wrapped = ui.input;
+  ui.input = async () => undefined;
+  assert.equal(guard.blocked, true);
+  ui.input = wrapped;
+  assert.equal(guard.blocked, true);
+  assert.equal(guard.intact, false);
+  assert.equal(guard.revision, 1);
+  assert.equal(holds, 1);
+  assert.equal(await guard.confirm('own'), false);
+  assert.equal(holds, 1);
+  guard.dispose();
 });
 
 test('synchronous failures and rejected UI promises retain holds but release active prompt counts', async () => {
