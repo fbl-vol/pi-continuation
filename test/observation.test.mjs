@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
 import { MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
 import { readWorkerRegistration } from '../src/bindings.mjs';
+import { createPromptScope } from '../src/prompt-scope.mjs';
 
 const bindObservation = (pi, options) => bindWorkerObservation(pi,
   { ...options, launchGuard: () => true });
@@ -34,7 +35,7 @@ function fakePi(sessionId, sessionFile) {
     emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
 
-async function guardedFixture(t, configure = () => {}) {
+async function guardedFixture(t, configure = () => {}, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'continuation-prompt-'));
   const checkpoint = join(root, 'checkpoint.md');
   await writeFile(checkpoint, 'unfinished approved work');
@@ -44,7 +45,7 @@ async function guardedFixture(t, configure = () => {}) {
   s.pi.sendUserMessage = message => sent.push(message);
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
-  const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+  const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1', ...options });
   t.after(async () => {
     await s.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
@@ -68,6 +69,44 @@ test('a fully overlapping approval during registration confirmation prevents fir
   assert.equal(s.observer.registered, false);
   assert.deepEqual(s.sent, []);
   assert.deepEqual((await readdir(s.root)).filter(name => /^(worker|observation|ready)-/.test(name)), []);
+});
+
+test('alternate shortcut UI revokes registration before a first message can be published', async t => {
+  const scope = createPromptScope();
+  const foreign = fakePi('other', '/synthetic/other.jsonl');
+  const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+    handler: ctx => ctx.ui.input('other approval'),
+  }]]) }] }).extensions[0].shortcuts.get('key').handler;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => { await run(foreign.ctx); return true; };
+  }, { promptScope: scope });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual((await readdir(s.root)).filter(name => /^(worker|observation|ready)-/.test(name)), []);
+});
+
+test('alternate shortcut UI durably holds an existing worker and revokes a later hold-clear confirmation', async t => {
+  const scope = createPromptScope();
+  const foreign = fakePi('other', '/synthetic/other.jsonl');
+  const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+    handler: ctx => ctx.ui.input('other approval'),
+  }]]) }] }).extensions[0].shortcuts.get('key').handler;
+  let overlap = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => { if (overlap) await run(foreign.ctx); return true; };
+  }, { promptScope: scope });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const id = s.entries.at(-1).data.workerId;
+  await run(foreign.ctx);
+  assert.equal(s.observer.hold, true); // Synchronous in-memory receipt fence, before disk IO.
+  overlap = true;
+  await s.pi.clearHold('', s.ctx);
+  const saved = JSON.parse(await readFile(join(s.root, `observation-${id}.json`)));
+  assert.equal(saved.hold, true);
+  assert.equal(saved.stop, null);
+  assert.deepEqual(saved.promptScope, scope.snapshot());
+  assert.deepEqual(s.sent, []);
 });
 
 test('a prompt opening between confirmation resolution and the registration caller cannot inherit consent', async t => {
@@ -204,6 +243,55 @@ test('observed loss of the prompt guard durably invalidates a completed stop acr
     assert.equal(JSON.parse(await readFile(path)).stop, null);
   } finally { await next.emit('session_shutdown'); }
 });
+
+for (const transition of ['unchanged', 'unobserved prompt', 'new host', 'lost scope', 'added scope']) {
+  test(`scoped worker restore fences ${transition} without rearming a stale stop`, async t => {
+    const scope = createPromptScope();
+    const first = await guardedFixture(t, () => {}, {
+      promptScope: transition === 'added scope' ? undefined : scope,
+    });
+    await first.pi.command(first.checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    await first.emit('agent_start');
+    first.entries.push({ id: 'scoped-reply', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+    await first.emit('agent_settled');
+    const path = join(first.root, `observation-${id}.json`);
+    const before = JSON.parse(await readFile(path));
+    assert.equal(before.hold, false);
+    assert.ok(before.stop);
+    assert.deepEqual(before.promptScope, transition === 'added scope' ? undefined : scope.snapshot());
+    await first.emit('session_shutdown');
+
+    if (transition === 'unobserved prompt') {
+      // No guard is subscribed in the shutdown/session-start gap. The host scope
+      // must still remember activity and invalidate the persisted eligible stop.
+      const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+        handler: ctx => ctx.ui.input('other approval'),
+      }]]) }] }).extensions[0].shortcuts.get('key').handler;
+      await run(fakePi('unrelated', '/synthetic.jsonl').ctx);
+      assert.equal(JSON.parse(await readFile(path)).hold, false);
+    }
+    const nextScope = transition === 'lost scope' ? undefined :
+      transition === 'new host' ? createPromptScope() : scope;
+    const next = fakePi('native', '/sessions/native.jsonl');
+    next.entries.push(...first.entries);
+    const observer = bindObservation(next.pi, { root: first.root, socketPath: 'socket',
+      paneId: 'w1:p1', promptScope: nextScope });
+    try {
+      await next.emit('session_start');
+      assert.equal(observer.registered, true);
+      assert.equal(observer.hold, transition !== 'unchanged');
+      const saved = JSON.parse(await readFile(path));
+      assert.equal(saved.stop, transition === 'unchanged' ? before.stop : null);
+      if (transition !== 'unchanged') {
+        assert.equal(saved.hold, true);
+        assert.ok(saved.version > before.version);
+        assert.deepEqual(saved.promptScope, nextScope?.snapshot());
+      }
+    } finally { await next.emit('session_shutdown'); }
+  });
+}
 
 test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));

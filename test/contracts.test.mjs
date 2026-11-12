@@ -54,6 +54,18 @@ test('a completed stop without a bounded final reply is held for inspection', ()
   assert.equal(decodeObservation({ ...stop, finalReply: 'Progress', bootstrapPending: true }).hold, true);
 });
 
+test('optional prompt scope stamps preserve legacy records but reject malformed identity or revision', () => {
+  const record = { schemaVersion: 1, outcome: 'unknown', stop: null, version: 1,
+    session: { id: 's', file: '/session' }, hold: false };
+  assert.equal(decodeObservation(record).promptScope, undefined);
+  const stamp = { id: 'd520bc3f-2318-48de-a544-9e3c49ac9067', revision: 0 };
+  assert.deepEqual(decodeObservation({ ...record, promptScope: stamp }).promptScope, stamp);
+  for (const promptScope of [null, { ...stamp, id: 'invalid' }, { ...stamp, revision: -1 },
+    { ...stamp, revision: Number.MAX_SAFE_INTEGER + 1 }]) {
+    assert.throws(() => decodeObservation({ ...record, promptScope }), { code: 'INVALID_RECORD' });
+  }
+});
+
 test('observation decoding never invents a generation or clears a legacy hold', () => {
   const old = { outcome: 'working', stop: null, session: { id: 's', file: '/session' } };
   const decoded = decodeObservation(old);

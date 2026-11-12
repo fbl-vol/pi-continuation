@@ -35,6 +35,7 @@
     "src/launch.mjs",
     "src/policy.mjs",
     "src/prompt-guard.mjs",
+    "src/prompt-scope.mjs",
     "src/session.mjs",
     "src/coordinator.mjs",
     "src/herdr.mjs",

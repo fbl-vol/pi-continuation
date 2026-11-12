@@ -5,7 +5,7 @@ const methods = ['select', 'confirm', 'input', 'editor', 'custom'];
  * on its shared extension UI object before display; lifecycle events remain a
  * fallback for other host contexts. This is not a prose classifier or authority.
  */
-export function guardPromptUI(ui, onExternalPrompt) {
+export function guardPromptUI(ui, onExternalPrompt, scope) {
   const originals = new Map();
   const wrappers = new Map();
   let external = 0;
@@ -14,6 +14,7 @@ export function guardPromptUI(ui, onExternalPrompt) {
   let lifecycleExternal = false;
   let disposed = false;
   let invalidated = false;
+  let stopScope;
   const signal = () => { revision++; onExternalPrompt(); };
   const intact = () => {
     if (disposed || invalidated) return false;
@@ -24,9 +25,10 @@ export function guardPromptUI(ui, onExternalPrompt) {
     signal();
     return false;
   };
-  const busy = () => external > 0 || own > 0 || lifecycleExternal;
+  const busy = () => external > 0 || own > 0 || lifecycleExternal || scope?.active === true;
   const restore = () => {
     disposed = true;
+    stopScope?.();
     for (const [name, wrapped] of wrappers) {
       if (ui[name] === wrapped) ui[name] = originals.get(name);
     }
@@ -48,6 +50,7 @@ export function guardPromptUI(ui, onExternalPrompt) {
       ui[name] = wrapped;
       if (ui[name] !== wrapped) throw new Error('Prompt UI is not writable');
     }
+    stopScope = scope?.subscribe(signal);
   } catch (error) { restore(); throw error; }
 
   return {

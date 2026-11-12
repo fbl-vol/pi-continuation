@@ -27,7 +27,7 @@ export function stopObservation(ctx, aborted, hold, version, previousAssistantId
 }
 
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID, launchGuard = () => false } = {}) {
+  paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope } = {}) {
   let worker;
   let preparing;
   let initialPending;
@@ -56,7 +56,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   const observe = (value, ctx) => {
     const owner = worker;
     // Hold is independent of activity: a new turn must not erase an unresolved stop.
-    const saved = { ...value, schemaVersion: SCHEMA_VERSION, hold, version: stopVersion };
+    const saved = { ...value, schemaVersion: SCHEMA_VERSION, hold, version: stopVersion,
+      ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
     pendingWrite = pendingWrite.then(() => atomicJson(`${root}/observation-${owner.workerId}.json`, saved))
       .then(() => true)
       .catch(error => {
@@ -87,7 +88,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   const promptsFor = ctx => {
     if (!prompts) {
       promptUI = ctx.ui;
-      prompts = guardPromptUI(promptUI, () => externalPrompt(ctx));
+      prompts = guardPromptUI(promptUI, () => externalPrompt(ctx), promptScope);
     }
     if (ctx.ui !== promptUI || !prompts.intact) throw new Error('Worker prompt guard unavailable');
     return prompts;
@@ -135,7 +136,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         let promptInterrupted = false;
         try {
           const prior = await readObservation(root, worker.workerId);
-          promptInterrupted = prompts.blocked || prompts.revision !== restoreRevision;
+          const scope = promptScope?.snapshot();
+          const scopeChanged = prior.promptScope?.id !== scope?.id ||
+            prior.promptScope?.revision !== scope?.revision;
+          promptInterrupted = prompts.blocked || prompts.revision !== restoreRevision || !!scopeChanged;
           hold = prior.hold || prior.bootstrapPending === true || promptInterrupted;
           if (Number.isSafeInteger(prior.version) && prior.version >= 0)
             stopVersion = Math.max(stopVersion, prior.version);
@@ -227,6 +231,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           // The first turn remains held until Pi confirms it started. A plain
           // registration has no resumable stop, and its marker gates restore.
           hold: !!initialMessage, version: stopVersion,
+          ...(promptScope ? { promptScope: promptScope.snapshot() } : {}),
           ...(initialMessage ? { bootstrapPending: true } : {}),
         });
         observationSaved = true;
