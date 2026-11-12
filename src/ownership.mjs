@@ -118,11 +118,7 @@ export async function withHandoff(reference, { effect = false } = {}, operation)
   if (!reference || !isAbsolute(reference.root ?? '') ||
       !isAbsolute(reference.identity?.sessionFile ?? '')) fail('invalid handoff reference');
   return locked(reference.root, reference.identity.sessionFile, async path => {
-    const record = decode(await readJson(path));
-    if (!matches(record, reference) || record.phase !== 'owned') fail('not the selected continuation owner');
-    const identity = await canonicalIdentity(reference.identity);
-    if (identity.sessionFile !== record.identity.sessionFile || identity.checkpoint !== record.identity.checkpoint)
-      fail('canonical identity changed');
+    const record = await ownedWitness(path, reference);
     if (effect && !record.used) {
       record.used = true;
       await atomicJson(path, record);
@@ -131,21 +127,55 @@ export async function withHandoff(reference, { effect = false } = {}, operation)
   });
 }
 
+async function ownedWitness(path, reference) {
+  const record = decode(await readJson(path));
+  if (!matches(record, reference) || record.phase !== 'owned') fail('not the selected continuation owner');
+  const identity = await canonicalIdentity(reference.identity);
+  if (identity.sessionFile !== record.identity.sessionFile || identity.checkpoint !== record.identity.checkpoint)
+    fail('canonical identity changed');
+  return record;
+}
+
+async function workerFence(root, workerId, binding) {
+  if (typeof binding?.sessionFile !== 'string') fail('missing session file binding');
+  const sessionFile = await realpath(binding.sessionFile);
+  const directory = await witnessRoot(root);
+  const reference = binding.handoff;
+  if (reference !== undefined && (reference?.root !== directory ||
+      reference?.target?.workerId !== workerId || reference.target?.root !== await realpath(root) ||
+      reference.identity?.sessionId !== binding.sessionId ||
+      reference.identity?.sessionFile !== binding.sessionFile ||
+      reference.identity?.checkpoint !== binding.checkpoint)) fail('handoff does not match worker binding');
+  return { sessionFile, directory, reference };
+}
+
+async function requireStandalone(path) {
+  try {
+    await readJson(path);
+    fail('handoff witness exists; attach the exact reference before activation');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
+/** Observation only, never permission to deliver. Do not contend with an active effect. */
+export async function checkWorkerHandoff(root, workerId, binding) {
+  try {
+    const { sessionFile, directory, reference } = await workerFence(root, workerId, binding);
+    const { record } = paths(directory, sessionFile);
+    if (reference === undefined) await requireStandalone(record);
+    else await ownedWitness(record, reference);
+  } catch (error) { error.code = 'OWNERSHIP_FENCE'; throw error; }
+}
+
 /** Bind a witness to this package's exact worker, never just its display identity. */
 export async function withWorkerHandoff(root, workerId, binding, options, operation) {
   let entered = false;
   try {
-    if (typeof binding?.sessionFile !== 'string') fail('missing session file binding');
-    const sessionFile = await realpath(binding.sessionFile);
-    const directory = await witnessRoot(root);
-    if (binding.handoff === undefined) {
+    const { sessionFile, directory, reference } = await workerFence(root, workerId, binding);
+    if (reference === undefined) {
       return await locked(directory, sessionFile, async path => {
         // Discovery is mandatory: omitting attachment cannot turn a reserved
         // worker into a standalone worker. The same mutex excludes preparation.
-        try {
-          await readJson(path);
-          fail('handoff witness exists; attach the exact reference before activation');
-        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await requireStandalone(path);
         if (options?.effect) {
           try { await claim(paths(directory, sessionFile).standaloneUse, { used: true }); }
           catch (error) { if (error.code !== 'EEXIST') throw error; }
@@ -154,12 +184,6 @@ export async function withWorkerHandoff(root, workerId, binding, options, operat
         return operation();
       });
     }
-    const reference = binding.handoff;
-    if (reference.root !== directory ||
-        reference.target?.workerId !== workerId || reference.target?.root !== await realpath(root) ||
-        reference.identity?.sessionId !== binding.sessionId ||
-        reference.identity?.sessionFile !== binding.sessionFile ||
-        reference.identity?.checkpoint !== binding.checkpoint) fail('handoff does not match worker binding');
     return await withHandoff(reference, options, record => {
       entered = true;
       return operation(record);

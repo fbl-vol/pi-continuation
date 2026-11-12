@@ -9,7 +9,7 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
-import { withWorkerHandoff } from './ownership.mjs';
+import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
   resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
@@ -103,7 +103,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       else {
         try {
           await checkpointPath(id);
-          await withWorkerHandoff(root, id, binding, {}, () => {});
+          await checkWorkerHandoff(root, id, binding);
         } catch (error) {
           reason = error.code === 'OWNERSHIP_FENCE' ? 'Worker ownership unavailable' : 'Worker checkpoint unavailable';
           report('read checkpoint', error, diagnosticContext);

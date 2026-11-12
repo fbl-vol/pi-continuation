@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { atomicJson, ensureRoot, readJson } from '../src/store.mjs';
-import { prepareHandoff, inspectHandoff, withHandoff, withWorkerHandoff, rollbackHandoff } from '../src/ownership.mjs';
+import { prepareHandoff, inspectHandoff, checkWorkerHandoff, withHandoff, withWorkerHandoff, rollbackHandoff } from '../src/ownership.mjs';
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'continuation-fence-'));
@@ -61,9 +61,21 @@ test('standalone delivery and preparation share one mutex and cannot erase earli
   await ensureRoot(f.target.root);
   const binding = { sessionFile: f.identity.sessionFile };
   await withWorkerHandoff(f.target.root, f.target.workerId, binding, { effect: true }, async () => {
+    await checkWorkerHandoff(f.target.root, f.target.workerId, binding);
     await assert.rejects(prepareHandoff(f.root, f, f.reserve), /worker busy or abandoned lock/);
   });
   await assert.rejects(prepareHandoff(f.root, f, f.reserve), /standalone delivery already attempted/);
+});
+
+test('availability observation does not contend with an owned activation or delivery mutex', async t => {
+  const f = await fixture(t);
+  const reference = await prepareHandoff(f.root, f, f.reserve);
+  const binding = { sessionId: reference.identity.sessionId, sessionFile: reference.identity.sessionFile,
+    checkpoint: reference.identity.checkpoint, handoff: reference };
+  await withWorkerHandoff(f.target.root, f.target.workerId, binding, {}, async () => {
+    await checkWorkerHandoff(f.target.root, f.target.workerId, binding);
+    await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, binding, {}, () => {}), /worker busy/);
+  });
 });
 
 test('interrupted reserve blocks both owners and can roll back without publishing new ownership', async t => {

@@ -195,7 +195,8 @@ test('a changed checkpoint path isolates the worker instead of reading another a
   s.event();
   await eventually(async () => (await s.state()).workers[s.worker.id].paused);
   const state = await s.state();
-  assert.equal(state.workers[other.id].paused, false);
+  assert.equal(state.workers[other.id].paused, false,
+    JSON.stringify({ reason: state.workers[other.id].reason, failure: state.workers[other.id].failure }));
   assert.equal(state.routes.w.paused, false);
   assert.match(state.workers[s.worker.id].reason, /checkpoint/);
   const disposition = (await s.disposition('resume')).content[0].text;
