@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
+import { bindContinuation } from '../src/ordinary.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
 import { checkpointHash } from '../src/policy.mjs';
 import { ownerAlive } from '../src/ipc.mjs';
@@ -25,7 +26,7 @@ async function eventually(predicate) {
 }
 
 // Real local transport and persistence; only the Pi lifecycle and Herdr server are fake.
-async function fixture(t, { coordinatorInput = false } = {}) {
+async function fixture(t, { coordinatorInput = false, ordinary = false, priorHandled = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const prior = process.env.HERDR_ENV;
@@ -37,7 +38,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
     const value = { id, paneId, sessionId: id, sessionFile, cwd: '/project',
       terminalId: id, workspaceId, tabId: `${workspaceId}:tab`, sessionKind: 'path', sessionValue: sessionFile };
     agents.push({ agent: 'pi', pane_id: paneId, terminal_id: id, workspace_id: workspaceId,
-      tab_id: value.tabId, cwd: value.cwd, agent_status: 'idle', completion_seq: 1,
+      tab_id: value.tabId, cwd: value.cwd, agent_status: 'idle', state_change_seq: 1, completion_seq: 1,
       agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } });
     return value;
   }
@@ -57,7 +58,8 @@ async function fixture(t, { coordinatorInput = false } = {}) {
   await atomicJson(join(root, `observation-${worker.id}.json`), observation);
   await atomicJson(join(root, `coordinator-${coordinator.id}.json`), coordinator);
   await atomicJson(join(root, 'supervisor.json'), { paused: false,
-    workers: { [worker.id]: worker }, routes: { w: { paused: false, coordinator } }, handled: {} });
+    workers: { [worker.id]: worker }, routes: { w: { paused: false, coordinator } },
+    handled: priorHandled ? { [worker.id]: stop } : {}, resumed: {} });
   const sockets = new Set();
   const subscriptions = new Set();
   let snapshotHook = () => {};
@@ -88,10 +90,16 @@ async function fixture(t, { coordinatorInput = false } = {}) {
     sessionManager: { getSessionId: () => 'supervisor' },
     ui: { confirm: async () => true, notify: () => {} } };
   await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
-  bindSupervisor({ on: (name, fn) => sh.set(name, fn),
-    registerCommand: (_name, definition) => { command = definition.handler; },
-    registerTool: definition => { tool = definition.execute; }, sendMessage: message => wakes.push(message) },
-  { root, socketPath, allowExperimentalActivation: true });
+  const supervisorPi = { on: (name, fn) => {
+    const previous = sh.get(name);
+    sh.set(name, previous ? (...args) => Promise.all([previous(...args), fn(...args)]) : fn);
+  },
+    registerCommand: (name, definition) => {
+      if (name === 'continuation-supervisor') command = definition.handler;
+    },
+    registerTool: definition => { tool = definition.execute; }, sendMessage: message => wakes.push(message) };
+  if (ordinary) bindContinuation(supervisorPi, { root, socketPath });
+  else bindSupervisor(supervisorPi, { root, socketPath, allowExperimentalActivation: true });
   t.after(async () => {
     await sh.get('session_shutdown')?.();
     await ch.get('session_shutdown')?.();
@@ -112,6 +120,7 @@ async function fixture(t, { coordinatorInput = false } = {}) {
       return next;
     },
     state: () => readJson(join(root, 'supervisor.json')),
+    dispose: (args, signal) => tool('call', args, signal, undefined, ctx),
     onSnapshot: fn => { snapshotHook = fn; },
     command: args => command(args, ctx),
     disposition: async (action, kind, reportHash, evidence = 'Validated result') => tool('call',
@@ -120,6 +129,78 @@ async function fixture(t, { coordinatorInput = false } = {}) {
     undefined, undefined, ctx),
     event: () => { for (const socket of subscriptions) socket.write(JSON.stringify({ event: 'pane.updated' }) + '\n'); },
   };
+}
+
+test('P1 ordinary loading permits human scoped activation without an SDK opt-in', async t => {
+  const s = await fixture(t, { ordinary: true });
+  await s.command('pause global');
+  assert.equal((await s.state()).paused, true);
+  await s.command('activate global');
+  assert.equal((await s.state()).paused, false);
+  assert.equal((await s.state()).workers[s.worker.id].paused, false);
+});
+
+test('P3 blocked mid-turn attention is distinct, deduplicated and material-only', async t => {
+  const s = await fixture(t, { priorHandled: true });
+  const native = { ...s.observation, outcome: 'working', stop: null };
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`), native);
+  const agent = s.agents.find(a => a.pane_id === s.worker.paneId);
+  agent.agent_status = 'blocked';
+  agent.state_change_seq = 2;
+  s.ctx.isIdle = () => true;
+  s.event();
+  await eventually(() => s.wakes.length === 1);
+  const content = s.wakes[0].content;
+  const [evidence] = JSON.parse(content.slice(content.indexOf('[{')));
+  assert.equal(evidence.outcome, 'blocked');
+  assert.equal(evidence.finalReply, undefined);
+  assert.match(evidence.statusEvidence, /Herdr reports blocked/);
+  const token = (await s.state()).blocked[s.worker.id].stop;
+  assert.equal(evidence.stop, token);
+  assert.notEqual(token, s.observation.stop);
+  s.event();
+  assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
+    action: 'resume', evidence: 'Validated result' })).content[0].text, /ineligible/);
+  assert.equal((await s.state()).blocked[s.worker.id].stop, token);
+  assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
+    action: 'notify', kind: 'completion', evidence: 'Validated result' })).content[0].text, /ineligible/);
+  const notice = await s.dispose({ workerId: s.worker.id, stop: token,
+    action: 'notify', kind: 'decision', evidence: 'Herdr reports blocked' });
+  assert.match(notice.content[0].text, /Material notice sent/);
+  assert.equal((await s.state()).workers[s.worker.id].paused, true);
+  assert.equal(s.notices.length, 1);
+  assert.equal(s.wakes.length, 1);
+  assert.equal((await s.state()).handled[s.worker.id], s.observation.stop);
+  assert.equal((await s.state()).resumed[s.worker.id], undefined);
+  assert.equal((await s.state()).blocked[s.worker.id].handled, true);
+  await assert.rejects(s.command(`activate worker ${s.worker.id}`), /Worker blocked/);
+  assert.equal((await s.state()).workers[s.worker.id].paused, true);
+  assert.deepEqual(await readJson(join(s.root, `observation-${s.worker.id}.json`)), native);
+});
+
+for (const change of ['blocked', 'replacement', 'new sequence', 'missing sequence', 'cancelled']) {
+  test(`P2/P3 near-delivery Herdr recheck refuses ${change} without spending a nudge`, async t => {
+    const s = await fixture(t);
+    let reads = 0;
+    const controller = new AbortController();
+    s.onSnapshot(() => {
+      if (++reads !== 2) return;
+      const agent = s.agents.find(a => a.pane_id === s.worker.paneId);
+      if (change === 'blocked') agent.agent_status = 'blocked';
+      if (change === 'replacement') agent.terminal_id = 'replaced';
+      if (change === 'new sequence') agent.state_change_seq++;
+      if (change === 'missing sequence') delete agent.state_change_seq;
+      if (change === 'cancelled') controller.abort();
+    });
+    const answer = await s.dispose({ workerId: s.worker.id, stop: s.observation.stop,
+      action: 'resume', evidence: 'Validated result' }, controller.signal);
+    assert.match(answer.content[0].text, /paused before delivery; no continuation sent/);
+    const state = await s.state();
+    assert.equal(state.workers[s.worker.id].paused, true);
+    assert.equal(state.inflight[s.worker.id], undefined);
+    assert.equal(state.budgets[s.worker.id], undefined);
+    assert.equal(state.resumed[s.worker.id], undefined);
+  });
 }
 
 test('a final-reply approval question can suspend the worker and route an exact decision', async t => {

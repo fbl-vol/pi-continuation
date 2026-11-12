@@ -20,7 +20,7 @@ test('human attachment preserves pauses and conservative budget; retired ownersh
     cwd: '/project', paneId: 'w1:p1' };
   const stop = randomUUID();
   const agent = { pane_id: record.paneId, tab_id: 'w1:t1', workspace_id: 'w1', terminal_id: 'terminal',
-    cwd: record.cwd, agent: 'pi', agent_status: 'idle', completion_seq: 1,
+    cwd: record.cwd, agent: 'pi', agent_status: 'idle', state_change_seq: 1, completion_seq: 1,
     agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: record.sessionFile } };
   const herdr = net.createServer(socket => socket.once('data', data => {
     const request = JSON.parse(data);

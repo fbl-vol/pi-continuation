@@ -1,66 +1,52 @@
-# Narrative judgment and UI boundary evidence
+# Validation evidence and limits
 
-These are development observations, **not replacement acceptance**. The required approval boundary is unchanged.
+[extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
+Tests/reviews verify it; they do not create requirements. Owner completion is not
+user acceptance; whole-native-UI proof is not a hidden gate. No live installation,
+real-worker migration, secrets or npm publication is implied.
 
-## A: narrative checkpoint plus final reply
+## Ordinary-extension evidence
 
-A blind read-only model exercise using `openai-codex/gpt-6-sol` selected acceptable dispositions for 12/12 synthetic stops. Cases cover unfinished approved work, explicit and implicit permission requests, conflicting checkpoint/reply evidence, review follow-ups, whole-assignment completion, blockers, ambiguity, historical quoted questions, injected instructions, aborts and provider errors. Expected outcomes were authored before the review and withheld from the reviewer.
+`npm test` uses fake Pi/Herdr, real local sockets and temporary state/processes,
+not real workers. `npm run check:package` checks the explicit normal extension
+payload and rejects experimental SDK launcher/resources.
 
-The inputs use the production attention formatter and registered tool description/schema. The checker requires exactly one result per case, arguments valid against the registered tool schema, an independently permitted outcome, exact synthetic worker/stop identity, and acceptance by the production evidence/freshness policy. It performs no effects.
+- **P1:** observation/parity tests cover ordinary registration and human scoped
+  activation without first-option startup or SDK opt-in. An isolated Pi 1.5.0
+  smoke discovers the packed entry from ordinary package settings, with no
+  explicit extension path, launcher, model request or real Herdr connection.
+- **P2/P3:** supervisor/receiver/parity tests cover exact-stop delivery, final
+  Herdr rechecks, mid-turn blocked attention without an assistant stop, material-
+  only blocked disposition and preserved native handled history. Observation/
+  prompt-guard tests retain sticky holds and observed shared-UI interleavings.
+- **P4–P6:** policy/supervisor/repair/coordinator/parity tests cover independent
+  scopes, two-nudge bounds, one corrective wake, no-resend and exact material
+  notices with pending/uncertain/freshness distinctions.
+- **P7:** ownership/handoff tests exercise competing processes, witness exclusion,
+  paused attachment, inherited-stop no-replay and sibling-preserving rollback.
+  No adapter was installed into active supervision.
 
-From a source checkout, repeat with a fresh independent reviewer:
+Five selected blocked/final-recheck regressions failed against isolated pre-change
+source, then passed on the ordinary implementation. No production source was
+modified for that red comparison. Deterministic policy tests are not model judgment.
 
-```sh
-node scripts/judgment.mjs --blind > /tmp/continuation-blind.json
-# Give only that file to the reviewer; no fixture expectations or prior answers.
-# Record [{"caseId":"case-1","arguments":{...}}, ...] without answer-key feedback.
-node scripts/judgment.mjs --check /tmp/continuation-judgments.json
-```
+## Narrative and historical evidence
 
-This exercises actual model interpretation, not a forced incorrect disposition. It is still a small, single-model, single-pass review, not the configured supervisor's complete native tool loop, long-running behavior, or a semantic safety proof. Ordinary `npm test` validates the offline harness and deterministic policy; it does **not** call a model or establish the 12-case behavioral result itself. A remains the chosen workflow. Mandatory structured worker declarations remain a proposed contingency, not an implemented protocol or an answer to UI ordering.
+A prior independent blind model exercise selected acceptable dispositions for
+12/12 synthetic cases spanning unfinished approved work, permission, ambiguity,
+review follow-ups, whole-assignment completion, injection, abort and errors. It
+used production attention/schema/evidence checking, not live effects or a semantic
+proof. `node scripts/judgment.mjs --blind` supplies reviewer-only input;
+`--check <answers.json>` validates answers. Ordinary tests do not call a model.
 
-## Native Pi 1.5.2 TUI probe (Linux)
+Earlier disposable Linux Pi/Herdr/scripted-model trials and three-OS isolated CI
+are bounded historical evidence, not credentialed workflow or native macOS/Windows
+runtime acceptance. Partial SDK/native-UI experiments and their detailed evidence
+are preserved on [`experiment/sdk-host-native-ui-deferred`](https://github.com/fbl-vol/pi-continuation/tree/experiment/sdk-host-native-ui-deferred),
+not accepted or part of ordinary package delivery. Retained historical tests do
+not make SDK completeness, exhaustive dialogs, a fork or upstream agreement gates.
 
-A disposable, ephemeral Pi process with discovery and tools disabled exercised real native dialogs. No workers were registered, no package settings were installed, and no model request was made by that probe.
-
-| Interaction | Owned confirmation accepted | Holds signalled | Outer start events |
-|---|---:|---:|---:|
-| Uncontended owned confirmation | true | 0 | 1 |
-| Shared-context input entirely inside it | false | 1 | 1 |
-| Alternate shortcut-context input entirely inside it | **true** | **0** | 1 |
-
-The new shared-UI guard observes `select`, `confirm`, `input`, `editor` and `custom` calls synchronously before native display. It fences registration consent, initial-message publication, hold clearing and receipt-time delivery. Closing an external dialog never clears the sticky worker hold. It also checks wrapper integrity and releases its wrappers on shutdown without overwriting a later extension's replacement. Once a check detects that a wrapper was replaced, that guard remains invalid even if the wrapper is put back. Detection signals the worker's durable hold and discards the old eligible stop; reload does not restore that stop. Isolated regressions reproduced both silent rearming and missing persistence before this correction. This is detection-time protection, not continuous observation of every UI assignment or a fix for the separate-context gap.
-
-**Known uncovered boundary:** native shortcut handlers receive a different UI object. Its prompt calls bypass both the shared-object wrappers and the runner's nested prompt events. An approval entirely inside an owned confirmation can therefore remain invisible. Loading this extension first is necessary for event ordering, but does not fix this context gap. These observations establish a remaining UI-observability failure, not a failed interpretation by A. Structured stop declarations would not repair it either.
-
-The standalone extension still has no supported all-context prompt mechanism. Hooking private host state or broadly replacing terminal focus/rendering is not an equivalent verified boundary. Native macOS/Windows runtime, real supervisor/worker judgment, full prompt coverage, and separately authorized selected-worker installation/transfer/rollback remain unverified. Default-disabled activation and the prohibition on real-worker reliance remain in place.
-
-## SDK resource-boundary integration
-
-The exported SDK resource loader accepts `extensionsOverride`. The new `createPromptScope()` helper can transform loaded shortcut definitions through that boundary, observing their separate UI contexts before each prompt call. It does not change Pi, intercept terminal output or use an unshipped host API. A caller must apply the override on every resource load and pass the same host-lifetime scope to `bindObservation`. The experimental SDK host below does this; the ordinary extension entry point does neither and gains no additional coverage.
-
-In an isolated installed Pi 1.5.2 SDK test, real `InteractiveMode` shortcut dispatch/dialogs ran against a fake terminal transport. Alternate input and a pending-factory/hidden overlay were each exercised initially, after native session replacement, and after command-driven native reload. In all six scoped cases the package guard rejected the overlapping owned confirmation and signalled one hold, although the native owned dialog itself returned true. All six unscoped comparisons incorrectly accepted with no hold. The host snapshot capability was absent; no model runs, real workers or live configuration were used. This is SDK integration evidence, not physical-terminal or cross-platform runtime acceptance.
-
-A second isolated SDK exercise used the production `bindObservation` workflow and a synthetic saved session/worker. It verified blocked registration on alternate-context overlap, a hold before any terminal input, durable reload restoration and rejection of an overlapping hold-clear using a shortcut context cached before reload. The unscoped comparison reproduced the missing protections. Both used fake terminal transport and temporary state, with no real Herdr connection or model runs.
-
-The host scope now also retains a base layer on shared UI after a worker guard is disposed. A cached shared UI call after shutdown previously escaped that guard, allowing an overlapping hold-clear after reload and preserving an eligible stop when the call occurred in the unobserved reload gap. The production-observer regression failed before the fix; a real installed SDK/dialog probe also reproduced the overlapping-clear failure. Both now reject, durably retain the hold and invalidate the saved stop. Owned confirmation bypasses only its own native invocation; a synchronous nested external prompt still signals. Partial native project-trust UI surfaces are supported; failed instrumentation restores partial changes.
-
-Worker observations optionally pin the scope identity and revision. An unchanged scope preserves an eligible stop on restore; a different host, a stamp present on only one side, or activity during the unobserved reload gap instead durably holds the worker and discards that stop. This includes a scoped worker reopened without a scope. A review found that downgrade initially escaped the comparison; its regression failed before the symmetric comparison was applied. Closing a prompt or replacing the guard cannot clear the hold. Isolated production-observer tests cover registration publication, hold clearing and restoration; receipt-time checks share the same synchronous guard state.
-
-## SDK worker host (source preparation)
-
-`runtime.mjs` assembles the public SDK services/runtime, native resource discovery and codemode/tool-search/MCP factories. It starts settings project-untrusted and resolves native trust before loading project code or settings. Global trust handlers are snapshotted before dispatch, then native stored trust/policy and process-only choices apply. Only an explicit remember choice persists trust. A missing trust UI does not grant trust. Known duplicate loading of this package entry is removed by exact file identity; only its matching collision diagnostics are discarded. Foreign continuation-name collisions, unknown resource errors and model fallback fail startup. Native builtin factories share the process agent directory; an unrelated helper `agentDir` is rejected before services/factories load, while filesystem aliases normalize to the native path. This avoids reading another root's MCP configuration, credentials or log.
-
-`worker.mjs` is an explicit, experimental TUI entry point, not an auto-loaded extension or configuration CLI. Explicit missing, empty or directory sessions fail before SDK access; help/headless probes also verify no SDK configuration/credential access. Native session selection supplies cwd and saved model. Importing it does not launch a host. It does not register, activate or migrate a worker automatically. The unavailable native llama.cpp command is fenced by a replaceable warning handler rather than sent as a model prompt.
-
-Disposable tests on installed, unmodified Pi 1.5.2 exercised the production runtime and observer with both cached shortcut and shared contexts across reload. They verified rejected overlapping registration, a hold before terminal input, durable reload hold and rejected overlapping hold-clear. A separate native SDK trust test denied project code/settings before consent, loaded them only after approval, persisted explicit native trust and retained the decision across session replacement. These used temporary HOME/settings/resources and no model runs or real Herdr connection; the dialog tests used fake terminal transport.
-
-A native Core `/login` fixture exposed another gap: an owned hold-clear could succeed while a synthetic provider's authentication prompt remained pending, leaving memory and disk unheld. The host now observes the public `ModelRuntime.login` operation before native UI can use it. The same unmodified SDK fixture refuses that overlapping clear, retains the durable hold, and permits a fresh explicit clear only after synthetic authentication finishes. It used a fake terminal, generated fixture tokens in a temporary native credential store, no model runs, a deny-all fetch fence with zero network attempts, and no real Herdr connection. Unit checks cover receiver/argument/result preservation, fully overlapped auth, failures, guard replacement and sticky detected hook loss; weak hook references do not retain disposed native runtimes through bound methods. This is not verification of every Pi-owned UI path.
-
-Core `/bug` consent independently reproduced the same overlapping-clear failure. A package-side observer now uses the documented editor factory and submission slot, retaining the original editor object, custom factories and scoped default history rather than intercepting focus/rendering. The installed SDK's async diagnostic callback remains pending through the native consent flow; the production fix refused an overlapping clear and retained memory/disk holds, then allowed fresh clearing after genuine native cancellation. This test used the public callback to trace native completion, fake terminal transport, temporary state, no model runs, zero deny-all-fetch attempts and no real Herdr. `/share` routing is protected by unit/source checks but its subprocess/upload path has not been exercised here. Promise completion is observed Pi 1.5.2 behavior despite a void callback type: other SDK frontend versions are rejected, and missing completion or displaced method/accessor observation invalidates the host scope. Unsupported custom callback accessors/nonconfigurable slots are refused, not overwritten or silently unobserved. Unit checks also protect ordinary command submission from spurious leases, opaque results, callback failures, original editor/private-field behavior, cached APIs/default resets and sticky integrity loss. Existing native shortcut/shared/reload/trust/auth/metadata and packed Linux PTY checks were repeated; this is still bounded worker evidence, not whole-native-UI acceptance.
-
-A packed CLI test additionally used a real Linux PTY, symlinked executable, existing synthetic saved session, discovered copy of this package and an untrusted project extension. Project code did not execute before startup consent. Native InteractiveMode reached session-start and explicit registration remained paused, exact-session-bound and scope-stamped; orderly exit returned zero. The environment was empty except declared fixture values, offline, with a nonexistent synthetic Herdr endpoint. No real worker, live configuration, credentials or model service was used.
-
-Independent review found that the SDK silently substitutes and appends defaults for a saved branch containing model/thinking metadata but no messages. A native metadata-only fixture reproduced model A/high becoming B/low, including when A was unavailable, without a fallback message. The host now pins the native saved selection before session construction, retaining A/high when available and rejecting unavailable A without rewriting its metadata. These checks used fake model definitions and zero model runs. Review also identified the alternate-agent-directory split above; fake-service preflight and real filesystem-alias tests protect its refusal without inspecting any live MCP configuration.
-
-An accepted launch workflow, complete native UI coverage, integrated supervisor/worker narrative judgment, Herdr runtime identity, selected-worker handoff/recovery and whole-replacement acceptance remain required. Native macOS/Windows TTY behavior is unverified. This preparation does not adopt the local Pi patch, make the standalone extension safe for replacement, or authorize live installation or migration.
+Model misreading, hidden/unreported UI and changes between process checks remain
+limitations. Genuine approvals/pauses/review still cannot be bypassed. A new
+weakness needs an actual baseline regression before becoming work; material
+workflow/safety changes require the user's decision and smallest alternative.

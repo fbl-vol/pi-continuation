@@ -7,6 +7,7 @@ import { bindObservation as bindWorkerObservation } from '../src/observation.mjs
 import { MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
 import { readWorkerRegistration } from '../src/bindings.mjs';
 import { createPromptScope } from '../src/prompt-scope.mjs';
+import { bindContinuation } from '../src/ordinary.mjs';
 
 const bindObservation = (pi, options) => bindWorkerObservation(pi,
   { ...options, launchGuard: () => true });
@@ -25,7 +26,10 @@ function fakePi(sessionId, sessionFile) {
       editor: async () => undefined, custom: async () => undefined,
       notify: (...args) => notices.push(args),
       onTerminalInput: handler => { terminalInput.add(handler); return () => terminalInput.delete(handler); } } };
-  const pi = { on: (name, fn) => handlers.set(name, fn),
+  const pi = { on: (name, fn) => {
+    const previous = handlers.get(name);
+    handlers.set(name, previous ? (...args) => Promise.all([previous(...args), fn(...args)]) : fn);
+  }, registerTool: () => {},
     registerCommand: (name, definition) => {
       if (name === 'continuation-worker') pi.command = definition.handler;
       if (name === 'continuation-worker-clear-hold') pi.clearHold = definition.handler;
@@ -45,7 +49,9 @@ async function guardedFixture(t, configure = () => {}, options = {}) {
   s.pi.sendUserMessage = message => sent.push(message);
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
-  const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1', ...options });
+  const { ordinary = false, ...bindings } = options;
+  const bind = ordinary ? bindContinuation : bindObservation;
+  const observer = bind(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1', ...bindings });
   t.after(async () => {
     await s.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
@@ -55,6 +61,19 @@ async function guardedFixture(t, configure = () => {}, options = {}) {
   await s.emit('session_start');
   return { ...s, root, checkpoint, observer, sent };
 }
+
+test('P1 ordinary profile registers a paused exact session without first-option startup', async t => {
+  const s = await guardedFixture(t, () => {}, { ordinary: true });
+  assert.equal(s.observer.registered, false);
+  await s.pi.command(s.checkpoint, s.ctx);
+  assert.equal(s.observer.registered, true);
+  assert.deepEqual(s.sent, []);
+  const record = JSON.parse(await readFile(join(s.root, (await readdir(s.root)).find(name =>
+    name.startsWith('worker-'))), 'utf8'));
+  assert.equal(record.paused, true);
+  assert.equal(record.sessionId, 'native');
+  assert.equal(record.sessionFile, '/sessions/native.jsonl');
+});
 
 test('a fully overlapping approval during registration confirmation prevents first-turn publication', async t => {
   const s = await guardedFixture(t, worker => {

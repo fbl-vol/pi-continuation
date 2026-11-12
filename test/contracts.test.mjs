@@ -29,6 +29,18 @@ test('unknown versions and malformed authority fields fail instead of acquiring 
     { code: 'INVALID_RECORD' });
 });
 
+test('P3 blocked attention is additive, sequence-pinned status rather than a worker observation', () => {
+  const state = newSupervisor();
+  const stop = 'a8671bd7-4c5c-4cee-aeab-59b6b20915eb';
+  state.blocked.w = { stop, sequence: 4 };
+  assert.deepEqual(decodeSupervisor(state).blocked, state.blocked);
+  for (const blocked of [null, [], { w: { stop, sequence: -1 } },
+    { w: { stop, sequence: '4' } }, { w: { stop: 'invalid', sequence: 4 } }])
+    assert.throws(() => decodeSupervisor({ ...state, blocked }), { code: 'INVALID_RECORD' });
+  delete state.blocked;
+  assert.deepEqual(decodeSupervisor(state).blocked, {});
+});
+
 test('old completion notices remain readable, but malformed report hashes cannot be persisted', () => {
   const state = newSupervisor();
   state.routes.r = { paused: false };

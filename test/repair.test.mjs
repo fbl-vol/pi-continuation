@@ -26,7 +26,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const pendingAction = randomUUID();
   const checkpoint = join(root, 'checkpoint.md');
   const agent = { pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', terminal_id: 'terminal',
-    cwd: '/project', agent: 'pi', agent_status: 'idle', completion_seq: 1,
+    cwd: '/project', agent: 'pi', agent_status: 'idle', state_change_seq: 1, completion_seq: 1,
     agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
   const herdr = net.createServer(socket => socket.once('data', data => {
     const request = JSON.parse(data.toString());

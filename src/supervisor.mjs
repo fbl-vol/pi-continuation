@@ -83,6 +83,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         observation.outcome !== 'completed' || observation.hold || !observation.stop) return null;
     return observation;
   };
+  // Herdr can block mid-turn, before any native assistant stop exists. This is
+  // supervisor-owned attention only: never write it into worker observations.
+  const blockedStop = (workerId, agent) => {
+    if (agent.agent_status !== 'blocked') { delete state.blocked[workerId]; return null; }
+    const sequence = agent.state_change_seq;
+    if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+    if (state.blocked[workerId]?.sequence !== sequence)
+      state.blocked[workerId] = { sequence, stop: randomUUID() };
+    return { stop: state.blocked[workerId].stop, outcome: 'blocked',
+      statusEvidence: `Herdr reports blocked at state sequence ${sequence}; inspect the worker's current prompt. This status does not grant approval.` };
+  };
   const checkpointPath = workerId => pinnedCheckpoint(root, workerId, state.workers[workerId]);
   const isolateUnavailable = async () => {
     if (!active() || !lastSnapshot) return;
@@ -131,11 +142,15 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       try {
         const agent = lastSnapshot?.agents.find(a => a.pane_id === binding.paneId);
         if (!sameOccupant(agent, binding)) continue;
-        const stop = await readObservation(root, id);
-        if (stop.session?.id !== binding.sessionId || !stop.stop ||
-            !['completed', 'approval', 'aborted', 'error'].includes(stop.outcome)) continue;
-        if (stop.outcome === 'completed' && (agent.agent_status !== 'idle' || agent.completion_seq == null)) continue;
-        if (state.handled[id] !== stop.stop) result.push({ id, stop });
+        let stop = blockedStop(id, agent);
+        if (!stop) {
+          stop = await readObservation(root, id);
+          if (stop.session?.id !== binding.sessionId || !stop.stop ||
+              !['completed', 'approval', 'aborted', 'error'].includes(stop.outcome)) continue;
+          if (stop.outcome === 'completed' && (agent.agent_status !== 'idle' || agent.completion_seq == null)) continue;
+        }
+        if (stop.outcome === 'blocked' ? !state.blocked[id].handled : state.handled[id] !== stop.stop)
+          result.push({ id, stop });
       } catch (error) {
         // No observation yet is normal; a malformed/unreadable record is not.
         if (error.code !== 'ENOENT') report('read observation', error, diagnosticContext);
@@ -227,7 +242,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const reportText = await readFile(path, 'utf8');
         evidence.push({ id, outcome: stop.outcome, stop: stop.stop,
           checkpointPath: path, reportHash: checkpointHash(reportText),
-          finalReply: stop.finalReply, checkpoint: reportText.slice(0, 4096) });
+          finalReply: stop.finalReply, statusEvidence: stop.statusEvidence,
+          checkpoint: reportText.slice(0, 4096) });
       } catch (error) {
         state.workers[id].paused = true;
         report('read attention checkpoint', error, ctx);
@@ -445,6 +461,12 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!await ctx.ui.confirm(`${verb} ${kind}?`,
           `Set only ${kind} ${id ?? ''} to ${enabled ? 'active' : 'paused'}? Other pauses remain unchanged.`)) return;
         const updateScope = async () => {
+          if (enabled && kind === 'worker') {
+            const live = await snapshot(socketPath);
+            const agent = live.agents.find(a => a.pane_id === target.paneId);
+            if (!sameOccupant(agent, target) || !['idle', 'working'].includes(agent.agent_status))
+              throw new Error('Worker blocked, unknown or replaced; inspect before activation');
+          }
           setScopePaused(state, kind, id, !enabled);
           await commit();
         };
@@ -460,7 +482,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
 
   pi.registerTool({
     name: 'continuation_disposition', label: 'Continuation disposition',
-    description: 'Disposition an exact stop. Resume/completion cite pinned checkpoint evidence; a blocker, decision or pause may cite the worker final reply. Completion also requires reportHash and whole-backlog interpretation. Never grants approval or lifts pauses.',
+    description: 'Disposition an exact stop. Resume/completion cite pinned checkpoint evidence; a blocker, decision or pause may cite the worker final reply or labeled Herdr blocked status evidence. Completion also requires reportHash and whole-backlog interpretation. Never grants approval or lifts pauses.',
     parameters: Type.Object({ workerId: Type.String(), stop: Type.String(),
       action: Type.Union([Type.Literal('resume'), Type.Literal('acknowledge'), Type.Literal('pause'), Type.Literal('notify')]),
       kind: Type.Optional(Type.Union([Type.Literal('completion'), Type.Literal('blocker'), Type.Literal('decision')])),
@@ -476,6 +498,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!binding || (args.action !== 'acknowledge' &&
             (state.paused || binding.paused || state.routes[binding.route]?.paused))) return 'Paused';
         lastSnapshot = await snapshot(socketPath);
+        const reviewedAgent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
+        const reviewedInput = inputVersion;
         await isolateUnavailable();
         if (args.action !== 'acknowledge' &&
             (binding.paused || state.routes[binding.route]?.paused)) return 'Paused';
@@ -484,8 +508,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           if (args.action === 'notify' || args.action === 'pause') {
             const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
             if (sameOccupant(agent, binding) && ['idle', 'blocked'].includes(agent.agent_status)) {
-              observation = await readObservation(root, args.workerId);
-              if (observation.session?.id !== binding.sessionId) observation = undefined;
+              observation = blockedStop(args.workerId, agent);
+              if (!observation) {
+                observation = await readObservation(root, args.workerId);
+                if (observation.session?.id !== binding.sessionId) observation = undefined;
+              }
             }
           } else observation = await current(args.workerId);
         } catch (error) {
@@ -511,17 +538,24 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           await commit();
           return 'Worker checkpoint unreadable; only that worker paused';
         }
-        const plan = planDisposition(state, args, checkpoint, observation.finalReply ?? '');
+        const plan = planDisposition(state, args, checkpoint,
+          observation.finalReply ?? observation.statusEvidence ?? '');
         if (plan.kind === 'reject') return plan.message;
+        const dispose = action => {
+          if (state.blocked[args.workerId]?.stop === args.stop) {
+            state.blocked[args.workerId].handled = true;
+            binding.paused = true;
+          } else recordDisposition(state, args.workerId, args.stop, action);
+        };
         if (plan.kind === 'notify') {
           const notice = addNotice(state, { id: randomUUID(), ...plan.notice });
-          recordDisposition(state, args.workerId, args.stop, args.kind);
+          dispose(args.kind);
           await commit();
           await flushNotices();
           return `Material notice ${notice.status}`;
         }
         if (plan.kind === 'pause' || plan.kind === 'acknowledge') {
-          recordDisposition(state, args.workerId, args.stop, plan.kind);
+          dispose(plan.kind);
           await commit();
           return plan.kind === 'pause' ? 'Worker paused' : 'Stop acknowledged; independent acceptance not implied';
         }
@@ -544,6 +578,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         try {
           await atomicJson(join(root, `intent-${id}.json`), intent);
           if (_signal?.aborted) throw new Error('Cancelled before delivery');
+          const delivery = await snapshot(socketPath);
+          const agent = delivery.agents.find(a => a.pane_id === binding.paneId);
+          if (_signal?.aborted || !subscriptionLive || promptActive || inputVersion !== reviewedInput ||
+              state.paused || binding.paused || state.routes[binding.route]?.paused ||
+              !sameOccupant(agent, binding) || agent.agent_status !== 'idle' ||
+              !Number.isSafeInteger(reviewedAgent.state_change_seq) ||
+              agent.state_change_seq !== reviewedAgent.state_change_seq ||
+              agent.completion_seq !== reviewedAgent.completion_seq) {
+            // Definite pre-delivery refusal, not an ambiguous accepted request.
+            await atomicJson(join(root, `intent-${id}.json`), { ...intent, status: 'rejected' });
+            delete state.inflight[args.workerId];
+            recordDisposition(state, args.workerId, args.stop, 'pause');
+            await commit();
+            return 'Worker state changed; paused before delivery; no continuation sent';
+          }
           const result = await sendAction(root, intent);
           const receipt = await readJson(join(root, `receipt-${id}.json`));
           if (!result.accepted || result.id !== id || receipt.status !== 'sent')

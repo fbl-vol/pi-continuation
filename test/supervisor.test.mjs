@@ -32,7 +32,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     session: { id: record.sessionId, file: sessionFile, leaf: 'leaf' } };
   const agent = { pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1',
     terminal_id: 'terminal', cwd: '/project', agent: 'pi', agent_status: 'idle',
-    completion_seq: 1, agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
+    state_change_seq: 1, completion_seq: 1, agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
   const coordinatorId = randomUUID();
   const coordinatorRecord = { id: coordinatorId, sessionId: 'coordinator-session',
     sessionFile: '/sessions/coordinator.jsonl', cwd: '/project', paneId: 'w1:p2' };

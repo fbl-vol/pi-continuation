@@ -18,11 +18,10 @@ try {
       !actual.includes(manifest.pi.extensions[0].replace(/^\.\//, ''))) {
     throw new Error('Private guard or explicit extension entrypoint missing');
   }
-  const workerBin = manifest.bin?.['pi-continuation-worker']?.replace(/^\.\//, '');
-  const executable = packed.files.find(file => file.path === workerBin);
-  if (workerBin !== 'src/worker.mjs' || !executable ||
-      !readFileSync(workerBin, 'utf8').startsWith('#!/usr/bin/env node\n'))
-    throw new Error('Explicit executable worker entrypoint missing');
+  const experimental = ['launch', 'worker', 'runtime', 'project-trust', 'prompt-scope', 'native-editor'];
+  if (manifest.bin || !actual.includes('src/ordinary.mjs') ||
+      experimental.some(name => actual.includes(`src/${name}.mjs`)))
+    throw new Error('Ordinary extension payload must not ship the experimental SDK launcher/resources');
   if (!existsSync(join(directory, packed.filename))) throw new Error('Package tarball missing');
   console.log(`Packed ${packed.filename}: ${actual.length} explicit files (private)`);
 } finally { rmSync(directory, { recursive: true, force: true }); }

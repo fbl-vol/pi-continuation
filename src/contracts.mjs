@@ -20,7 +20,7 @@ import { readJson } from './store.mjs';
  *   kind: 'completion'|'blocker'|'decision', text: string,
  *   status: 'pending'|'sending'|'sent'|'stale'|'uncertain'|'resolved'}} Notice
  * @typedef {{id: string, workerId: string, stop: string, ownerToken: string,
- *   status: 'sending'}} Intent
+ *   status: 'sending'|'rejected'}} Intent
  * @typedef {{id: string, status: 'accepted'|'sent'}} Receipt
  * @typedef {{schemaVersion: number, paused: boolean, ownerToken?: string, ownerPid?: number,
  *   workers: Object<string, WorkerBinding>, routes: Object<string, Route>,
@@ -28,6 +28,7 @@ import { readJson } from './store.mjs';
  *   dispositions: Object<string, {stop: string, action: string}>,
  *   budgets: Object<string, {count: number, hash: string, checkpoint: string}>,
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
+ *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>}} SupervisorState
  */
 
@@ -59,6 +60,13 @@ export function decodeSupervisor(record) {
   for (const name of ['handled', 'dispositions', 'budgets', 'repair', 'notices', 'inflight']) {
     if (version === 0 && state[name] == null) state[name] = {};
     if (!object(state[name])) invalid();
+  }
+  // Additive advisory Herdr attention, never a resumable native worker stop.
+  if (state.blocked === undefined) state.blocked = {};
+  if (!object(state.blocked)) invalid();
+  for (const value of Object.values(state.blocked)) {
+    if (!object(value) || !isId(value.stop) || !Number.isSafeInteger(value.sequence) ||
+        value.sequence < 0 || (value.handled !== undefined && typeof value.handled !== 'boolean')) invalid();
   }
   // Old handled stops did not distinguish acknowledgement from delivery.
   // Their no-resend guard must survive an upgrade, even if it is conservative.
