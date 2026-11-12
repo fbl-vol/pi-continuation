@@ -53,16 +53,19 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
   initialTrustContext, modelRuntime, resourceLoaderOptions = {}, sessionOptions = {},
   bindings = {}, report = () => {} } = {}) {
   for (const name of ['createAgentSessionServices', 'createAgentSessionFromServices',
-    'createAgentSessionRuntime', 'createCodemodeExtension', 'createToolSearchExtension', 'createMcpExtension']) {
+    'createAgentSessionRuntime', 'createCodemodeExtension', 'createToolSearchExtension', 'createMcpExtension', 'CustomEditor']) {
     if (typeof sdk[name] !== 'function') throw new Error(`Pi SDK capability required: ${name}`);
   }
+  // Native diagnostic submit completion is observed runtime behavior, not the
+  // void-typed EditorComponent contract. Refuse unverified frontend versions.
+  if (sdk.VERSION !== '1.5.2') throw new Error('SDK worker host requires the verified Pi 1.5.2 frontend profile');
   // Native builtin factories use the process configuration directory. Do not
   // advertise an isolated services root while MCP reads another root's state.
   const nativeAgentDir = sdk.getAgentDir();
   if (!await sameDirectory(agentDir, nativeAgentDir))
     throw new Error('SDK host agentDir must match the native process configuration directory');
   agentDir = nativeAgentDir;
-  const promptScope = createPromptScope();
+  const promptScope = createPromptScope({ Editor: sdk.CustomEditor });
   const trustDiagnostics = [];
   const resolveTrust = createProjectTrustResolver(sdk, agentDir, (operation, error, context) => {
     report(operation, error, context);
@@ -73,6 +76,9 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
   let worker;
 
   const extension = pi => {
+    pi.on('session_start', (_event, ctx) => {
+      if (ctx.hasUI && ctx.mode === 'tui') promptScope.installEditor(ctx.ui);
+    });
     worker = bindObservation(pi, { ...bindings, promptScope, launchGuard: () => true });
     bindSupervisor(pi, bindings);
     bindCoordinator(pi, bindings);

@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { createNativeEditorScope } from './native-editor.mjs';
 
 const promptMethods = ['select', 'confirm', 'input', 'editor', 'custom'];
 
-/** Host-lifetime observation of SDK prompt contexts and native interactive auth. */
-export function createPromptScope() {
+/** Host-lifetime observation of SDK prompt contexts and native interactive operations. */
+export function createPromptScope({ Editor } = {}) {
   const id = randomUUID();
   const listeners = new Set();
   const contexts = new WeakMap();
   const authModels = new WeakSet();
-  const authHooks = new Set();
+  const hooks = new Set();
   let revision = 0;
   let active = 0;
   let invalidated = false;
@@ -24,28 +25,46 @@ export function createPromptScope() {
       return Promise.resolve(invoke()).finally(() => { active--; });
     } catch (error) { active--; throw error; }
   };
-  const checkAuthHooks = () => {
-    for (const hook of authHooks) {
-      const models = hook.models.deref();
-      if (!models) { authHooks.delete(hook); continue; }
-      const wrapped = hook.login.deref();
-      if (!invalidated && (!wrapped || models.login !== wrapped)) {
-        // Restoring a hook cannot disprove missed auth during the gap.
-        invalidated = true;
-        signal();
+  const invalidate = () => {
+    // Restoring a hook cannot disprove missed UI during the gap.
+    if (!invalidated) { invalidated = true; signal(); }
+  };
+  const checkHooks = () => {
+    for (const hook of hooks) {
+      const target = hook.target.deref();
+      if (!target) { hooks.delete(hook); continue; }
+      if (hook.method) {
+        const method = hook.method.deref();
+        if (!method || target[hook.name] !== method) invalidate();
+      } else {
+        const property = Object.getOwnPropertyDescriptor(target, hook.name);
+        const get = hook.get.deref(), set = hook.set.deref();
+        if (!get || !set || property?.get !== get || property?.set !== set) invalidate();
       }
     }
   };
+  const observeMethod = (target, name, wrapped) => {
+    checkHooks();
+    target[name] = wrapped;
+    if (target[name] !== wrapped) throw new Error('Observed method is not writable');
+    // A bound method or callback accessor can retain its owner: all references
+    // in the integrity registry must remain weak, not only the target.
+    hooks.add({ target: new WeakRef(target), name, method: new WeakRef(wrapped) });
+  };
+  const observeAccessor = (target, name, descriptor) => {
+    checkHooks();
+    Object.defineProperty(target, name, { ...descriptor, configurable: true });
+    hooks.add({ target: new WeakRef(target), name,
+      get: new WeakRef(descriptor.get), set: new WeakRef(descriptor.set) });
+  };
+  const editors = Editor ? createNativeEditorScope({ Editor, track, invalidate, observeMethod, observeAccessor }) : undefined;
   const observeModelAuth = models => {
-    if (authModels.has(models)) { checkAuthHooks(); return models; }
+    if (authModels.has(models)) { checkHooks(); return models; }
     const original = models?.login;
     if (typeof original !== 'function') throw new Error('Unsupported model auth surface');
     const wrapped = function (...args) { return track(() => original.apply(this, args)); };
-    models.login = wrapped;
-    if (models.login !== wrapped) throw new Error('Model auth surface is not writable');
+    observeMethod(models, 'login', wrapped);
     authModels.add(models);
-    // Both references must be weak: a bound method can retain its runtime.
-    authHooks.add({ models: new WeakRef(models), login: new WeakRef(wrapped) });
     return models;
   };
 
@@ -72,15 +91,21 @@ export function createPromptScope() {
     // Keep this layer for the host lifetime. A disposed worker guard must not
     // leave cached shared contexts unobserved during or after a native reload.
     contexts.set(ui, new Map([...known, ...originals]));
+    editors?.observeUI(ui);
     return ui;
   };
 
   return {
-    get active() { checkAuthHooks(); return invalidated || active > 0; },
-    snapshot() { checkAuthHooks(); return { id, revision }; },
+    get active() { checkHooks(); return invalidated || active > 0; },
+    snapshot() { checkHooks(); return { id, revision }; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     observeUI,
     observeModelAuth,
+    installEditor(ui) {
+      if (!editors) throw new Error('Native editor observer unavailable');
+      observeUI(ui);
+      editors.install(ui);
+    },
     confirmOwned(ui, ...args) {
       return contexts.get(ui).get('confirm').apply(ui, args);
     },

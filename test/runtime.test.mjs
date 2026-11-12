@@ -15,6 +15,7 @@ function sdkFixture({ fallback = false, available = true, configuredAuth = true,
   const calls = { settings: [], loads: [], disposed: 0, settled: 0 };
   let factory;
   const sdk = {
+    VERSION: '1.5.2', CustomEditor: class {},
     getAgentDir: () => '/synthetic/agent',
     ProjectTrustStore: class { get() { return null; } },
     hasTrustRequiringProjectResources: () => false,
@@ -79,6 +80,16 @@ test('SDK runtime starts project-untrusted and owns resource ordering without re
   assert.equal(f.calls.settings[1].cwd, '/synthetic/other');
   assert.equal(host.promptScope.snapshot().id, id);
   assert.equal(f.calls.loads[1].result.extensions[0].path, '<inline:pi-continuation-runtime>');
+});
+
+test('unverified SDK frontend versions are refused before native factories or services', async () => {
+  const f = sdkFixture();
+  f.sdk.VERSION = '1.5.3';
+  f.sdk.createMcpExtension = () => assert.fail('No native factory on an unverified frontend');
+  await assert.rejects(createContinuationRuntime(f.sdk, { cwd: '/synthetic/work', sessionManager: managerFixture() }),
+    /verified Pi 1.5.2 frontend profile/);
+  assert.deepEqual(f.calls.settings, []);
+  assert.deepEqual(f.calls.loads, []);
 });
 
 test('a different agent directory is refused before native factories or services can read process configuration', async () => {

@@ -39,6 +39,7 @@
     "src/policy.mjs",
     "src/prompt-guard.mjs",
     "src/prompt-scope.mjs",
+    "src/native-editor.mjs",
     "src/project-trust.mjs",
     "src/runtime.mjs",
     "src/worker.mjs",

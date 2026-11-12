@@ -30,7 +30,7 @@ The supervisor model uses `continuation_disposition` to resume, acknowledge, pau
 
 ## Experimental SDK worker host (source preparation)
 
-The package also declares `pi-continuation-worker`, an explicit SDK host tested against **unmodified Pi 1.5.2 on Linux**. It loads the continuation observer first through the public resource-loader API and preserves prompt observation for separate shortcut contexts and cached shared UI across reloads. The ordinary `pi -e` entry point does **not** acquire this coverage.
+The package also declares `pi-continuation-worker`, an explicit SDK host requiring the verified **unmodified Pi 1.5.2 frontend profile**, exercised on Linux. It loads the continuation observer first through the public resource-loader API and preserves prompt observation for separate shortcut contexts and cached shared UI across reloads. The ordinary `pi -e` entry point does **not** acquire this coverage.
 
 For a **separately authorized disposable** environment with the SDK peer available:
 
@@ -42,7 +42,7 @@ node src/worker.mjs --session /path/to/existing-saved-session.jsonl
 
 Native settings/resource discovery, codemode, tool search and MCP factories are retained. The SDK helper requires the native process configuration directory (`PI_CODING_AGENT_DIR`, or Pi's default); filesystem aliases are accepted, but an unrelated custom root is refused before factories load. Project resources start untrusted; global `project_trust` handlers, native stored trust and explicit policy retain priority. Unknown projects need a human choice; only the explicit remember choice writes native trust. A replacement without a native trust UI or an existing decision stays untrusted rather than opening a concurrent console prompt. This is not Pi's configuration/package-management CLI. The native llama.cpp CLI extension has no public SDK factory here; `/llama` warns instead of becoming a model prompt, unless a configured extension supplies it.
 
-Native interactive model login also holds the worker, including pending Core auth prompts that do not use extension UI. Finishing login does not clear that hold. Detected displacement of this auth observer blocks its host scope until restart; restoring the method cannot rehabilitate earlier consent.
+Native interactive model login also holds the worker, including pending Core auth prompts that do not use extension UI. Core `/bug` and `/share` operations are observed through the public editor submission callback, preserving configured editors and native flows without focus/render interception. Their full-flow Promise is verified 1.5.2 runtime behavior, not the callback's void-typed API guarantee; other frontend versions and unsupported callback slots are refused. Finishing an operation does not clear its hold. Detected observer displacement blocks its host scope until restart; restoring an observer cannot rehabilitate earlier consent.
 
 **Not accepted for existing workers.** The packed, symlinked executable was exercised through a real Linux PTY with temporary configuration and a synthetic paused registration, without a model request or real Herdr connection. This does not establish full native UI coverage, supervisor/worker judgment, Herdr runtime identity, selected-worker migration/recovery or macOS/Windows terminal behavior. No live installation or migration follows from these checks; activation remains default-off. See [validation](docs/validation.md#sdk-worker-host-source-preparation).
 
