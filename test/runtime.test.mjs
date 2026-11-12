@@ -44,6 +44,7 @@ function sdkFixture({ fallback = false, available = true, configuredAuth = true,
       return { resourceLoader: { getExtensions: () => result }, diagnostics: [], modelRuntime: {
         getModel: (provider, id) => available ? { provider, id } : undefined,
         hasConfiguredAuth: () => configuredAuth,
+        login: async () => undefined,
         async settleCredentialWrites() { calls.settled++; },
       } };
     },
@@ -133,6 +134,24 @@ test('a discovered copy of this entry is deduplicated without hiding unknown err
   const foreign = sdkFixture({ extensions: [{ ...duplicate, path: '/synthetic/other', resolvedPath: '/synthetic/other' }] });
   await assert.rejects(createContinuationRuntime(foreign.sdk, { cwd: '/synthetic/work', sessionManager: managerFixture() }),
     /registered by another extension/);
+});
+
+test('runtime refuses an unobservable native auth surface before constructing a session', async () => {
+  for (const [mutate, failure] of [
+    [models => { delete models.login; }, /Unsupported model auth surface/],
+    [Object.freeze, TypeError],
+  ]) {
+    const f = sdkFixture();
+    const create = f.sdk.createAgentSessionServices;
+    f.sdk.createAgentSessionServices = async options => {
+      const services = await create(options);
+      mutate(services.modelRuntime);
+      return services;
+    };
+    await assert.rejects(createContinuationRuntime(f.sdk, { cwd: '/synthetic' }), failure);
+    assert.equal(f.calls.session, undefined);
+    assert.equal(f.calls.settled, 1);
+  }
 });
 
 test('saved metadata-only model and thinking are pinned before the SDK can append its defaults', async () => {

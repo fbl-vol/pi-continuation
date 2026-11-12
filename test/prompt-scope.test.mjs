@@ -115,6 +115,88 @@ test('failed scope instrumentation restores partially wrapped UI without publish
   assert.equal(scope.snapshot().revision, 0);
 });
 
+test('native model auth revokes overlapping consent while preserving its receiver, arguments and opaque result', async () => {
+  const scope = createPromptScope();
+  const own = Promise.withResolvers(), auth = Promise.withResolvers();
+  let holds = 0;
+  const guard = guardPromptUI(uiWith(() => own.promise), () => { holds++; }, scope);
+  const args = ['synthetic', 'oauth', {}, {}], credential = {};
+  const models = { login(...received) {
+    assert.equal(this, models);
+    assert.equal(received.length, args.length);
+    for (const [index, value] of args.entries()) assert.equal(received[index], value);
+    assert.equal(holds, 1, 'hold is signalled before entering native auth');
+    return auth.promise;
+  } };
+  assert.equal(scope.observeModelAuth(models), models);
+  const wrapped = models.login;
+  scope.observeModelAuth(models);
+  assert.equal(models.login, wrapped, 'shared native models are not wrapped twice');
+  const consent = guard.confirm('own');
+  const pending = models.login(...args);
+  assert.equal(scope.active, true);
+  assert.equal(await guard.confirm('another own'), false);
+  auth.resolve(credential);
+  assert.equal(await pending, credential);
+  assert.equal(scope.active, false);
+  own.resolve(true);
+  assert.equal(await consent, false, 'a fully overlapped auth flow also revokes consent');
+  assert.equal(scope.snapshot().revision, 1);
+  assert.equal(holds, 1);
+  guard.dispose();
+});
+
+test('cached native auth reaches a replacement guard and failures release only the active lease', async () => {
+  const scope = createPromptScope();
+  let syncFailure = true, oldHolds = 0, newHolds = 0;
+  const models = { login() {
+    if (syncFailure) throw new Error('synthetic sync auth failure');
+    return Promise.reject(new Error('synthetic async auth failure'));
+  } };
+  scope.observeModelAuth(models);
+  const first = guardPromptUI(uiWith(async () => true), () => { oldHolds++; }, scope);
+  first.dispose();
+  const next = guardPromptUI(uiWith(async () => true), () => { newHolds++; }, scope);
+  assert.throws(() => models.login(), /sync auth failure/);
+  assert.equal(scope.active, false);
+  syncFailure = false;
+  await assert.rejects(models.login(), /async auth failure/);
+  assert.equal(scope.active, false);
+  assert.equal(oldHolds, 0);
+  assert.equal(newHolds, 2, 'auth failure does not erase previously signalled holds');
+  next.dispose();
+});
+
+test('detected native auth hook loss invalidates the host scope even after restoration or guard replacement', async () => {
+  const scope = createPromptScope();
+  const models = { login: async () => undefined };
+  scope.observeModelAuth(models);
+  const wrapped = models.login;
+  let holds = 0;
+  const first = guardPromptUI(uiWith(async () => true), () => { holds++; }, scope);
+  models.login = async () => undefined;
+  assert.equal(first.blocked, true);
+  assert.equal(holds, 1);
+  models.login = wrapped;
+  assert.equal(first.blocked, true);
+  assert.equal(holds, 1);
+  first.dispose();
+  const next = guardPromptUI(uiWith(async () => true), () => { holds++; }, scope);
+  assert.equal(await next.confirm('fresh own'), false);
+  assert.equal(scope.active, true);
+  assert.equal(scope.snapshot().revision, 1);
+  next.dispose();
+});
+
+test('unsupported or immutable native auth surfaces are refused rather than silently omitted', () => {
+  const scope = createPromptScope();
+  assert.throws(() => scope.observeModelAuth({}), /Unsupported model auth surface/);
+  const models = Object.freeze({ login: async () => undefined });
+  assert.throws(() => scope.observeModelAuth(models), TypeError);
+  assert.equal(scope.active, false);
+  assert.equal(scope.snapshot().revision, 0);
+});
+
 test('resource wrapping preserves metadata, handler return values and non-prompt context access', async () => {
   const scope = createPromptScope();
   const marker = {};

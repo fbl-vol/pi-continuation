@@ -2,13 +2,52 @@ import { randomUUID } from 'node:crypto';
 
 const promptMethods = ['select', 'confirm', 'input', 'editor', 'custom'];
 
-/** Host-lifetime observation for UI contexts supplied through SDK resource loading. */
+/** Host-lifetime observation of SDK prompt contexts and native interactive auth. */
 export function createPromptScope() {
   const id = randomUUID();
   const listeners = new Set();
   const contexts = new WeakMap();
+  const authModels = new WeakSet();
+  const authHooks = new Set();
   let revision = 0;
   let active = 0;
+  let invalidated = false;
+
+  const signal = () => {
+    revision++;
+    for (const listener of listeners) listener();
+  };
+  const track = invoke => {
+    active++;
+    try {
+      signal();
+      return Promise.resolve(invoke()).finally(() => { active--; });
+    } catch (error) { active--; throw error; }
+  };
+  const checkAuthHooks = () => {
+    for (const hook of authHooks) {
+      const models = hook.models.deref();
+      if (!models) { authHooks.delete(hook); continue; }
+      const wrapped = hook.login.deref();
+      if (!invalidated && (!wrapped || models.login !== wrapped)) {
+        // Restoring a hook cannot disprove missed auth during the gap.
+        invalidated = true;
+        signal();
+      }
+    }
+  };
+  const observeModelAuth = models => {
+    if (authModels.has(models)) { checkAuthHooks(); return models; }
+    const original = models?.login;
+    if (typeof original !== 'function') throw new Error('Unsupported model auth surface');
+    const wrapped = function (...args) { return track(() => original.apply(this, args)); };
+    models.login = wrapped;
+    if (models.login !== wrapped) throw new Error('Model auth surface is not writable');
+    authModels.add(models);
+    // Both references must be weak: a bound method can retain its runtime.
+    authHooks.add({ models: new WeakRef(models), login: new WeakRef(wrapped) });
+    return models;
+  };
 
   const observeUI = ui => {
     const known = contexts.get(ui) ?? new Map();
@@ -17,14 +56,8 @@ export function createPromptScope() {
       if (typeof ui[name] !== 'function') throw new Error('Unsupported prompt UI surface');
       return [name, ui[name]];
     }));
-    const wrappers = new Map([...originals].map(([name, original]) => [name, (...args) => {
-      active++;
-      revision++;
-      try {
-        for (const listener of listeners) listener();
-        return Promise.resolve(original.apply(ui, args)).finally(() => { active--; });
-      } catch (error) { active--; throw error; }
-    }]));
+    const wrappers = new Map([...originals].map(([name, original]) =>
+      [name, (...args) => track(() => original.apply(ui, args))]));
     try {
       for (const [name, wrapped] of wrappers) {
         ui[name] = wrapped;
@@ -43,10 +76,11 @@ export function createPromptScope() {
   };
 
   return {
-    get active() { return active > 0; },
-    snapshot: () => ({ id, revision }),
+    get active() { checkAuthHooks(); return invalidated || active > 0; },
+    snapshot() { checkAuthHooks(); return { id, revision }; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     observeUI,
+    observeModelAuth,
     confirmOwned(ui, ...args) {
       return contexts.get(ui).get('confirm').apply(ui, args);
     },

@@ -136,6 +136,8 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
     try {
       const { errors } = services.resourceLoader.getExtensions();
       if (errors.length) throw new Error('Continuation runtime resources failed to load', { cause: errors });
+      // Native /login bypasses ExtensionContext.ui, including its pending prompts.
+      promptScope.observeModelAuth(services.modelRuntime);
       const selection = metadataSelection(options.sessionManager, services.modelRuntime, sessionOptions);
       result = await sdk.createAgentSessionFromServices({ ...sessionOptions, ...selection, services,
         sessionManager: options.sessionManager, sessionStartEvent: options.sessionStartEvent });
