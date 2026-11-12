@@ -9,6 +9,7 @@ export function createPromptScope({ Editor } = {}) {
   const listeners = new Set();
   const contexts = new WeakMap();
   const authModels = new WeakSet();
+  const sessionRuntimes = new WeakSet();
   const hooks = new Set();
   let revision = 0;
   let active = 0;
@@ -68,6 +69,26 @@ export function createPromptScope({ Editor } = {}) {
     return models;
   };
 
+  const observeSessionTransitions = runtime => {
+    if (sessionRuntimes.has(runtime)) { checkHooks(); return runtime; }
+    for (const name of ['switchSession', 'importFromJsonl']) {
+      const original = runtime?.[name];
+      if (typeof original !== 'function') throw new Error('Unsupported native session transition surface');
+      observeMethod(runtime, name, async function (...args) {
+        try { return await original.apply(this, args); }
+        catch (error) {
+          // The 1.5.2 frontend asks a separate, unobservable cwd question AFTER
+          // this public operation rejects. Its completion cannot end that UI.
+          if (error instanceof Error && Object.getOwnPropertyDescriptor(error, 'name')?.value === 'MissingSessionCwdError')
+            invalidate();
+          throw error;
+        }
+      });
+    }
+    sessionRuntimes.add(runtime);
+    return runtime;
+  };
+
   const observeUI = ui => {
     const known = contexts.get(ui) ?? new Map();
     // ProjectTrustContext exposes only select/confirm/input, unlike a full UI.
@@ -101,6 +122,7 @@ export function createPromptScope({ Editor } = {}) {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     observeUI,
     observeModelAuth,
+    observeSessionTransitions,
     installEditor(ui) {
       if (!editors) throw new Error('Native editor observer unavailable');
       observeUI(ui);

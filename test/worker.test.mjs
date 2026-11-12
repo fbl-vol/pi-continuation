@@ -29,6 +29,24 @@ console.log('NO_SDK_ACCESS');`;
   assert.match(result, /NO_SDK_ACCESS/);
 });
 
+test('a saved working directory must exist before native resources or credentials can load', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-cli-cwd-'));
+  try {
+    const session = join(root, 'saved.jsonl');
+    await writeFile(session, 'synthetic saved-session fixture');
+    let target = join(root, 'missing-project');
+    const sdk = new Proxy({ SessionManager: { open: () => ({ getCwd: () => target }) } }, {
+      get(object, name) {
+        assert.equal(name, 'SessionManager', 'No SDK resources, configuration or credentials before cwd validation');
+        return object[name];
+      },
+    });
+    await assert.rejects(runWorker(['--session', session], { sdk, terminal: {} }), { code: 'ENOENT' });
+    target = session;
+    await assert.rejects(runWorker(['--session', session], { sdk, terminal: {} }), /must be a directory/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('a missing, empty or directory session fails before SDK discovery instead of creating another session', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-cli-'));
   try {

@@ -57,7 +57,9 @@ function sdkFixture({ fallback = false, available = true, configuredAuth = true,
     },
     async createAgentSessionRuntime(callback, options) {
       factory = callback;
-      return { ...await callback(options) };
+      const result = await callback(options);
+      return { ...result, async switchSession() {}, async importFromJsonl() {},
+        async dispose() { result.session.dispose(); } };
     },
   };
   return { sdk, calls, replace: options => factory(options) };
@@ -145,6 +147,19 @@ test('a discovered copy of this entry is deduplicated without hiding unknown err
   const foreign = sdkFixture({ extensions: [{ ...duplicate, path: '/synthetic/other', resolvedPath: '/synthetic/other' }] });
   await assert.rejects(createContinuationRuntime(foreign.sdk, { cwd: '/synthetic/work', sessionManager: managerFixture() }),
     /registered by another extension/);
+});
+
+test('an unsupported transition surface disposes the constructed runtime instead of returning an unobserved host', async () => {
+  const f = sdkFixture();
+  const create = f.sdk.createAgentSessionRuntime;
+  f.sdk.createAgentSessionRuntime = async (...args) => {
+    const runtime = await create(...args);
+    delete runtime.importFromJsonl;
+    return runtime;
+  };
+  await assert.rejects(createContinuationRuntime(f.sdk, { cwd: '/synthetic/work', sessionManager: managerFixture() }),
+    /Unsupported native session transition surface/);
+  assert.equal(f.calls.disposed, 1);
 });
 
 test('runtime refuses an unobservable native auth surface before constructing a session', async () => {

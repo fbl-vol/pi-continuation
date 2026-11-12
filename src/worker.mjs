@@ -62,6 +62,7 @@ export async function runWorker(args, { sdk, terminal, initialTrustContext } = {
   const manager = sessionFile ? sdk.SessionManager.open(sessionFile) : parsed.recent ?
     sdk.SessionManager.continueRecent(cwd) : sdk.SessionManager.create(cwd);
   const target = manager.getCwd();
+  if (!(await stat(target)).isDirectory()) throw new Error('Saved session working directory must be a directory');
   const report = diagnostics('startup');
   const host = await createContinuationRuntime(sdk, { cwd: target, sessionManager: manager,
     initialTrustContext: initialTrustContext ?? startupTrustContext(target), report });

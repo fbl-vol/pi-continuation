@@ -159,5 +159,7 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
 
   const runtime = await sdk.createAgentSessionRuntime(createRuntime,
     { cwd, agentDir, sessionManager });
+  try { promptScope.observeSessionTransitions(runtime); }
+  catch (error) { await runtime.dispose(); throw error; }
   return { runtime, promptScope, get worker() { return worker; } };
 }
