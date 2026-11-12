@@ -12,7 +12,9 @@ not real workers. `npm run check:package` checks the explicit normal extension
 payload and rejects experimental SDK launcher/resources.
 
 - **P1:** observation/parity tests cover ordinary registration and human scoped
-  activation without first-option startup or SDK opt-in. An isolated Pi 1.5.0
+  activation without first-option startup or SDK opt-in, including enrollment of
+  an existing idle report, current registration leaf, retained error/missing-reply
+  holds and fresh-report requirements for working enrollment. An isolated Pi 1.5.0
   smoke discovers the packed entry from ordinary package settings, with no
   explicit extension path, launcher, model request or real Herdr connection.
 - **P2/P3:** supervisor/receiver/parity tests cover exact-stop delivery, final
@@ -45,6 +47,12 @@ runtime acceptance. Partial SDK/native-UI experiments and their detailed evidenc
 are preserved on [`experiment/sdk-host-native-ui-deferred`](https://github.com/fbl-vol/pi-continuation/tree/experiment/sdk-host-native-ui-deferred),
 not accepted or part of ordinary package delivery. Retained historical tests do
 not make SDK completeness, exhaustive dialogs, a fork or upstream agreement gates.
+
+**Unresolved recovery contract (P3/P4/P7):** after a user interaction and fresh
+held report, current Clear hold deliberately writes unknown/null, so no eligible
+stop remains without a later turn. Retaining that report for review would change
+the explicit old-stop invalidation promise and is paused for the user's decision.
+The ordinary candidate does not claim completed recovery parity or acceptance.
 
 Model misreading, hidden/unreported UI and changes between process checks remain
 limitations. Genuine approvals/pauses/review still cannot be bypassed. A new

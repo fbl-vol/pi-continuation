@@ -4,7 +4,7 @@ import { bindCoordinator } from './coordinator.mjs';
 
 /** Ordinary extension profile: explicit human controls, not exhaustive native UI coverage. */
 export function bindContinuation(pi, options = {}) {
-  const worker = bindObservation(pi, { ...options, launchGuard: () => true });
+  const worker = bindObservation(pi, { ...options, launchGuard: () => true, captureIdleStop: true });
   bindSupervisor(pi, { ...options, allowExperimentalActivation: true });
   bindCoordinator(pi, options);
   return worker;

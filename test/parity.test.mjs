@@ -173,8 +173,11 @@ test('P3 blocked mid-turn attention is distinct, deduplicated and material-only'
   assert.equal((await s.state()).handled[s.worker.id], s.observation.stop);
   assert.equal((await s.state()).resumed[s.worker.id], undefined);
   assert.equal((await s.state()).blocked[s.worker.id].handled, true);
-  await assert.rejects(s.command(`activate worker ${s.worker.id}`), /Worker blocked/);
-  assert.equal((await s.state()).workers[s.worker.id].paused, true);
+  await s.command(`activate worker ${s.worker.id}`); // Scope activation is not UI approval.
+  assert.equal((await s.state()).workers[s.worker.id].paused, false);
+  assert.equal((await s.state()).blocked[s.worker.id].handled, undefined);
+  assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
+    action: 'resume', evidence: 'Validated result' })).content[0].text, /ineligible/);
   assert.deepEqual(await readJson(join(s.root, `observation-${s.worker.id}.json`)), native);
 });
 

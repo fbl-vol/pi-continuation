@@ -464,8 +464,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           if (enabled && kind === 'worker') {
             const live = await snapshot(socketPath);
             const agent = live.agents.find(a => a.pane_id === target.paneId);
-            if (!sameOccupant(agent, target) || !['idle', 'working'].includes(agent.agent_status))
-              throw new Error('Worker blocked, unknown or replaced; inspect before activation');
+            if (!sameOccupant(agent, target))
+              throw new Error('Worker identity unavailable; inspect before activation');
           }
           setScopePaused(state, kind, id, !enabled);
           await commit();

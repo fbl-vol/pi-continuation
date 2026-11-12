@@ -75,6 +75,85 @@ test('P1 ordinary profile registers a paused exact session without first-option 
   assert.equal(record.sessionFile, '/sessions/native.jsonl');
 });
 
+test('P1/P2 ordinary enrollment captures an already-idle report without sending a new task', async t => {
+  const reply = 'Approved assignment remains unfinished; continue its existing next step.';
+  const s = await guardedFixture(t, worker => {
+    let leaf = 'report-leaf';
+    worker.entries.push({ id: leaf, type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: reply }] } });
+    worker.ctx.sessionManager.getLeafId = () => leaf;
+    const append = worker.pi.appendEntry;
+    worker.pi.appendEntry = (...args) => { append(...args); leaf = 'registration-leaf'; };
+  }, { ordinary: true });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+  const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'completed');
+  assert.equal(saved.finalReply, reply);
+  assert.equal(saved.hold, false);
+  assert.equal(saved.session.leaf, 'registration-leaf');
+  assert.ok(saved.stop);
+  assert.deepEqual(s.sent, []);
+});
+
+for (const trailing of [
+  { type: 'message', message: { role: 'user', content: 'Later unfinished user turn' } },
+  { type: 'custom_message', customType: 'synthetic-next-turn', content: 'Later custom turn' },
+  { type: 'message', message: { role: 'assistant', stopReason: 'aborted', content: [] } },
+]) {
+  test(`P3 idle enrollment never adopts a prior report after ${trailing.customType ?? trailing.message.role}`, async t => {
+    const s = await guardedFixture(t, worker => {
+      worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+        stopReason: 'stop', content: [{ type: 'text', text: 'Older completed report' }] } },
+      { id: 'later', ...trailing });
+    }, { ordinary: true });
+    await s.pi.command(s.checkpoint, s.ctx);
+    const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+    const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+    assert.equal(saved.outcome, 'unknown');
+    assert.equal(saved.hold, true);
+    assert.equal(saved.stop, null);
+    assert.equal(saved.finalReply, undefined);
+    assert.deepEqual(s.sent, []);
+  });
+}
+
+for (const reason of ['error', 'missing reply']) {
+  test(`P3 ordinary idle enrollment retains a hold for ${reason}`, async t => {
+    const s = await guardedFixture(t, worker => {
+      worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+        stopReason: reason === 'error' ? 'error' : 'stop',
+        content: [{ type: 'text', text: reason === 'error' ? 'Provider failed' : '' }] } });
+    }, { ordinary: true });
+    await s.pi.command(s.checkpoint, s.ctx);
+    const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+    const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+    assert.equal(saved.hold, true);
+    assert.equal(saved.outcome, reason === 'error' ? 'error' : 'approval');
+    assert.deepEqual(s.sent, []);
+  });
+}
+
+test('P2 enrollment while working never substitutes a prior idle reply for a fresh stop', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.isIdle = () => false;
+    worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Previous turn' }] } });
+  }, { ordinary: true });
+  await s.pi.command(s.checkpoint, s.ctx);
+  s.ctx.isIdle = () => true;
+  await s.emit('agent_settled');
+  const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+  let saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'unknown');
+  s.entries.push({ id: 'fresh', type: 'message', message: { role: 'assistant',
+    stopReason: 'stop', content: [{ type: 'text', text: 'Current approved work' }] } });
+  await s.emit('agent_settled');
+  saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'completed');
+  assert.equal(saved.finalReply, 'Current approved work');
+});
+
 test('a fully overlapping approval during registration confirmation prevents first-turn publication', async t => {
   const s = await guardedFixture(t, worker => {
     worker.ctx.ui.confirm = async () => {

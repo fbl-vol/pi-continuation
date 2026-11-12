@@ -26,8 +26,13 @@ export function stopObservation(ctx, aborted, hold, version, previousAssistantId
     ...(replyAvailable ? { finalReply: reply } : {}) };
 }
 
+const latestConversation = ctx => [...ctx.sessionManager.getBranch()].reverse().find(entry =>
+  (entry.type === 'message' && entry.message?.role !== 'system') ||
+  ['custom_message', 'compaction', 'branch_summary', 'context_edit'].includes(entry.type));
+
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope } = {}) {
+  paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope,
+  captureIdleStop = false } = {}) {
   let worker;
   let preparing;
   let initialPending;
@@ -66,6 +71,25 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         return false;
       });
     return pendingWrite;
+  };
+  const captureExisting = async ctx => {
+    if (!ctx.isIdle()) {
+      previousAssistantId = lastAssistantId(ctx);
+      return true;
+    }
+    // Ignore metadata, not later conversation/context boundaries. An older
+    // successful assistant must not substitute for an unfinished/aborted turn.
+    const tail = latestConversation(ctx);
+    if (!tail) return true;
+    // Capture after append/ready so its leaf is current. No scope is activated.
+    const existing = tail.type === 'message' && tail.message.role === 'assistant' ?
+      stopObservation(ctx, false, hold, stopVersion) : null;
+    if (!existing || existing.outcome === 'unknown') {
+      hold = true;
+      return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+    }
+    hold ||= existing.outcome !== 'completed';
+    return observe(existing, ctx);
   };
   const watchTerminalInput = ctx => {
     // This callback runs before Pi handles built-in menus and dialogs, which do
@@ -281,7 +305,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           pending.timer.unref?.();
           pi.sendUserMessage(initialMessage);
           ctx.ui.notify(`Worker ${record.workerId} registered paused; awaiting initial user turn`, 'info');
-        } else ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
+        } else {
+          if (captureIdleStop && !await captureExisting(ctx)) return;
+          ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
+        }
       } catch (error) {
         if (published) {
           if (initialPending) { clearTimeout(initialPending.timer); initialPending = undefined; }

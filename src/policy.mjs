@@ -81,6 +81,7 @@ export function setScopePaused(state, kind, id, paused) {
   const target = kind === 'global' ? state : kind === 'route' ? state.routes[id] : state.workers[id];
   if (!paused && target.paused && kind === 'worker') {
     delete state.repair[id];
+    if (state.blocked?.[id]) delete state.blocked[id].handled;
     const disposition = state.dispositions[id];
     if (disposition && disposition.stop === state.handled[id] &&
         ['pause', 'blocker', 'decision'].includes(disposition.action)) delete state.handled[id];
