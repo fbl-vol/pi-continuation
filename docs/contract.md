@@ -47,6 +47,13 @@ Availability reads outside the mutex never grant effect authority. Activation/de
 
 Rollback under both locks refuses a used witness or changed session/report, persists `returning`, restores only the selected old worker **paused**, then persists `returned`. It restores supervision metadata, never session/report files or sibling state. Interrupted restoration keeps both sides fenced and may retry the same idempotent restoration. Used transfers need forward reconciliation, not snapshot rollback. Retained witnesses cannot be overwritten; busy/malformed witnesses fail closed. No PID/age-based abandoned-lock stealing. Never remove a live mutex/owner lock.
 
+Human Clear hold may expose only the current unchanged successful held report
+for supervisor reassessment, preserving its nonce. It is not action approval,
+activation, lifting other pauses, resetting budgets or replay permission. Exact
+identity/leaf/generation/reply and native idle/hold checks remain; stale,
+previously eligible, consumed, ambiguous, abort/error and missing reports remain
+ineligible under the existing observation, supervisor and receipt guards.
+
 These are source-level protections, not live handoff acceptance. Separately authorized adapter installation and selected-worker rehearsal are still absent. Never run two supervisors over the same worker or reset observations/budgets to force recovery.
 
 ## Evidence and remaining authority

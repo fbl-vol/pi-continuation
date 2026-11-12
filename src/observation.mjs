@@ -6,18 +6,20 @@ import { receive } from './receiver.mjs';
 import { currentSession } from './session.mjs';
 import { readyWorkerRegistration } from './bindings.mjs';
 import { commitReady } from './registration.mjs';
-import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation } from './contracts.mjs';
+import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation, isId } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { guardPromptUI } from './prompt-guard.mjs';
+
+const replyText = entry => Array.isArray(entry?.message?.content) ? entry.message.content
+  .filter(part => part?.type === 'text' && typeof part.text === 'string')
+  .map(part => part.text).join('\n').trim() : '';
 
 export function stopObservation(ctx, aborted, hold, version, previousAssistantId) {
   const session = currentSession(ctx);
   const last = [...ctx.sessionManager.getBranch()].reverse().find(e =>
     e.type === 'message' && e.message?.role === 'assistant');
   const fresh = last && last.id !== previousAssistantId;
-  const reply = fresh && Array.isArray(last.message?.content) ? last.message.content
-    .filter(part => part?.type === 'text' && typeof part.text === 'string')
-    .map(part => part.text).join('\n').trim() : '';
+  const reply = fresh ? replyText(last) : '';
   const replyAvailable = reply.length > 0 && Buffer.byteLength(reply, 'utf8') <= MAX_FINAL_REPLY_BYTES;
   const completed = fresh && last.message?.stopReason === 'stop';
   const outcome = aborted ? 'aborted' : fresh && last.message?.stopReason === 'error' ? 'error' :
@@ -30,9 +32,23 @@ const latestConversation = ctx => [...ctx.sessionManager.getBranch()].reverse().
   (entry.type === 'message' && entry.message?.role !== 'system') ||
   ['custom_message', 'compaction', 'branch_summary', 'context_edit'].includes(entry.type));
 
+// Only an approval observation minted while held can become reviewable here.
+// Never recapture an old eligible stop or mint a replacement deduplication key.
+function currentHeldReport(prior, ctx, version, session) {
+  if (prior.schemaVersion !== SCHEMA_VERSION || prior.outcome !== 'approval' || !prior.hold ||
+      !isId(prior.stop) || prior.version !== version || !prior.finalReply?.trim() ||
+      !session.id || !session.file || !session.leaf ||
+      prior.session.id !== session.id || prior.session.file !== session.file ||
+      prior.session.leaf !== session.leaf) return null;
+  const tail = latestConversation(ctx);
+  if (tail?.type !== 'message' || tail.message?.role !== 'assistant' ||
+      tail.message.stopReason !== 'stop' || replyText(tail) !== prior.finalReply) return null;
+  return { ...prior, outcome: 'completed' };
+}
+
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope,
-  captureIdleStop = false } = {}) {
+  reviewCurrentReports = false } = {}) {
   let worker;
   let preparing;
   let initialPending;
@@ -306,7 +322,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           pi.sendUserMessage(initialMessage);
           ctx.ui.notify(`Worker ${record.workerId} registered paused; awaiting initial user turn`, 'info');
         } else {
-          if (captureIdleStop && !await captureExisting(ctx)) return;
+          if (reviewCurrentReports && !await captureExisting(ctx)) return;
           ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
         }
       } catch (error) {
@@ -371,15 +387,22 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     } catch (error) { worker = undefined; report('observe settled turn', error, ctx); }
   });
   pi.registerCommand('continuation-worker-clear-hold', {
-    description: 'Explicitly clear a worker hold after inspecting the stop; does not activate supervision',
+    description: 'Clear a resolved hold and allow current-report reassessment; not approval or activation',
     handler: async (_args, ctx) => {
       if (!worker || !hold || ctx.mode !== 'tui') return;
       const guard = promptsFor(ctx);
       const record = worker;
       const version = stopVersion;
       const session = currentSession(ctx);
+      let prior;
+      if (reviewCurrentReports) {
+        await pendingWrite;
+        try { prior = await readObservation(root, record.workerId); }
+        catch (error) { report('read held report', error, ctx); return; }
+      }
       if (!await guard.confirm('Clear worker hold?',
-        'Only clear after resolving the user stop, failed tool or pending approval. Old stops cannot be resumed.')) {
+        'Only clear after resolving the hold reason. The current unchanged report may be reassessed. ' +
+        'This is not action approval or scope activation; other pauses, budgets and no-replay guards remain.')) {
         await pendingWrite;
         return;
       }
@@ -388,9 +411,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           now.file !== session.file || now.leaf !== session.leaf || !ctx.isIdle()) {
         ctx.ui.notify('Worker changed during confirmation; hold retained.', 'warning'); return;
       }
+      const currentReport = prior ? currentHeldReport(prior, ctx, version, now) : null;
       hold = false;
       stopVersion++;
-      await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+      await observe(currentReport ?? { session: now, outcome: 'unknown', stop: null }, ctx);
     },
   });
   pi.on('session_shutdown', async () => {

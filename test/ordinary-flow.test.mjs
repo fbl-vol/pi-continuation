@@ -11,7 +11,9 @@ import { readJson } from '../src/store.mjs';
 
 // Real role composition, registration, owner/worker sockets, records and receipts.
 // Only native Pi/Herdr and the model's chosen disposition are fake, not eligibility.
-test('P1/P2 ordinary idle enrollment reaches addressed continuation once, without a launcher or new task',
+for (const recovery of [false, true]) test(recovery ?
+  'P3/P4/P7 ordinary human Clear allows same-report review, not activation, then one-use continuation' :
+  'P1/P2 ordinary idle enrollment reaches addressed continuation once, without a launcher or new task',
   { timeout: 10000 }, async t => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'continuation-flow-')));
     const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
@@ -36,14 +38,14 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
       });
     });
     function native(id, file, paneId) {
-      const handlers = new Map(), commands = new Map(), tools = new Map(), entries = [], messages = [];
+      const handlers = new Map(), commands = new Map(), tools = new Map(), entries = [], messages = [], input = new Set();
       let leaf = 'initial-leaf';
       const ctx = { mode: 'tui', cwd: root, isIdle: () => true,
         sessionManager: { getSessionId: () => id, getSessionFile: () => file,
           getLeafId: () => leaf, getBranch: () => entries },
         ui: { confirm: async () => true, select: async () => undefined, input: async () => undefined,
           editor: async () => undefined, custom: async () => undefined,
-          onTerminalInput: () => () => {}, notify: () => {} } };
+          onTerminalInput: fn => { input.add(fn); return () => input.delete(fn); }, notify: () => {} } };
       const pi = { on: (name, fn) => handlers.set(name, [...(handlers.get(name) ?? []), fn]),
         registerCommand: (name, command) => commands.set(name, command.handler),
         registerTool: tool => tools.set(tool.name, tool.execute),
@@ -52,6 +54,9 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
         sendUserMessage: () => assert.fail('Plain enrollment must not send another task') };
       bindContinuation(pi, { root, socketPath, paneId });
       return { pi, ctx, entries, messages, commands, tools,
+        rawInput: () => { for (const fn of input) fn({ data: '/continuation-worker-clear-hold\r' }); },
+        assistant: text => { leaf = randomUUID(); entries.push({ id: leaf, type: 'message',
+          message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] } }); },
         emit: async (name, event = {}) => {
           for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
         } };
@@ -75,6 +80,23 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
     await worker.emit('session_start');
     await worker.commands.get('continuation-worker')(checkpoint, worker.ctx);
     const workerId = worker.entries.find(entry => entry.customType === 'pi-continuation-worker').data.workerId;
+    if (recovery) {
+      worker.rawInput();
+      await worker.emit('input', { source: 'interactive', text: 'Continue the approved assignment' });
+      await worker.emit('agent_start');
+      worker.assistant('Approved work remains; use the existing checkpoint.');
+      await worker.emit('agent_settled');
+      const held = await readJson(join(root, `observation-${workerId}.json`));
+      assert.equal(held.outcome, 'approval');
+      assert.equal(held.hold, true);
+      // Native command dispatch precedes Pi's input event. Raw terminal keys still occur.
+      worker.rawInput();
+      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
+      const cleared = await readJson(join(root, `observation-${workerId}.json`));
+      assert.equal(cleared.stop, held.stop);
+      assert.equal(cleared.finalReply, held.finalReply);
+      assert.equal(cleared.hold, false);
+    }
     const observation = await readJson(join(root, `observation-${workerId}.json`));
     assert.equal(observation.outcome, 'completed');
     assert.equal(worker.messages.length, 0);
@@ -86,6 +108,13 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
     assert.equal(state.paused, true);
     assert.equal(state.routes.w.paused, true);
     assert.equal(state.workers[workerId].paused, true);
+    const dispose = () => supervisor.tools.get('continuation_disposition')('call',
+      { workerId, stop: observation.stop, action: 'resume', evidence }, undefined, undefined, supervisor.ctx);
+    if (recovery) {
+      assert.match((await dispose()).content[0].text, /Paused/);
+      assert.equal(worker.messages.length, 0);
+      assert.deepEqual(state.budgets, {});
+    }
     await command(`activate worker ${workerId}`);
     await command('activate route w');
     await command('activate global');
@@ -97,8 +126,6 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
     const message = await attention;
     assert.match(message.content, /Approved work remains/);
     assert.match(message.content, new RegExp(workerId));
-    const dispose = () => supervisor.tools.get('continuation_disposition')('call',
-      { workerId, stop: observation.stop, action: 'resume', evidence }, undefined, undefined, supervisor.ctx);
     assert.match((await dispose()).content[0].text, /Continuation delivered/);
     assert.equal(worker.messages.length, 1);
     assert.equal(worker.messages[0][1].triggerTurn, true);
@@ -107,4 +134,17 @@ test('P1/P2 ordinary idle enrollment reaches addressed continuation once, withou
     state = await readJson(join(root, 'supervisor.json'));
     assert.equal(state.resumed[workerId], observation.stop);
     assert.equal(state.budgets[workerId].count, 1);
+    if (recovery) {
+      // Clearing again cannot revive the report that was actually delivered.
+      worker.rawInput();
+      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
+      const invalidated = await readJson(join(root, `observation-${workerId}.json`));
+      assert.equal(invalidated.stop, null);
+      assert.equal(invalidated.outcome, 'unknown');
+      assert.match((await dispose()).content[0].text, /Stale or ineligible/);
+      assert.equal(worker.messages.length, 1);
+      const afterClear = await readJson(join(root, 'supervisor.json'));
+      assert.equal(afterClear.resumed[workerId], observation.stop);
+      assert.equal(afterClear.budgets[workerId].count, 1);
+    }
   });

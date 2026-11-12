@@ -48,11 +48,20 @@ are preserved on [`experiment/sdk-host-native-ui-deferred`](https://github.com/f
 not accepted or part of ordinary package delivery. Retained historical tests do
 not make SDK completeness, exhaustive dialogs, a fork or upstream agreement gates.
 
-**Unresolved recovery contract (P3/P4/P7):** after a user interaction and fresh
-held report, current Clear hold deliberately writes unknown/null, so no eligible
-stop remains without a later turn. Retaining that report for review would change
-the explicit old-stop invalidation promise and is paused for the user's decision.
-The ordinary candidate does not claim completed recovery parity or acceptance.
+**Bounded held-report recovery (P3/P4/P7):** after resolving the hold reason and
+explicit human Clear, only a current unchanged successful report produced while
+held becomes available for supervisor reassessment, retaining its nonce/reply.
+Identity, leaf, generation and current conversation must still match. Clear is
+not action approval, scope activation, pause lifting or a budget reset. Existing
+handled/resumed/intent/receipt guards still refuse consumed or ambiguous work;
+stale, aborted/error, missing and previously eligible reports are not rearmed.
+The regression fails on the prior unknown/null clear behavior. Ordinary lifecycle
+tests cover raw input, a fresh held report, confirmation, independent scopes,
+reassessment and one-use delivery. An isolated native Pi 1.5.0 probe verifies real
+registered-command dispatch before the input event with fake UI/temporary session
+state, without a model request or real Herdr connection. These are source checks,
+not real-worker/user acceptance. macOS verification is deferred/not verified by
+user decision, not a current acceptance blocker or passing platform evidence.
 
 Model misreading, hidden/unreported UI and changes between process checks remain
 limitations. Genuine approvals/pauses/review still cannot be bypassed. A new
