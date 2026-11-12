@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
@@ -105,7 +105,7 @@ test('plain registration persists an unheld observation across a same-session re
     await first.emit('session_start');
     await first.pi.command(checkpoint, first.ctx);
     const id = first.entries.at(-1).data.workerId;
-    assert.equal((await readWorkerRegistration(root, id)).checkpoint, checkpoint);
+    assert.equal((await readWorkerRegistration(root, id)).checkpoint, await realpath(checkpoint));
     const saved = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
     assert.equal(saved.hold, false);
     assert.equal(saved.stop, null);
