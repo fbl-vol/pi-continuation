@@ -4,7 +4,7 @@ The user-controlled target and bounded observable acceptance are in [extension-p
 
 ## Ordinary lifecycle, identity and approval
 
-`extension.ts` selects `ordinary.mjs`, which binds worker, supervisor and coordinator through normal Pi loading. Installation starts no continuation owner, registration or activation. The ordinary profile does not require command-line ordering, an SDK launcher or an experimental activation environment flag. Human-confirmed independent scopes still start paused. Lower-level experimental helpers are not the ordinary package contract.
+`extension.ts` selects `ordinary.mjs`, which binds worker, supervisor and coordinator through normal Pi loading. Installation starts no continuation owner, registration or activation. The ordinary profile does not require command-line ordering, an SDK launcher or an experimental activation environment flag. Advanced setup creates paused independent scopes; the user-approved unreleased start commands combine their bounded opt-ins as described in P1–P7. Lower-level experimental helpers are not the ordinary package contract.
 
 Pi's `agent_settled`, not `agent_end`, is the final notification. Aborted/provider-error outcomes are held, not ordinary completion. `before_agent_start` distinguishes user and custom messages. `session_start` covers replacement/fork/reload; a binding never follows another session automatically. Native session identity includes its saved file, ID and leaf. Session entries and `pi.events` are process-local, not a cross-process bus.
 
@@ -14,11 +14,13 @@ A resumable stop is worker-generated and pins native identity, generation and a 
 
 Herdr may report blocked before any assistant stop exists. The supervisor owns a separate `blocked` attention map with an advisory UUID and state-change sequence. It emits clearly labeled status evidence, never writes a fabricated worker observation/reply, and permits only material hold disposition for that token. The live identity/status/sequence must still match at disposition. An unchanged event retains its token; a new blocked sequence gets new attention. Resume/acknowledgement/completion still require an actual eligible idle worker stop.
 
-Shared-UI calls are synchronously observed before display. Registration/hold-clear confirmations pin prompt revisions; observed external prompts, errors, Escape and registered-worker keyboard input create sticky holds. Closing a dialog or starting a turn cannot clear a hold. Detected wrapper displacement stays invalid even if restored. These existing protections remain, but do not claim exhaustive native/third-party UI observation. Hidden/unreported prompts and cross-process changes between checks are baseline limitations, not reasons to silently expand scope or bypass genuine approvals.
+Shared-UI calls are synchronously observed before display. Registration/hold-clear confirmations pin prompt revisions. External prompts, errors and Escape create sticky holds; closing a dialog or starting a turn cannot clear them. Advanced registration retains sticky keyboard holds. Start-opted-in workers fence raw typing immediately, but ordinary interactive/RPC input releases only a provisional typing hold and invalidates the old report before any agent startup; a later input handler consuming the task cannot expose that old stop. Detected wrapper displacement stays invalid even if restored. These existing protections remain, but do not claim exhaustive native/third-party UI observation. Hidden/unreported prompts and cross-process changes between checks are baseline limitations, not reasons to silently expand scope or bypass genuine approvals.
 
 ## Registration and effects
 
 Registration pins an existing canonical checkpoint and rejects duplicate paths or worker/control-role collisions. Ordinary plain enrollment captures an already-idle report after session-entry/ready publication, using the current leaf; error/missing-reply reports stay held. A working enrollment requires a fresh assistant report, not a prior idle reply. Capture sends no task and activates no scope; handoff still marks its inherited stop handled/no-resend. The optional JSON `--start` envelope separates checkpoint from explicit initial user text. Setup is provisional until its synchronous ready marker; prompt/input/turn/session interruption prevents publication/message dispatch. No await separates final live checks, ready commit and initial message dispatch. A void send API is not acceptance: a matching `before_agent_start` then `agent_start` confirms the initial run. No matching run in 30 seconds creates a hold without blind resend. Restart while pending remains held.
+
+Unreleased start enrollment creates a private managed checkpoint from Pi's native model-visible projection: user/assistant narrative and compaction/branch summaries, excluding system/tool/thinking/image payloads and volatile bookkeeping. It requires no model-maintained declaration. Existing manual checkpoint pins are retained without rewriting their contents. The worker publishes a confirmed one-use start nonce for the current owner, then joins over the existing owner endpoint; the supervisor revalidates native identity, readiness, ownership and pending ambiguity before committing activation. Only a new route starts enabled; independent existing route/global pauses survive worker start. Repeated delivery of the same join cannot undo a later pause. Lost responses hold the worker without automatic retry; installation and supervisor start never discover/enroll visible workers.
 
 One supervisor writes scopes, budgets, dispositions, notices and intents. Each worker owns observations/receipts. Local sockets signal addressed delivery; durable records remain authority. Native Herdr `agent.prompt` lacks an expected-session/stop precondition and is not the continuation transport. Unix uses private local sockets, Windows named pipes. Framing is bounded UTF-8; listeners handle one request per connection and drain accepted handlers on shutdown.
 
@@ -29,7 +31,7 @@ Two nudges without evidenced checkpoint progress exhaust only that worker's budg
 ## Persistence and module boundaries
 
 - `ordinary.mjs` composes the three native role binders; `session.mjs` reads Pi identity. Historical SDK launcher/runtime/editor/trust sources are excluded from the ordinary npm payload and preserved on the labelled experimental branch.
-- `observation.mjs` owns worker lifecycle, registration and durable holds; `prompt-guard.mjs` owns observed shared-UI revisions/confirmations/integrity. Optional historical scope stamps remain readable and cannot silently downgrade an eligible stop.
+- `observation.mjs` owns worker lifecycle, registration and durable holds; `checkpoint.mjs` renders native projected task/result evidence; `prompt-guard.mjs` owns observed shared-UI revisions/confirmations/integrity. Optional historical scope stamps remain readable and cannot silently downgrade an eligible stop.
 - `supervisor.mjs` owns confirmations, Herdr attention, resources and effect ordering; `policy.mjs` owns deterministic disposition/budget/recovery transitions, never I/O or activation. `attention.mjs` labels untrusted evidence without interpreting it.
 - `bindings.mjs` joins native identities and enforces pinned checkpoints; `herdr.mjs`/`subscription.mjs` own discovery; `ipc.mjs` owns local framing/lifetime. Worker and coordinator receivers own final acceptance.
 - `contracts.mjs` decodes supervisor/observation `schemaVersion: 1`, independently of stop-generation `version`. Original unversioned records stay readable: old handled stops retain conservative no-resend guards; missing hold is held. The advisory `blocked` map is additive and defaults empty only when absent. Malformed fields/unsupported formats fail closed, not into empty authority.
@@ -47,12 +49,13 @@ Availability reads outside the mutex never grant effect authority. Activation/de
 
 Rollback under both locks refuses a used witness or changed session/report, persists `returning`, restores only the selected old worker **paused**, then persists `returned`. It restores supervision metadata, never session/report files or sibling state. Interrupted restoration keeps both sides fenced and may retry the same idempotent restoration. Used transfers need forward reconciliation, not snapshot rollback. Retained witnesses cannot be overwritten; busy/malformed witnesses fail closed. No PID/age-based abandoned-lock stealing. Never remove a live mutex/owner lock.
 
-Human Clear hold may expose only the current unchanged successful held report
-for supervisor reassessment, preserving its nonce. It is not action approval,
-activation, lifting other pauses, resetting budgets or replay permission. Exact
+Human Clear/start may expose only the current unchanged successful held report
+for supervisor reassessment, preserving its nonce. Start-mode input fences may
+park that same previously idle report, never mint a replacement stop. Neither grants action approval, resets budgets or permits replay. Clear activates
+nothing; confirmed worker start enables only its described scope. Exact
 identity/leaf/generation/reply and native idle/hold checks remain; stale,
-previously eligible, consumed, ambiguous, abort/error and missing reports remain
-ineligible under the existing observation, supervisor and receipt guards.
+consumed, ambiguous, abort/error and missing reports remain ineligible under
+the existing observation, supervisor and receipt guards.
 
 These are source-level protections, not live handoff acceptance. Separately authorized adapter installation and selected-worker rehearsal are still absent. Never run two supervisors over the same worker or reset observations/budgets to force recovery.
 

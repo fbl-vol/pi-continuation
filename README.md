@@ -9,7 +9,7 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Pins a worker's current saved Pi session, checkpoint, terminal, pane, cwd and workspace. A replacement/fork never silently inherits registration.
 - Uses Pi lifecycle/persistence/messaging and Herdr's existing identity/status reporting. The dedicated supervisor interprets the final reply and checkpoint against the **whole assignment**, including follow-ups. A favorable review alone is not completion; interpretation never grants new authority.
 - Gives blocked workers attention even mid-turn, before an assistant stop exists. Herdr status evidence is explicitly labeled, not a fabricated worker reply or resumable native stop. Blocked/held workers cannot be resumed or declared complete. Genuine approval requests require a decision/pause, not invented approval.
-- Keeps separate human-confirmed global, route and worker activation/pauses. Model tools cannot activate scopes or clear user holds. Escape, tool errors, observed shared-UI prompts and registered-worker keyboard input create sticky holds; closing a dialog or starting another turn does not clear them.
+- Keeps human-confirmed global, route and worker control. Model tools cannot activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the unreleased start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
 - Delivers through a worker-owned local receiver, not `agent.prompt`. A final Herdr identity/status/sequence check precedes addressed delivery; the receiver rechecks exact native stop, session, owner, hold and pauses. One-use receipts prevent replay. Uncertain delivery pauses for inspection, not retry.
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
@@ -32,11 +32,22 @@ pi remove git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.1
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
 
+## Unreleased two-command workflow
+
+**These commands are in source, not the `v0.1.0-alpha.1` release above.** After a separately authorized disposable installation:
+
+1. In the intended supervisor, `/continuation-supervisor start` and confirm.
+2. In each selected worker, `/continuation-worker start` and confirm that it has no other continuation owner.
+
+Then send ordinary tasks normally. Fresh registrations get an automatically maintained private checkpoint from native projected user/assistant text and compaction summaries—not system prompts, tool payloads, thinking or image bytes. No copied IDs, checkpoint declarations or separate scope activation are needed. Visible workers are never auto-enrolled; missing/conflicting ownership is refused. Existing manually pinned checkpoints remain manual and are not replaced.
+
+Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
+
 ## Development and disposable use
 
 Run `npm ci --legacy-peer-deps`, `npm test`, and `npm run check:package`. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.
 
-Only for a **separately authorized disposable** environment, `pi install /absolute/path/to/pi-continuation` installs the normal package (and changes Pi settings). Start/reload Pi through its ordinary loading mechanism; no special launcher or first `-e` ordering is required. The intended command sequence is:
+Only for a **separately authorized disposable** environment, `pi install /absolute/path/to/pi-continuation` installs the normal package (and changes Pi settings). Start/reload Pi through its ordinary loading mechanism; no special launcher or first `-e` ordering is required. For the released alpha.1 or advanced explicit setup, the command sequence is:
 
 1. In an existing worker, `/continuation-worker <existing-checkpoint-path>` enrolls its exact saved session and captures its current idle report for supervisor review, without sending a new task. Save its worker ID; scopes remain paused. If it is already working, wait for a fresh settled report. For a new first task only, optional `/continuation-worker --start {"checkpoint":"/existing/checkpoint.md","message":"Initial user task"}` explicitly supplies that turn. Interrupted setup sends nothing; inspect before retrying. With `--start`, wait for the observed initial-run notice; if none arrives within 30 seconds, it is held—do not blindly resend. Later keyboard input to a registered worker creates a human-input hold.
 2. Optionally, `/continuation-coordinator` in the intended existing coordinator; save its ID.
@@ -53,7 +64,7 @@ The model tool `continuation_disposition` resumes, acknowledges, pauses or queue
 
 The existing workflow used Herdr state and model interpretation, not authoritative interception of every native/third-party dialog. This extension preserves that bounded contract and its existing observed prompt/input/error protections. Model misinterpretation, hidden/unreported UI and changes between process checks remain limitations—not solved guarantees. No silent bypass of a genuine approval, user pause or review requirement is permitted. See P3 in [the parity scenarios](docs/extension-parity.md).
 
-Clear hold preserves the same nonce only for a current unchanged successful report produced while held. Stale, missing, aborted/error or previously eligible reports are not rearmed; attempted/delivered/ambiguous work remains subject to existing no-replay guards. The supervisor must still interpret the report and cannot infer action approval from Clear. Source checks are not personal workflow acceptance; see [validation](docs/validation.md).
+Clear hold preserves the same nonce only for a current unchanged successful held report. The unreleased start input mode can also park an unchanged idle report during typing/Escape and recover that same nonce on explicit return. Stale, missing and aborted/error reports are not rearmed; attempted/delivered/ambiguous work remains subject to existing no-replay guards. The supervisor must still interpret the report and cannot infer action approval from Clear. Source checks are not personal workflow acceptance; see [validation](docs/validation.md).
 
 Source tests, synthetic narrative exercises, isolated package loads and a focused controlled real-model trial do not establish general reliability, whole-workflow or user acceptance. No exhaustive native-UI proof is a hidden delivery prerequisite. Real-worker rehearsal, installation, migration, secrets and npm publication still require their own scoped instruction.
 

@@ -11,7 +11,8 @@ import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './
 import { diagnostics } from './diagnostics.mjs';
 import { attentionContent } from './attention.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
-import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, coordinatorCandidate } from './bindings.mjs';
+import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
+  coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
   resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
 
@@ -21,7 +22,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'After explicit human Clear, fresh attention may allow reassessment of the same current report and stop ID. ' +
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
+  paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
   let state;
   const report = diagnostics('supervisor');
   let diagnosticContext;
@@ -303,27 +304,79 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  const acceptWorkerStart = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || !allowExperimentalActivation)
+      return { accepted: false, message: 'Supervisor is not ready; inspect before starting this worker.' };
+    try {
+      const version = inputVersion;
+      const live = await snapshot(socketPath);
+      const { binding, route, repeated } = await workerStartCandidate(root, request, state, live, paneId);
+      if (state.inflight[request.workerId] || Object.values(state.notices).some(notice =>
+        notice.route === route && notice.status === 'uncertain'))
+        return { accepted: false, message: 'Uncertain delivery requires inspection and resolution, not start.' };
+      if (!repeated) {
+        await withWorkerHandoff(root, request.workerId, binding, {}, async () => {
+          if (!active() || !subscriptionLive || promptActive || version !== inputVersion ||
+              (state.workers[request.workerId] && state.workers[request.workerId] !== binding))
+            throw new Error('Supervisor changed during worker start');
+          // A confirmed worker opt-in enables only its newly created route. An
+          // independently paused existing route/global scope is never lifted.
+          state.routes[route] ??= { paused: false, coordinator: null };
+          state.workers[request.workerId] ??= binding;
+          setScopePaused(state, 'worker', request.workerId, false);
+          binding.lastStartNonce = request.nonce;
+          await commit();
+        });
+        await subscribe(ctx);
+        await wake(ctx);
+      }
+      return { accepted: true, workerId: request.workerId, nonce: request.nonce,
+        ownerToken: state.ownerToken, globalPaused: state.paused,
+        routePaused: state.routes[route].paused, workerPaused: binding.paused };
+    } catch (error) {
+      report('join confirmed worker', error, ctx);
+      return { accepted: false, message: 'Worker start refused; inspect identity, ownership and supervisor diagnostics.' };
+    }
+  });
+
   pi.registerCommand('continuation-supervisor', {
-    description: 'Explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
+    description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
     handler: async (args, ctx) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
         notify(ctx, 'Herdr-managed Pi TUI required', 'error'); return;
       }
       const [verb, kind, id] = args.trim().split(/\s+/);
-      if (verb === 'init') {
-        if (active()) { notify(ctx, 'Supervisor already running'); return; }
+      if (verb === 'init' || verb === 'start') {
+        if (active()) {
+          if (verb === 'init' || (state.acceptStarts && !state.paused)) {
+            notify(ctx, 'Supervisor already running; existing scope pauses preserved'); return;
+          }
+          if (!allowExperimentalActivation || !subscriptionLive)
+            throw new Error('Supervisor unavailable; inspect before starting');
+          if (!await ctx.ui.confirm('Start continuation supervisor?',
+            'Enable this supervisor and accept explicitly opted-in workers. Existing worker and route pauses remain unchanged.')) return;
+          state.acceptStarts = true;
+          setScopePaused(state, 'global', undefined, false);
+          await commit();
+          await reconcile(ctx);
+          notify(ctx, 'Supervisor started; use /continuation-worker start in each selected worker'); return;
+        }
         const localRoles = ctx.sessionManager.getBranch?.() ?? [];
         if (localRoles.some(e => e.type === 'custom' &&
             ['pi-continuation-worker', 'pi-continuation-coordinator'].includes(e.customType) &&
             e.data?.sessionId === ctx.sessionManager.getSessionId()))
           throw new Error('A worker or coordinator cannot become the supervisor');
-        if (!await ctx.ui.confirm('Start continuation supervisor?', 'Claim one supervisor owner; all new scopes remain paused.')) return;
+        if (verb === 'start' && !allowExperimentalActivation)
+          throw new Error('Start requires the ordinary extension profile');
+        if (!await ctx.ui.confirm('Start continuation supervisor?', verb === 'start' ?
+          'Enable this supervisor and accept only workers explicitly opting in with /continuation-worker start. Existing worker and route pauses remain unchanged.' :
+          'Claim one supervisor owner; all new scopes remain paused.')) return;
         await ensureRoot(root);
         const token = randomUUID();
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
-          closeOwner = await ownerServer(root, token);
+          closeOwner = await ownerServer(root, token, request => acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
@@ -334,6 +387,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               Object.values(state.routes).some(r => r.coordinator?.sessionId === supervisorSession))
             throw new Error('A worker or coordinator cannot become the supervisor');
           state.supervisorSession = supervisorSession;
+          state.acceptStarts = verb === 'start';
+          if (verb === 'start') setScopePaused(state, 'global', undefined, false);
           for (const [workerId, binding] of Object.entries(state.workers)) {
             if (binding.checkpoint) continue;
             // Older bindings did not pin checkpoint identity; observation is safe,
@@ -358,7 +413,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             if (filename && /^observation-.*\.json$/.test(filename.toString()))
               void queue(() => wake(ctx));
           });
-          notify(ctx, 'Supervisor claimed; global pause remains ' + state.paused);
+          notify(ctx, verb === 'start' ?
+            'Supervisor started; use /continuation-worker start in each selected worker' :
+            'Supervisor claimed; global pause remains ' + state.paused);
         } catch (error) {
           closeEvents?.(); closeEvents = undefined;
           await closeOwner?.(); closeOwner = undefined;
@@ -390,7 +447,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       if (verb === 'coordinator') {
         if (!state.routes[kind] || !uuid(id)) throw new Error('Usage: coordinator <route> <coordinator-id>');
         const live = await snapshot(socketPath);
-        const binding = await coordinatorCandidate(root, id, state, live, process.env.HERDR_PANE_ID);
+        const binding = await coordinatorCandidate(root, id, state, live, paneId);
         const existing = state.routes[kind].coordinator;
         if (existing) {
           if (existing.id === id) { notify(ctx, 'Coordinator already bound; pauses preserved'); return; }
@@ -406,7 +463,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!uuid(kind) || !id) throw new Error('Usage: add <worker-id> <route>');
         if (state.workers[kind]) { notify(ctx, 'Already registered; existing pause preserved'); return; }
         const live = await snapshot(socketPath);
-        const binding = await workerCandidate(root, kind, id, state, live, process.env.HERDR_PANE_ID);
+        const binding = await workerCandidate(root, kind, id, state, live, paneId);
         if (!await ctx.ui.confirm('Register exact worker?',
           `Route ${id}, pane ${binding.paneId}, session ${binding.sessionId}. Confirm old continuation owner is stopped before activation.`)) return;
         state.routes[id] ??= { paused: true, coordinator: null };

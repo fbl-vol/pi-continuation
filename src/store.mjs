@@ -21,10 +21,14 @@ export async function readJson(path) {
 }
 
 export async function atomicJson(path, value) {
+  return atomicText(path, JSON.stringify(value) + '\n');
+}
+
+export async function atomicText(path, text) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(JSON.stringify(value) + '\n'); await file.sync(); }
+    try { await file.writeFile(text); await file.sync(); }
     finally { await file.close(); }
     await replaceFile(temporary, path);
     await syncDirectory(dirname(path));

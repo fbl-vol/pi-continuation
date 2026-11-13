@@ -51,6 +51,7 @@ export function decodeSupervisor(record) {
   const version = format(record);
   const state = structuredClone(record);
   if (typeof state.paused !== 'boolean' || !object(state.routes) || !object(state.workers)) invalid();
+  if (state.acceptStarts !== undefined && typeof state.acceptStarts !== 'boolean') invalid();
   for (const route of Object.values(state.routes)) {
     if (!object(route) || typeof route.paused !== 'boolean') invalid();
   }
@@ -121,6 +122,15 @@ export function decodeObservation(record) {
   if ((version === 1 || record.version !== undefined) &&
       (!Number.isSafeInteger(record.version) || record.version < 0)) invalid();
   if (record.hold !== undefined && typeof record.hold !== 'boolean') invalid();
+  if (record.holdReason !== undefined &&
+      !['typing', 'interruption', 'prompt', 'error', 'restored'].includes(record.holdReason)) invalid();
+  if (record.parkedReport !== undefined) {
+    const parked = record.parkedReport;
+    if (version !== 1 || !object(parked) || parked.parkedReport !== undefined ||
+        parked.schemaVersion !== SCHEMA_VERSION || parked.outcome !== 'approval' || parked.hold !== true ||
+        parked.version !== record.version || !['typing', 'interruption'].includes(record.holdReason)) invalid();
+    decodeObservation(parked);
+  }
   if (record.bootstrapPending !== undefined && typeof record.bootstrapPending !== 'boolean') invalid();
   if (record.promptScope !== undefined && (!object(record.promptScope) ||
       !isId(record.promptScope.id) || !Number.isSafeInteger(record.promptScope.revision) ||

@@ -32,6 +32,7 @@
     "src/ordinary.mjs",
     "src/attention.mjs",
     "src/bindings.mjs",
+    "src/checkpoint.mjs",
     "src/contracts.mjs",
     "src/diagnostics.mjs",
     "src/ipc.mjs",
@@ -50,6 +51,7 @@
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "scripts": {

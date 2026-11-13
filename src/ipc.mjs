@@ -86,9 +86,12 @@ export async function sendAction(root, action, targetId = action.workerId) {
   return JSON.parse(await requestLine(workerEndpoint(root, targetId), JSON.stringify(action), 8192, 2500));
 }
 
-export function ownerServer(root, token) {
-  return listenLine(workerEndpoint(root, 'supervisor'), 128,
-    line => line === token ? token : 'invalid', 'invalid', () => {});
+export function ownerServer(root, token, handleStart) {
+  return listenLine(workerEndpoint(root, 'supervisor'), 8192, async line => {
+    if (line === token) return token;
+    if (!handleStart) return 'invalid';
+    return JSON.stringify(await handleStart(JSON.parse(line)));
+  }, 'invalid', () => {});
 }
 
 export async function ownerAlive(root, token) {
