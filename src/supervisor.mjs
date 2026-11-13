@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { ensureRoot, defaultRoot, readJson, atomicJson, claim, release } from './store.mjs';
-import { sameOccupant, snapshot } from './herdr.mjs';
+import { sameOccupant, snapshot, isSettled } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
@@ -76,7 +76,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const binding = state.workers[workerId];
     if (!binding || !lastSnapshot) return null;
     const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
-    if (!sameOccupant(agent, binding) || agent.agent_status !== 'idle' || agent.completion_seq == null)
+    if (!sameOccupant(agent, binding) || !isSettled(agent) || agent.completion_seq == null)
       return null;
     const observation = await readObservation(root, workerId);
     if (observation.session.id !== binding.sessionId || observation.session.file !== binding.sessionFile ||
@@ -147,7 +147,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           stop = await readObservation(root, id);
           if (stop.session?.id !== binding.sessionId || !stop.stop ||
               !['completed', 'approval', 'aborted', 'error'].includes(stop.outcome)) continue;
-          if (stop.outcome === 'completed' && (agent.agent_status !== 'idle' || agent.completion_seq == null)) continue;
+          if (stop.outcome === 'completed' && (!isSettled(agent) || agent.completion_seq == null)) continue;
         }
         if (stop.outcome === 'blocked' ? !state.blocked[id].handled : state.handled[id] !== stop.stop)
           result.push({ id, stop });
@@ -173,7 +173,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       const route = state.routes[notice.route];
       if (!route || route.paused || !route.coordinator) continue;
       const agent = lastSnapshot.agents.find(a => a.pane_id === route.coordinator.paneId);
-      if (!sameOccupant(agent, route.coordinator) || agent.agent_status !== 'idle') continue;
+      if (!sameOccupant(agent, route.coordinator) || !isSettled(agent)) continue;
       if (notice.kind === 'completion') {
         try {
           const latest = await readObservation(root, notice.workerId);
@@ -182,7 +182,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           const report = await readFile(await checkpointPath(notice.workerId), 'utf8');
           if (latest.stop !== notice.stop || latest.outcome !== 'completed' || latest.hold ||
               latest.session.id !== worker?.sessionId || latest.session.file !== worker?.sessionFile ||
-              !sameOccupant(liveWorker, worker) || liveWorker.agent_status !== 'idle' ||
+              !sameOccupant(liveWorker, worker) || !isSettled(liveWorker) ||
               checkpointHash(report) !== notice.reportHash) {
             await staleCompletion(notice); continue;
           }
@@ -507,7 +507,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         try {
           if (args.action === 'notify' || args.action === 'pause') {
             const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
-            if (sameOccupant(agent, binding) && ['idle', 'blocked'].includes(agent.agent_status)) {
+            if (sameOccupant(agent, binding) && (isSettled(agent) || agent.agent_status === 'blocked')) {
               observation = blockedStop(args.workerId, agent);
               if (!observation) {
                 observation = await readObservation(root, args.workerId);
@@ -582,7 +582,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           const agent = delivery.agents.find(a => a.pane_id === binding.paneId);
           if (_signal?.aborted || !subscriptionLive || promptActive || inputVersion !== reviewedInput ||
               state.paused || binding.paused || state.routes[binding.route]?.paused ||
-              !sameOccupant(agent, binding) || agent.agent_status !== 'idle' ||
+              !sameOccupant(agent, binding) || !isSettled(agent) ||
               !Number.isSafeInteger(reviewedAgent.state_change_seq) ||
               agent.state_change_seq !== reviewedAgent.state_change_seq ||
               agent.completion_seq !== reviewedAgent.completion_seq) {

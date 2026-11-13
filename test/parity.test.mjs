@@ -223,8 +223,10 @@ test('a final-reply approval question can suspend the worker and route an exact 
   assert.equal(state.inflight[s.worker.id], undefined);
 });
 
-test('pre-acceptance coordinator rejection stays pending, then delivers once without a model wake', async t => {
+for (const settledState of ['idle', 'done']) test(
+  `pre-acceptance coordinator rejection stays pending, then delivers once without a model wake (Herdr ${settledState})`, async t => {
   const s = await fixture(t, { coordinatorInput: true });
+  for (const agent of s.agents) agent.agent_status = settledState;
   await s.disposition('notify', 'completion');
   let state = await s.state();
   assert.equal(Object.values(state.notices)[0].kind, 'completion');

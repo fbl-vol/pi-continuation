@@ -11,9 +11,10 @@ import { readJson } from '../src/store.mjs';
 
 // Real role composition, registration, owner/worker sockets, records and receipts.
 // Only native Pi/Herdr and the model's chosen disposition are fake, not eligibility.
-for (const recovery of [false, true]) test(recovery ?
+for (const settledState of ['idle', 'done']) for (const recovery of [false, true]) test((recovery ?
   'P3/P4/P7 ordinary human Clear allows same-report review, not activation, then one-use continuation' :
-  'P1/P2 ordinary idle enrollment reaches addressed continuation once, without a launcher or new task',
+  'P1/P2 ordinary idle enrollment reaches addressed continuation once, without a launcher or new task') +
+  ` (Herdr ${settledState})`,
   { timeout: 10000 }, async t => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'continuation-flow-')));
     const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
@@ -24,7 +25,7 @@ for (const recovery of [false, true]) test(recovery ?
     await writeFile(sessionFile, '{}\n');
     await writeFile(checkpoint, evidence);
     const agent = { agent: 'pi', pane_id: 'w:p1', terminal_id: 'worker-terminal', cwd: root,
-      workspace_id: 'w', tab_id: 'w:t1', agent_status: 'idle', completion_seq: 1, state_change_seq: 1,
+      workspace_id: 'w', tab_id: 'w:t1', agent_status: settledState, completion_seq: 1, state_change_seq: 1,
       agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
     const sockets = new Set();
     const herdr = net.createServer(socket => {
