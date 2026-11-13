@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
 import { listenJson, ownerAlive } from './ipc.mjs';
 import { currentSession } from './session.mjs';
 import { readSupervisor, readObservation } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
-import { snapshot, sameOccupant } from './herdr.mjs';
+import { snapshot, sameOccupant, isSettled } from './herdr.mjs';
+import { pinnedCheckpoint } from './bindings.mjs';
+import { checkpointHash } from './policy.mjs';
 
 export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
   socketPath = process.env.HERDR_SOCKET_PATH } = {}) {
@@ -48,10 +51,15 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     if (!worker) return false;
     const live = await snapshot(socketPath);
     const agent = live.agents.find(a => a.pane_id === worker.paneId);
-    if (!sameOccupant(agent, worker) || agent.agent_status !== 'idle') return false;
+    if (!sameOccupant(agent, worker) || !isSettled(agent)) return false;
     const observation = await readObservation(root, notice.workerId);
-    return observation.stop === notice.stop && observation.outcome === 'completed' &&
-      observation.session?.id === worker.sessionId && observation.session?.file === worker.sessionFile;
+    if (observation.stop !== notice.stop || observation.outcome !== 'completed' || observation.hold ||
+        observation.session?.id !== worker.sessionId || observation.session?.file !== worker.sessionFile ||
+        !notice.reportHash) return false;
+    try {
+      return checkpointHash(await readFile(await pinnedCheckpoint(root, notice.workerId, worker), 'utf8')) ===
+        notice.reportHash;
+    } catch { return false; }
   }
 
   async function acceptNotice(record, ctx, notice) {

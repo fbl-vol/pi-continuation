@@ -50,6 +50,12 @@ export async function snapshot(socketPath) {
   return response.snapshot;
 }
 
+// Herdr reports settled turns as idle or done. Identity, completion sequence
+// and native eligibility remain separate checks.
+export function isSettled(agent) {
+  return agent?.agent_status === 'idle' || agent?.agent_status === 'done';
+}
+
 export function sameOccupant(agent, binding) {
   const ref = agent?.agent_session;
   return agent?.agent === 'pi' && agent.pane_id === binding.paneId &&

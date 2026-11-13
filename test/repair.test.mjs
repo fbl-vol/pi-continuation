@@ -21,12 +21,12 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const workerId = randomUUID();
-  const sessionFile = '/sessions/repair.jsonl';
+  const sessionFile = join(root, 'repair.jsonl');
   const crashedWorker = randomUUID();
   const pendingAction = randomUUID();
   const checkpoint = join(root, 'checkpoint.md');
   const agent = { pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', terminal_id: 'terminal',
-    cwd: '/project', agent: 'pi', agent_status: 'idle', completion_seq: 1,
+    cwd: '/project', agent: 'pi', agent_status: 'idle', state_change_seq: 1, completion_seq: 1,
     agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
   const herdr = net.createServer(socket => socket.once('data', data => {
     const request = JSON.parse(data.toString());
@@ -45,6 +45,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const previous = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
+    await writeFile(sessionFile, '{}\n');
     await writeFile(checkpoint, 'State: in progress');
     await atomicJson(join(root, `worker-${workerId}.json`), {
       workerId, paneId: agent.pane_id, sessionId: 'native', sessionFile, checkpoint, cwd: agent.cwd,

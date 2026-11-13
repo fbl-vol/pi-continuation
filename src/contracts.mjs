@@ -8,18 +8,19 @@ import { readJson } from './store.mjs';
  *
  * @typedef {{id: string, file: string, leaf?: string}} SessionIdentity
  * @typedef {{schemaVersion?: number, session: SessionIdentity, outcome: string,
- *   stop: string|null, version?: number, hold?: boolean, at?: string}} Observation
+ *   stop: string|null, version?: number, hold?: boolean, bootstrapPending?: boolean,
+ *   finalReply?: string, at?: string, promptScope?: {id: string, revision: number}}} Observation
  * @typedef {{sessionId: string, sessionFile: string, paneId: string, cwd: string,
  *   terminalId: string, workspaceId: string, tabId: string,
  *   sessionKind: string, sessionValue: string}} NativeBinding
  * @typedef {NativeBinding & {workerId: string, route: string, checkpoint?: string,
  *   paused: boolean, reason?: string}} WorkerBinding
  * @typedef {{paused: boolean, coordinator?: NativeBinding & {id: string}, reason?: string}} Route
- * @typedef {{id: string, workerId: string, stop?: string, route: string,
+ * @typedef {{id: string, workerId: string, stop?: string, route: string, reportHash?: string,
  *   kind: 'completion'|'blocker'|'decision', text: string,
  *   status: 'pending'|'sending'|'sent'|'stale'|'uncertain'|'resolved'}} Notice
  * @typedef {{id: string, workerId: string, stop: string, ownerToken: string,
- *   status: 'sending'}} Intent
+ *   status: 'sending'|'rejected'}} Intent
  * @typedef {{id: string, status: 'accepted'|'sent'}} Receipt
  * @typedef {{schemaVersion: number, paused: boolean, ownerToken?: string, ownerPid?: number,
  *   workers: Object<string, WorkerBinding>, routes: Object<string, Route>,
@@ -27,10 +28,12 @@ import { readJson } from './store.mjs';
  *   dispositions: Object<string, {stop: string, action: string}>,
  *   budgets: Object<string, {count: number, hash: string, checkpoint: string}>,
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
+ *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>}} SupervisorState
  */
 
 export const SCHEMA_VERSION = 1;
+export const MAX_FINAL_REPLY_BYTES = 8192;
 export const isId = value => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const invalid = () => { throw Object.assign(new Error('Invalid continuation record'), { code: 'INVALID_RECORD' }); };
@@ -58,6 +61,13 @@ export function decodeSupervisor(record) {
     if (version === 0 && state[name] == null) state[name] = {};
     if (!object(state[name])) invalid();
   }
+  // Additive advisory Herdr attention, never a resumable native worker stop.
+  if (state.blocked === undefined) state.blocked = {};
+  if (!object(state.blocked)) invalid();
+  for (const value of Object.values(state.blocked)) {
+    if (!object(value) || !isId(value.stop) || !Number.isSafeInteger(value.sequence) ||
+        value.sequence < 0 || (value.handled !== undefined && typeof value.handled !== 'boolean')) invalid();
+  }
   // Old handled stops did not distinguish acknowledgement from delivery.
   // Their no-resend guard must survive an upgrade, even if it is conservative.
   if (version === 0 && state.resumed == null) state.resumed = { ...state.handled };
@@ -84,6 +94,8 @@ export function decodeSupervisor(record) {
   }
   for (const [id, notice] of Object.entries(state.notices)) {
     if (notice.id !== id || typeof notice.workerId !== 'string' || typeof notice.text !== 'string' ||
+        (notice.reportHash !== undefined && (typeof notice.reportHash !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(notice.reportHash))) ||
         !Object.hasOwn(state.routes, notice.route) ||
         !['completion', 'blocker', 'decision'].includes(notice.kind) ||
         !['pending', 'sending', 'sent', 'stale', 'uncertain', 'resolved'].includes(notice.status)) invalid();
@@ -109,8 +121,18 @@ export function decodeObservation(record) {
   if ((version === 1 || record.version !== undefined) &&
       (!Number.isSafeInteger(record.version) || record.version < 0)) invalid();
   if (record.hold !== undefined && typeof record.hold !== 'boolean') invalid();
-  // Missing hold is never permission; do not invent a missing stop generation.
-  return { ...record, hold: record.hold !== false || ['aborted', 'approval', 'error'].includes(record.outcome) };
+  if (record.bootstrapPending !== undefined && typeof record.bootstrapPending !== 'boolean') invalid();
+  if (record.promptScope !== undefined && (!object(record.promptScope) ||
+      !isId(record.promptScope.id) || !Number.isSafeInteger(record.promptScope.revision) ||
+      record.promptScope.revision < 0)) invalid();
+  if (record.finalReply !== undefined && (typeof record.finalReply !== 'string' ||
+      Buffer.byteLength(record.finalReply, 'utf8') > MAX_FINAL_REPLY_BYTES)) invalid();
+  // An old completed stop without its final answer cannot be reviewed for a
+  // prose-only approval request. Never make missing evidence resumable.
+  const replyMissing = record.outcome === 'completed' && !record.finalReply?.trim();
+  return { ...record, hold: record.hold !== false || replyMissing ||
+    (record.bootstrapPending === true && record.stop !== null) ||
+    ['aborted', 'approval', 'error'].includes(record.outcome) };
 }
 
 export async function readObservation(root, workerId) {

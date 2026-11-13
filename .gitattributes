@@ -1,0 +1,2 @@
+# Keep the packed executable's shebang valid on every checkout platform.
+src/worker.mjs text eol=lf

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeSupervisor, decodeObservation, newSupervisor } from '../src/contracts.mjs';
+import { decodeSupervisor, decodeObservation, newSupervisor, MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
 
 test('legacy normalization preserves pauses, pending work and conservative no-resend guards without rewriting input', () => {
   const legacy = { paused: true, workers: { w: { route: 'r', paused: true } },
@@ -27,6 +27,55 @@ test('unknown versions and malformed authority fields fail instead of acquiring 
   }
   assert.throws(() => decodeSupervisor({ schemaVersion: 1, paused: false, routes: {}, workers: {} }),
     { code: 'INVALID_RECORD' });
+});
+
+test('P3 blocked attention is additive, sequence-pinned status rather than a worker observation', () => {
+  const state = newSupervisor();
+  const stop = 'a8671bd7-4c5c-4cee-aeab-59b6b20915eb';
+  state.blocked.w = { stop, sequence: 4 };
+  assert.deepEqual(decodeSupervisor(state).blocked, state.blocked);
+  for (const blocked of [null, [], { w: { stop, sequence: -1 } },
+    { w: { stop, sequence: '4' } }, { w: { stop: 'invalid', sequence: 4 } }])
+    assert.throws(() => decodeSupervisor({ ...state, blocked }), { code: 'INVALID_RECORD' });
+  delete state.blocked;
+  assert.deepEqual(decodeSupervisor(state).blocked, {});
+});
+
+test('old completion notices remain readable, but malformed report hashes cannot be persisted', () => {
+  const state = newSupervisor();
+  state.routes.r = { paused: false };
+  state.notices.n = { id: 'n', workerId: 'w', route: 'r', kind: 'completion',
+    text: 'Review finished', status: 'pending' };
+  assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
+  state.notices.n.reportHash = 'invalid';
+  assert.throws(() => decodeSupervisor(state), { code: 'INVALID_RECORD' });
+  state.notices.n.reportHash = 'a'.repeat(64);
+  assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
+});
+
+test('a completed stop without a bounded final reply is held for inspection', () => {
+  const stop = { schemaVersion: 1, outcome: 'completed', stop: 'stop', version: 1,
+    session: { id: 's', file: '/session' }, hold: false };
+  assert.equal(decodeObservation(stop).hold, true);
+  assert.equal(decodeObservation({ ...stop, finalReply: 'Can I deploy?' }).hold, false);
+  assert.equal(decodeObservation({ ...stop, finalReply: '  ' }).hold, true);
+  assert.throws(() => decodeObservation({ ...stop, finalReply: 'é'.repeat(MAX_FINAL_REPLY_BYTES) }),
+    { code: 'INVALID_RECORD' });
+  assert.throws(() => decodeObservation({ ...stop, finalReply: 42 }), { code: 'INVALID_RECORD' });
+  assert.throws(() => decodeObservation({ ...stop, bootstrapPending: 'yes' }), { code: 'INVALID_RECORD' });
+  assert.equal(decodeObservation({ ...stop, finalReply: 'Progress', bootstrapPending: true }).hold, true);
+});
+
+test('optional prompt scope stamps preserve legacy records but reject malformed identity or revision', () => {
+  const record = { schemaVersion: 1, outcome: 'unknown', stop: null, version: 1,
+    session: { id: 's', file: '/session' }, hold: false };
+  assert.equal(decodeObservation(record).promptScope, undefined);
+  const stamp = { id: 'd520bc3f-2318-48de-a544-9e3c49ac9067', revision: 0 };
+  assert.deepEqual(decodeObservation({ ...record, promptScope: stamp }).promptScope, stamp);
+  for (const promptScope of [null, { ...stamp, id: 'invalid' }, { ...stamp, revision: -1 },
+    { ...stamp, revision: Number.MAX_SAFE_INTEGER + 1 }]) {
+    assert.throws(() => decodeObservation({ ...record, promptScope }), { code: 'INVALID_RECORD' });
+  }
 });
 
 test('observation decoding never invents a generation or clears a legacy hold', () => {

@@ -12,8 +12,17 @@ function nativeBinding(record, agent) {
     sessionKind: 'path', sessionValue: record.sessionFile };
 }
 
+export async function readyWorkerRegistration(root, record) {
+  if (!record.requiresReady) return; // Registrations predating the provisional protocol.
+  const ready = await readJson(join(root, `ready-${record.workerId}.json`));
+  if (ready.workerId !== record.workerId || ready.sessionId !== record.sessionId ||
+      ready.sessionFile !== record.sessionFile || ready.checkpoint !== record.checkpoint)
+    throw new Error('Worker registration is not committed');
+}
+
 export async function readWorkerRegistration(root, workerId) {
   const record = await readJson(join(root, `worker-${workerId}.json`));
+  await readyWorkerRegistration(root, record);
   const path = await realpath(record.checkpoint);
   if (!(await stat(path)).isFile()) throw new Error('Checkpoint must be a file');
   return { ...record, checkpoint: path };

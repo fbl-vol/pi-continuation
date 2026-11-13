@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { newSupervisor } from '../src/contracts.mjs';
-import { planDisposition, recordDisposition, prepareResume, confirmResume, setScopePaused,
+import { checkpointHash, planDisposition, recordDisposition, prepareResume, confirmResume, setScopePaused,
   recoverUncertain, recordUnresolvedAttention } from '../src/policy.mjs';
 
 function state() {
@@ -28,14 +28,38 @@ test('budgets change only on confirmed delivery; formatting is not progress and 
   assert.equal(planDisposition(s, { ...resume, evidence: 'Result two' }, 'Result one\nResult two').budget.count, 1);
 });
 
-test('completion rules are shared by acknowledgement and notification without accepting free-form reports', () => {
+test('narrative completion requires an exact cited report and current hash for either disposition', () => {
+  assert.equal(checkpointHash('abc'),
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   const s = state();
+  const report = '# Work report\nReviewed the assigned changes\nAll follow-up items closed';
   for (const action of ['acknowledge', 'notify']) {
     const args = { ...resume, action, kind: 'completion' };
-    assert.equal(planDisposition(s, args, 'Result one: completed').kind, 'reject');
-    assert.equal(planDisposition(s, args, 'State: completed\nResult one').kind, action);
-    assert.equal(planDisposition(s, args, 'State: completed\nUnrelated evidence').kind, 'reject');
+    assert.equal(planDisposition(s, args, report).kind, 'reject');
+    assert.equal(planDisposition(s, { ...args, reportHash: checkpointHash(report + '\n') }, report).kind,
+      'reject');
+    assert.equal(planDisposition(s, { ...args, reportHash: checkpointHash(report),
+      evidence: 'Old result' }, report).kind, 'reject');
+    const result = planDisposition(s, { ...args, reportHash: checkpointHash(report),
+      evidence: 'All follow-up items closed' }, report);
+    assert.equal(result.kind, action);
+    if (action === 'notify') assert.equal(result.notice.reportHash, checkpointHash(report));
   }
+});
+
+test('a prose-only approval can justify a decision but never a resume or completion', () => {
+  const s = state();
+  const reply = 'Progress is ready. Can I deploy to production?';
+  const checkpoint = 'Progress is ready; deployment awaits a user decision.';
+  const evidence = 'Can I deploy to production?';
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'decision', evidence },
+    checkpoint, reply).notice.text, evidence);
+  assert.equal(planDisposition(s, { ...resume, action: 'pause', evidence }, checkpoint, reply).kind, 'pause');
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'decision', evidence },
+    '', reply).notice.text, evidence);
+  assert.equal(planDisposition(s, { ...resume, evidence }, checkpoint, reply).kind, 'reject');
+  assert.equal(planDisposition(s, { ...resume, action: 'notify', kind: 'completion', evidence,
+    reportHash: checkpointHash(checkpoint) }, checkpoint, reply).kind, 'reject');
 });
 
 test('human rearming preserves other pauses, budgets and successful delivery guards', () => {

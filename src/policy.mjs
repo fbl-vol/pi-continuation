@@ -2,37 +2,40 @@ import { createHash } from 'node:crypto';
 
 // Deterministic policy and transitions only: no Pi, transport, storage or clocks.
 // The workflow owns when a transition is persisted relative to an external effect.
-export function checkpointComplete(checkpoint) {
-  return /^\s*State:\s*(?:backlog empty|completed)\s*$/im.test(checkpoint);
-}
+export const checkpointHash = checkpoint => createHash('sha256').update(checkpoint).digest('hex');
 
 function existingNotice(state, workerId, stop, kind) {
-  return Object.values(state.notices).find(n => n.workerId === workerId && n.stop === stop && n.kind === kind);
+  return Object.values(state.notices).find(n => n.workerId === workerId && n.stop === stop &&
+    n.kind === kind && !(kind === 'completion' && n.status === 'stale'));
 }
 
-export function planDisposition(state, args, checkpoint) {
+export function planDisposition(state, args, checkpoint, materialEvidence = '') {
   const reject = message => ({ kind: 'reject', message });
-  if (!checkpoint.trim()) return reject('Empty checkpoint; hold');
   const evidence = args.evidence.trim();
-  if (!checkpoint.includes(evidence)) return reject('Evidence is absent from the current checkpoint');
+  const materialHold = args.action === 'pause' ||
+    (args.action === 'notify' && ['blocker', 'decision'].includes(args.kind));
+  if (!checkpoint.trim() && !(materialHold && materialEvidence.trim()))
+    return reject('Empty checkpoint and no material evidence; hold');
+  if (!checkpoint.includes(evidence) && !(materialHold && materialEvidence.includes(evidence)))
+    return reject('Evidence is absent from the current checkpoint or eligible final reply/status evidence');
   const worker = state.workers[args.workerId];
+  const completion = args.action === 'acknowledge' ||
+    (args.action === 'notify' && args.kind === 'completion');
+  if (completion && args.reportHash !== checkpointHash(checkpoint))
+    return reject('Checkpoint changed or report hash missing; inspect current report');
   if (args.action === 'notify') {
     if (!args.kind || !state.routes[worker.route]?.coordinator)
       return reject('Material kind and exact coordinator binding required');
-    if (args.kind === 'completion' && !checkpointComplete(checkpoint))
-      return reject('Whole-assignment completion is not evidenced in checkpoint');
     const existing = existingNotice(state, args.workerId, args.stop, args.kind);
     if (existing) return reject(`Notice already ${existing.status}`);
     return { kind: 'notify', notice: { workerId: args.workerId, stop: args.stop,
-      kind: args.kind, text: evidence, route: worker.route } };
+      kind: args.kind, text: evidence, route: worker.route,
+      ...(completion ? { reportHash: args.reportHash } : {}) } };
   }
   if (args.action === 'pause') return { kind: 'pause' };
-  if (args.action === 'acknowledge') {
-    return checkpointComplete(checkpoint) ? { kind: 'acknowledge' } :
-      reject('Checkpoint does not report whole-assignment completion');
-  }
+  if (args.action === 'acknowledge') return { kind: 'acknowledge' };
   const previous = state.budgets[args.workerId];
-  const hash = createHash('sha256').update(checkpoint).digest('hex');
+  const hash = checkpointHash(checkpoint);
   const newResult = previous && previous.hash !== hash && !previous.checkpoint?.includes(evidence);
   const count = newResult ? 0 : previous?.count ?? 0;
   if (count >= 2) return { kind: 'budget-exhausted', reason: 'Two nudges without evidenced progress' };
@@ -78,6 +81,7 @@ export function setScopePaused(state, kind, id, paused) {
   const target = kind === 'global' ? state : kind === 'route' ? state.routes[id] : state.workers[id];
   if (!paused && target.paused && kind === 'worker') {
     delete state.repair[id];
+    if (state.blocked?.[id]) delete state.blocked[id].handled;
     const disposition = state.dispositions[id];
     if (disposition && disposition.stop === state.handled[id] &&
         ['pause', 'blocker', 'decision'].includes(disposition.action)) delete state.handled[id];

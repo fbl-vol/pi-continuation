@@ -1,10 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { bindObservation } from '../src/observation.mjs';
+import { bindObservation as bindWorkerObservation } from '../src/observation.mjs';
+import { MAX_FINAL_REPLY_BYTES } from '../src/contracts.mjs';
+import { readWorkerRegistration } from '../src/bindings.mjs';
+import { createPromptScope } from '../src/prompt-scope.mjs';
+import { bindContinuation } from '../src/ordinary.mjs';
+
+const bindObservation = (pi, options) => bindWorkerObservation(pi,
+  { ...options, launchGuard: () => true });
 
 function fakePi(sessionId, sessionFile) {
   const handlers = new Map();
@@ -14,18 +20,382 @@ function fakePi(sessionId, sessionFile) {
     getLeafId: () => 'leaf', getBranch: () => entries,
   };
   const notices = [];
+  const terminalInput = new Set();
   const ctx = { mode: 'tui', cwd: '/project', sessionManager, isIdle: () => true,
-    ui: { confirm: async () => true, notify: (...args) => notices.push(args) } };
-  const pi = { on: (name, fn) => handlers.set(name, fn),
+    ui: { confirm: async () => true, select: async () => undefined, input: async () => undefined,
+      editor: async () => undefined, custom: async () => undefined,
+      notify: (...args) => notices.push(args),
+      onTerminalInput: handler => { terminalInput.add(handler); return () => terminalInput.delete(handler); } } };
+  const pi = { on: (name, fn) => {
+    const previous = handlers.get(name);
+    handlers.set(name, previous ? (...args) => Promise.all([previous(...args), fn(...args)]) : fn);
+  }, registerTool: () => {},
     registerCommand: (name, definition) => {
       if (name === 'continuation-worker') pi.command = definition.handler;
       if (name === 'continuation-worker-clear-hold') pi.clearHold = definition.handler;
     },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
-  return { pi, ctx, notices, entries, emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
+  return { pi, ctx, notices, entries, terminalInput,
+    emit: (event, data = {}) => handlers.get(event)?.(data, ctx) };
 }
 
-test('failed initial observation leaves registration inert and reports failure instead of success', async () => {
+async function guardedFixture(t, configure = () => {}, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-prompt-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished approved work');
+  const s = fakePi('native', '/sessions/native.jsonl');
+  configure(s);
+  const sent = [];
+  s.pi.sendUserMessage = message => sent.push(message);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  const { ordinary = false, ...bindings } = options;
+  const bind = ordinary ? bindContinuation : bindObservation;
+  const observer = bind(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1', ...bindings });
+  t.after(async () => {
+    await s.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  });
+  await s.emit('session_start');
+  return { ...s, root, checkpoint, observer, sent };
+}
+
+test('P1 ordinary profile registers a paused exact session without first-option startup', async t => {
+  const s = await guardedFixture(t, () => {}, { ordinary: true });
+  assert.equal(s.observer.registered, false);
+  await s.pi.command(s.checkpoint, s.ctx);
+  assert.equal(s.observer.registered, true);
+  assert.deepEqual(s.sent, []);
+  const record = JSON.parse(await readFile(join(s.root, (await readdir(s.root)).find(name =>
+    name.startsWith('worker-'))), 'utf8'));
+  assert.equal(record.paused, true);
+  assert.equal(record.sessionId, 'native');
+  assert.equal(record.sessionFile, '/sessions/native.jsonl');
+});
+
+test('P1/P2 ordinary enrollment captures an already-idle report without sending a new task', async t => {
+  const reply = 'Approved assignment remains unfinished; continue its existing next step.';
+  const s = await guardedFixture(t, worker => {
+    let leaf = 'report-leaf';
+    worker.entries.push({ id: leaf, type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: reply }] } });
+    worker.ctx.sessionManager.getLeafId = () => leaf;
+    const append = worker.pi.appendEntry;
+    worker.pi.appendEntry = (...args) => { append(...args); leaf = 'registration-leaf'; };
+  }, { ordinary: true });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+  const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'completed');
+  assert.equal(saved.finalReply, reply);
+  assert.equal(saved.hold, false);
+  assert.equal(saved.session.leaf, 'registration-leaf');
+  assert.ok(saved.stop);
+  assert.deepEqual(s.sent, []);
+});
+
+for (const trailing of [
+  { type: 'message', message: { role: 'user', content: 'Later unfinished user turn' } },
+  { type: 'custom_message', customType: 'synthetic-next-turn', content: 'Later custom turn' },
+  { type: 'message', message: { role: 'assistant', stopReason: 'aborted', content: [] } },
+]) {
+  test(`P3 idle enrollment never adopts a prior report after ${trailing.customType ?? trailing.message.role}`, async t => {
+    const s = await guardedFixture(t, worker => {
+      worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+        stopReason: 'stop', content: [{ type: 'text', text: 'Older completed report' }] } },
+      { id: 'later', ...trailing });
+    }, { ordinary: true });
+    await s.pi.command(s.checkpoint, s.ctx);
+    const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+    const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+    assert.equal(saved.outcome, 'unknown');
+    assert.equal(saved.hold, true);
+    assert.equal(saved.stop, null);
+    assert.equal(saved.finalReply, undefined);
+    assert.deepEqual(s.sent, []);
+  });
+}
+
+for (const reason of ['error', 'missing reply']) {
+  test(`P3 ordinary idle enrollment retains a hold for ${reason}`, async t => {
+    const s = await guardedFixture(t, worker => {
+      worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+        stopReason: reason === 'error' ? 'error' : 'stop',
+        content: [{ type: 'text', text: reason === 'error' ? 'Provider failed' : '' }] } });
+    }, { ordinary: true });
+    await s.pi.command(s.checkpoint, s.ctx);
+    const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+    const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+    assert.equal(saved.hold, true);
+    assert.equal(saved.outcome, reason === 'error' ? 'error' : 'approval');
+    assert.deepEqual(s.sent, []);
+  });
+}
+
+test('P2 enrollment while working never substitutes a prior idle reply for a fresh stop', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.isIdle = () => false;
+    worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Previous turn' }] } });
+  }, { ordinary: true });
+  await s.pi.command(s.checkpoint, s.ctx);
+  s.ctx.isIdle = () => true;
+  await s.emit('agent_settled');
+  const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
+  let saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'unknown');
+  s.entries.push({ id: 'fresh', type: 'message', message: { role: 'assistant',
+    stopReason: 'stop', content: [{ type: 'text', text: 'Current approved work' }] } });
+  await s.emit('agent_settled');
+  saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
+  assert.equal(saved.outcome, 'completed');
+  assert.equal(saved.finalReply, 'Current approved work');
+});
+
+test('a fully overlapping approval during registration confirmation prevents first-turn publication', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      await worker.emit('ui_prompt_start'); // Only the outer span is visible to Pi listeners.
+      await worker.ctx.ui.input('Other approval');
+      await worker.emit('ui_prompt_end');
+      return true;
+    };
+  });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual((await readdir(s.root)).filter(name => /^(worker|observation|ready)-/.test(name)), []);
+});
+
+test('alternate shortcut UI revokes registration before a first message can be published', async t => {
+  const scope = createPromptScope();
+  const foreign = fakePi('other', '/synthetic/other.jsonl');
+  const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+    handler: ctx => ctx.ui.input('other approval'),
+  }]]) }] }).extensions[0].shortcuts.get('key').handler;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => { await run(foreign.ctx); return true; };
+  }, { promptScope: scope });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual((await readdir(s.root)).filter(name => /^(worker|observation|ready)-/.test(name)), []);
+});
+
+test('alternate shortcut UI durably holds an existing worker and revokes a later hold-clear confirmation', async t => {
+  const scope = createPromptScope();
+  const foreign = fakePi('other', '/synthetic/other.jsonl');
+  const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+    handler: ctx => ctx.ui.input('other approval'),
+  }]]) }] }).extensions[0].shortcuts.get('key').handler;
+  let overlap = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => { if (overlap) await run(foreign.ctx); return true; };
+  }, { promptScope: scope });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const id = s.entries.at(-1).data.workerId;
+  await run(foreign.ctx);
+  assert.equal(s.observer.hold, true); // Synchronous in-memory receipt fence, before disk IO.
+  overlap = true;
+  await s.pi.clearHold('', s.ctx);
+  const saved = JSON.parse(await readFile(join(s.root, `observation-${id}.json`)));
+  assert.equal(saved.hold, true);
+  assert.equal(saved.stop, null);
+  assert.deepEqual(saved.promptScope, scope.snapshot());
+  assert.deepEqual(s.sent, []);
+});
+
+test('a prompt opening between confirmation resolution and the registration caller cannot inherit consent', async t => {
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      // The inner continuation runs after guard.confirm checks its result but
+      // before the registration caller resumes. The dialog then closes before IO.
+      queueMicrotask(() => queueMicrotask(() => { void worker.ctx.ui.input('Other approval'); }));
+      return true;
+    };
+  });
+  await s.pi.command('--start ' + JSON.stringify({ checkpoint: s.checkpoint, message: 'Approved initial task' }), s.ctx);
+  assert.equal(s.observer.registered, false);
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual(s.entries, []);
+});
+
+test('a fully overlapping approval cannot be erased by hold-clear confirmation', async t => {
+  let overlap = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      await worker.emit('ui_prompt_start');
+      if (overlap) await worker.ctx.ui.input('Other approval');
+      await worker.emit('ui_prompt_end');
+      return true;
+    };
+  });
+  await s.pi.command(s.checkpoint, s.ctx);
+  const id = s.entries.at(-1).data.workerId;
+  await s.emit('ui_prompt_start');
+  await s.emit('ui_prompt_end');
+  overlap = true;
+  await s.pi.clearHold('', s.ctx);
+  assert.equal(s.observer.hold, true);
+  assert.equal(JSON.parse(await readFile(join(s.root, `observation-${id}.json`))).hold, true);
+  assert.deepEqual(s.sent, []);
+});
+
+test('a new turn while clearing a prior hold leaves the worker held', async t => {
+  let interrupt = false;
+  const s = await guardedFixture(t, worker => {
+    worker.ctx.ui.confirm = async () => {
+      if (interrupt) await worker.emit('agent_start');
+      return true;
+    };
+  });
+  await s.pi.command(s.checkpoint, s.ctx);
+  await s.emit('ui_prompt_start');
+  await s.emit('ui_prompt_end');
+  interrupt = true;
+  await s.pi.clearHold('', s.ctx);
+  assert.equal(s.observer.hold, true);
+  assert.match(s.notices.at(-1)[0], /changed during confirmation/);
+});
+
+test('a prompt entirely inside early restore durably invalidates the old stop across another reload', async t => {
+  const first = await guardedFixture(t);
+  let next;
+  let reloaded;
+  try {
+    await first.pi.command(first.checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    await first.emit('agent_start');
+    first.entries.push({ id: 'saved-reply', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+    await first.emit('agent_settled');
+    const path = join(first.root, `observation-${id}.json`);
+    const before = JSON.parse(await readFile(path));
+    assert.equal(before.hold, false);
+    assert.ok(before.stop);
+    await first.emit('session_shutdown');
+
+    const permission = Promise.withResolvers();
+    next = fakePi('native', '/sessions/native.jsonl');
+    next.entries.push(...first.entries);
+    const restored = bindWorkerObservation(next.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1',
+      launchGuard: () => permission.promise });
+    const restoring = next.emit('session_start');
+    await next.ctx.ui.input('Approval while prior registration is being restored');
+    permission.resolve(true);
+    await restoring;
+    assert.equal(restored.hold, true);
+    const held = JSON.parse(await readFile(path));
+    assert.equal(held.hold, true);
+    assert.equal(held.stop, null);
+    assert.equal(held.outcome, 'unknown');
+    assert.ok(held.version > before.version);
+    await next.emit('session_shutdown');
+
+    reloaded = fakePi('native', '/sessions/native.jsonl');
+    reloaded.entries.push(...first.entries);
+    const again = bindObservation(reloaded.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1' });
+    await reloaded.emit('session_start');
+    assert.equal(again.hold, true);
+    assert.equal(again.registered, true);
+    assert.equal(JSON.parse(await readFile(path)).stop, null);
+  } finally {
+    await next?.emit('session_shutdown');
+    await reloaded?.emit('session_shutdown');
+  }
+});
+
+test('observed loss of the prompt guard durably invalidates a completed stop across reload', async t => {
+  const first = await guardedFixture(t);
+  await first.pi.command(first.checkpoint, first.ctx);
+  const id = first.entries.at(-1).data.workerId;
+  await first.emit('agent_start');
+  first.entries.push({ id: 'saved-reply', type: 'message', message: { role: 'assistant',
+    stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+  await first.emit('agent_settled');
+  const path = join(first.root, `observation-${id}.json`);
+  const before = JSON.parse(await readFile(path));
+  assert.equal(before.hold, false);
+  assert.ok(before.stop);
+
+  const wrapped = first.ctx.ui.input;
+  first.ctx.ui.input = async () => undefined;
+  // An ordinary command checks guard integrity before any registration effect.
+  await first.pi.command(first.checkpoint, first.ctx);
+  first.ctx.ui.input = wrapped;
+  await first.emit('session_shutdown'); // Flush any hold write before restoring the same session.
+  const saved = JSON.parse(await readFile(path));
+  assert.equal(saved.hold, true);
+  assert.equal(saved.stop, null);
+  assert.ok(saved.version > before.version);
+
+  const next = fakePi('native', '/sessions/native.jsonl');
+  next.entries.push(...first.entries);
+  const observer = bindObservation(next.pi, { root: first.root, socketPath: 'socket', paneId: 'w1:p1' });
+  try {
+    await next.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, true);
+    assert.equal(JSON.parse(await readFile(path)).stop, null);
+  } finally { await next.emit('session_shutdown'); }
+});
+
+for (const transition of ['unchanged', 'unobserved prompt', 'unobserved shared prompt', 'new host', 'lost scope', 'added scope']) {
+  test(`scoped worker restore fences ${transition} without rearming a stale stop`, async t => {
+    const scope = createPromptScope();
+    const first = await guardedFixture(t, () => {}, {
+      promptScope: transition === 'added scope' ? undefined : scope,
+    });
+    await first.pi.command(first.checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    await first.emit('agent_start');
+    first.entries.push({ id: 'scoped-reply', type: 'message', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Approved parser work remains.' }] } });
+    await first.emit('agent_settled');
+    const path = join(first.root, `observation-${id}.json`);
+    const before = JSON.parse(await readFile(path));
+    assert.equal(before.hold, false);
+    assert.ok(before.stop);
+    assert.deepEqual(before.promptScope, transition === 'added scope' ? undefined : scope.snapshot());
+    await first.emit('session_shutdown');
+
+    if (transition === 'unobserved prompt') {
+      // No guard is subscribed in the shutdown/session-start gap. The host scope
+      // must still remember activity and invalidate the persisted eligible stop.
+      const run = scope.resources({ extensions: [{ shortcuts: new Map([['key', {
+        handler: ctx => ctx.ui.input('other approval'),
+      }]]) }] }).extensions[0].shortcuts.get('key').handler;
+      await run(fakePi('unrelated', '/synthetic.jsonl').ctx);
+      assert.equal(JSON.parse(await readFile(path)).hold, false);
+    }
+    if (transition === 'unobserved shared prompt') {
+      await first.ctx.ui.input('cached shared approval after shutdown');
+      assert.equal(JSON.parse(await readFile(path)).hold, false);
+    }
+    const nextScope = transition === 'lost scope' ? undefined :
+      transition === 'new host' ? createPromptScope() : scope;
+    const next = fakePi('native', '/sessions/native.jsonl');
+    next.entries.push(...first.entries);
+    const observer = bindObservation(next.pi, { root: first.root, socketPath: 'socket',
+      paneId: 'w1:p1', promptScope: nextScope });
+    try {
+      await next.emit('session_start');
+      assert.equal(observer.registered, true);
+      assert.equal(observer.hold, transition !== 'unchanged');
+      const saved = JSON.parse(await readFile(path));
+      assert.equal(saved.stop, transition === 'unchanged' ? before.stop : null);
+      if (transition !== 'unchanged') {
+        assert.equal(saved.hold, true);
+        assert.ok(saved.version > before.version);
+        assert.deepEqual(saved.promptScope, nextScope?.snapshot());
+      }
+    } finally { await next.emit('session_shutdown'); }
+  });
+}
+
+test('a failed session entry rolls back provisional registration instead of reporting success', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');
   await writeFile(checkpoint, 'unfinished');
@@ -33,18 +403,15 @@ test('failed initial observation leaves registration inert and reports failure i
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
-    const append = s.pi.appendEntry;
-    s.pi.appendEntry = (type, data) => {
-      append(type, data);
-      mkdirSync(join(root, `observation-${data.workerId}.json`));
-    };
+    s.pi.appendEntry = () => { throw Object.assign(new Error('test append failure'), { code: 'EIO' }); };
     const observer = bindObservation(s.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
     await s.pi.command(checkpoint, s.ctx);
     assert.equal(observer.registered, false);
     assert.equal(s.notices.length, 1);
     assert.equal(s.notices[0][1], 'error');
-    assert.match(s.notices[0][0], /persist observation failed/);
+    assert.match(s.notices[0][0], /register worker failed/);
     assert.doesNotMatch(s.notices[0][0], /registered paused/);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
     assert.equal(s.notices[0][0].includes(root), false);
   } finally {
     await s.emit('session_shutdown');
@@ -82,6 +449,38 @@ test('registration starts paused and a fork cannot inherit it', async () => {
     assert.equal(observed.outcome, 'unknown');
   } finally {
     await original.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('plain registration persists an unheld observation across a same-session reload', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('same', '/sessions/same.jsonl');
+  const next = fakePi('same', '/sessions/same.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    const id = first.entries.at(-1).data.workerId;
+    assert.equal((await readWorkerRegistration(root, id)).checkpoint, await realpath(checkpoint));
+    const saved = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(saved.hold, false);
+    assert.equal(saved.stop, null);
+    await first.emit('session_shutdown');
+    next.entries.push(first.entries.at(-1));
+    const observer = bindObservation(next.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await next.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, false);
+  } finally {
+    await first.emit('session_shutdown');
+    await next.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = prior;
     await rm(root, { recursive: true, force: true });
@@ -152,6 +551,326 @@ test('sticky hold survives a subsequent working observation and restart until ex
   }
 });
 
+test('registration refuses a worker launched after another extension', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindWorkerObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1',
+      launchGuard: () => false });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    assert.equal(worker.entries.length, 0);
+    assert.match(worker.notices[0][0], /first option/);
+    assert.equal(worker.terminalInput.size, 0);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a registered worker restart without the first-extension guard stays inert', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const first = fakePi('native', '/sessions/native.jsonl');
+  const restarted = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(first.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await first.emit('session_start');
+    await first.pi.command(checkpoint, first.ctx);
+    const workerId = first.entries.at(-1).data.workerId;
+    await first.emit('session_shutdown');
+
+    restarted.entries.push(...first.entries);
+    const observer = bindWorkerObservation(restarted.pi, { root, socketPath: 'socket',
+      paneId: 'w1:p1', launchGuard: () => false });
+    await restarted.emit('session_start');
+    await restarted.emit('agent_settled', { aborted: false });
+    assert.equal(observer.registered, false);
+    assert.equal(restarted.terminalInput.size, 0);
+    assert.match(restarted.notices[0][0], /worker disabled.*first option/);
+    const saved = JSON.parse(await readFile(join(root, `observation-${workerId}.json`)));
+    assert.equal(saved.outcome, 'unknown');
+  } finally {
+    await restarted.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('raw user input holds a worker before Pi handles a built-in dialog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'unfinished');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    assert.equal(worker.terminalInput.size, 1);
+
+    for (const input of worker.terminalInput) input('/model');
+    assert.equal(observer.hold, true);
+    worker.entries.push({ type: 'message', id: 'finished',
+      message: { role: 'assistant', stopReason: 'stop' } });
+    await worker.emit('agent_settled', { aborted: false });
+    const observed = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(observed.outcome, 'approval');
+    assert.equal(observed.hold, true);
+    assert.notEqual(observed.stop, null);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.equal(worker.terminalInput.size, 0);
+});
+
+test('an explicit first turn is published and sent only after the provisional receiver is ready', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint -- with spaces.md');
+  await writeFile(join(root, 'checkpoint'), 'Unrelated task');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    assert.equal(observer.registered, true);
+    assert.equal(JSON.parse(await readFile(join(root, `worker-${id}.json`))).checkpoint, checkpoint);
+    assert.equal(JSON.parse(await readFile(join(root, `ready-${id}.json`))).sessionId, 'native');
+    assert.deepEqual(messages, ['Begin approved task.']);
+    await worker.emit('before_agent_start', { messageType: 'user', prompt: 'Begin approved task.' });
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'initial-answer', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Progress made.' }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    const saved = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(saved.outcome, 'completed');
+    assert.equal(saved.hold, false);
+    assert.equal(saved.finalReply, 'Progress made.');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an initial message handled without a run is not restored as an eligible worker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  worker.pi.sendUserMessage = () => {}; // Pi may handle extension input without starting a run.
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    const before = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
+    assert.equal(before.bootstrapPending, true);
+    assert.equal(before.hold, true);
+    assert.equal(before.stop, null);
+    await worker.emit('session_shutdown');
+
+    const restarted = fakePi('native', '/sessions/native.jsonl');
+    restarted.entries.push(worker.entries.at(-1));
+    const observer = bindObservation(restarted.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await restarted.emit('session_start');
+    assert.equal(observer.registered, true);
+    assert.equal(observer.hold, true);
+    await restarted.emit('session_shutdown');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a prompt hold acquired during provisional setup aborts without sending or publishing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  let leafReads = 0;
+  worker.ctx.sessionManager.getLeafId = () => {
+    if (++leafReads === 3) void worker.emit('ui_prompt_start');
+    return 'leaf';
+  };
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const start = `--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`;
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(worker.entries, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    worker.ctx.sessionManager.getLeafId = () => 'leaf';
+    await worker.emit('ui_prompt_end'); // Resolve the pending interaction before retrying.
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, true);
+    assert.deepEqual(messages, ['Begin approved task.']);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a prompt starting synchronously during the session append cannot authorize initial delivery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const append = worker.pi.appendEntry;
+    worker.pi.appendEntry = (...args) => { append(...args); void worker.emit('ui_prompt_start'); };
+    await worker.pi.command(`--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`,
+      worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    // A stale session entry is inert without a matching record; a later valid
+    // registration would append a new entry after the user inspects the prompt.
+    assert.equal(worker.entries.length, 1);
+    const id = worker.entries[0].data.workerId;
+    // Simulate both unlink operations failing after the session entry append.
+    // The missing commit marker must still prevent restore of the stale record.
+    await writeFile(join(root, `worker-${id}.json`), JSON.stringify({ workerId: id,
+      sessionId: 'native', sessionFile: '/sessions/native.jsonl', paneId: 'w1:p1',
+      checkpoint, cwd: '/project', requiresReady: true }));
+    await writeFile(join(root, `observation-${id}.json`), JSON.stringify({
+      schemaVersion: 1, session: { id: 'native', file: '/sessions/native.jsonl' },
+      outcome: 'unknown', stop: null, hold: false, version: 0 }));
+    const resumed = fakePi('native', '/sessions/native.jsonl');
+    resumed.entries.push(worker.entries[0]);
+    const restored = bindObservation(resumed.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await resumed.emit('session_start');
+    assert.equal(restored.registered, false);
+    await assert.rejects(readWorkerRegistration(root, id), { code: 'ENOENT' });
+    await resumed.emit('session_shutdown');
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a busy first-turn race cancels registration so the user can retry explicitly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved task');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const messages = [];
+  worker.pi.sendUserMessage = text => messages.push(text);
+  let idleCalls = 0;
+  worker.ctx.isIdle = () => ++idleCalls !== 2;
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    const start = `--start ${JSON.stringify({ checkpoint, message: 'Begin approved task.' })}`;
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, false);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(worker.entries, []);
+    assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
+    await worker.pi.command(start, worker.ctx);
+    assert.equal(observer.registered, true);
+    assert.deepEqual(messages, ['Begin approved task.']);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an exact final reply is captured; oversized replies hold instead of hiding a request', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const checkpoint = join(root, 'checkpoint.md');
+  await writeFile(checkpoint, 'Approved work remains');
+  const worker = fakePi('native', '/sessions/native.jsonl');
+  const prior = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const observer = bindObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1' });
+    await worker.emit('session_start');
+    await worker.pi.command(checkpoint, worker.ctx);
+    const id = worker.entries.at(-1).data.workerId;
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'new-answer', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'Progress made. Can I deploy?' }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    const saved = () => readFile(join(root, `observation-${id}.json`), 'utf8').then(JSON.parse);
+    assert.equal((await saved()).outcome, 'completed');
+    assert.equal((await saved()).hold, false);
+    assert.equal((await saved()).finalReply, 'Progress made. Can I deploy?');
+
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'oversized', message: { role: 'assistant',
+      stopReason: 'stop', content: [{ type: 'text', text: 'é'.repeat(MAX_FINAL_REPLY_BYTES) }] } });
+    await worker.emit('agent_settled', { aborted: false });
+    assert.equal(observer.hold, true);
+    assert.equal((await saved()).outcome, 'approval');
+    assert.equal((await saved()).hold, true);
+    assert.equal((await saved()).finalReply, undefined);
+
+    await worker.pi.clearHold('', worker.ctx);
+    assert.equal(observer.hold, false);
+    await worker.emit('agent_start');
+    worker.entries.push({ type: 'message', id: 'empty', message: { role: 'assistant',
+      stopReason: 'stop', content: [] } });
+    await worker.emit('agent_settled', { aborted: false });
+    assert.equal((await saved()).outcome, 'approval');
+    assert.equal((await saved()).hold, true);
+    assert.equal((await saved()).finalReply, undefined);
+  } finally {
+    await worker.emit('session_shutdown');
+    if (prior === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = prior;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a provider failure without a new assistant message cannot reuse an old completed stop', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');
@@ -170,6 +889,7 @@ test('a provider failure without a new assistant message cannot reuse an old com
     await worker.emit('agent_settled', { aborted: false });
     const observed = JSON.parse(await readFile(join(root, `observation-${id}.json`)));
     assert.equal(observed.outcome, 'unknown');
+    assert.equal(observed.finalReply, undefined);
   } finally {
     await worker.emit('session_shutdown');
     if (prior === undefined) delete process.env.HERDR_ENV;

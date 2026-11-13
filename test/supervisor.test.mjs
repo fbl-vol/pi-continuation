@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
@@ -10,6 +10,7 @@ import { receive } from '../src/receiver.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { bindSupervisor } from '../src/supervisor.mjs';
 import { bindCoordinator } from '../src/coordinator.mjs';
+import { checkpointHash } from '../src/policy.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -18,19 +19,20 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const herdrPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const checkpoint = join(root, 'checkpoint.md');
   const workerId = randomUUID();
-  const sessionFile = '/sessions/test.jsonl';
+  const sessionFile = join(root, 'test.jsonl');
   const record = { workerId, paneId: 'w1:p1', sessionId: 'session-test', sessionFile,
     checkpoint, cwd: '/project', paused: true };
   let stop = randomUUID();
   const siblingId = randomUUID();
   const sibling = { ...record, workerId: siblingId, paneId: 'w2:p1',
-    sessionId: 'sibling-session', sessionFile: '/sessions/sibling.jsonl', checkpoint: join(root, 'sibling.md') };
+    sessionId: 'sibling-session', sessionFile: join(root, 'sibling.jsonl'), checkpoint: join(root, 'sibling.md') };
   const siblingStop = randomUUID();
-  const observation = { outcome: 'completed', stop, version: 0,
+  const observation = { outcome: 'completed', stop, version: 0, hold: false,
+    finalReply: 'Synthetic worker reports progress; approved work remains.',
     session: { id: record.sessionId, file: sessionFile, leaf: 'leaf' } };
   const agent = { pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1',
     terminal_id: 'terminal', cwd: '/project', agent: 'pi', agent_status: 'idle',
-    completion_seq: 1, agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
+    state_change_seq: 1, completion_seq: 1, agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: sessionFile } };
   const coordinatorId = randomUUID();
   const coordinatorRecord = { id: coordinatorId, sessionId: 'coordinator-session',
     sessionFile: '/sessions/coordinator.jsonl', cwd: '/project', paneId: 'w1:p2' };
@@ -68,6 +70,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
   const original = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
+    await writeFile(sessionFile, '{}\n');
+    await writeFile(sibling.sessionFile, '{}\n');
     await writeFile(checkpoint, 'in progress: completed concrete result A');
     await writeFile(sibling.checkpoint, 'in progress: completed sibling result');
     await atomicJson(join(root, `worker-${workerId}.json`), record);
@@ -132,7 +136,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     await writeFile(checkpoint, 'State: backlog empty\nconcrete result A');
     await pi.command('activate worker ' + workerId, ctx);
     const completion = await pi.tool('call', { workerId, stop,
-      action: 'notify', kind: 'completion', evidence: 'concrete result A' }, undefined, undefined, ctx);
+      action: 'notify', kind: 'completion', evidence: 'concrete result A',
+      reportHash: checkpointHash(await readFile(checkpoint, 'utf8')) }, undefined, undefined, ctx);
     assert.match(completion.content[0].text, /pending/);
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: randomUUID() });
     coordinatorAgent.agent_status = 'idle';
@@ -152,6 +157,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     const attention = messages.find(m => !Array.isArray(m) && m.message.customType === 'pi-continuation-attention');
     assert.match(attention.message.content, new RegExp(workerId));
     assert.match(attention.message.content, new RegExp(siblingId));
+    assert.match(attention.message.content, /Synthetic worker reports progress/);
+    assert.match(attention.message.content, /final reply can request user approval/i);
     const answer = await pi.tool('call', { workerId, stop, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
     assert.match(answer.content[0].text, /delivered/);
@@ -162,7 +169,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     await pi.command('activate worker ' + workerId, ctx);
     const repeat = await pi.tool('call', { workerId, stop, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
-    assert.match(repeat.content[0].text, /Stale/);
+    assert.match(repeat.content[0].text, /Continuation already delivered/);
     const second = randomUUID();
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: second });
     const secondAnswer = await pi.tool('call', { workerId, stop: second, action: 'resume', evidence: 'concrete result A' },
