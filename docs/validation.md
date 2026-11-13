@@ -32,6 +32,28 @@ Five selected blocked/final-recheck regressions failed against isolated pre-chan
 source, then passed on the ordinary implementation. No production source was
 modified for that red comparison. Deterministic policy tests are not model judgment.
 
+## Focused Linux alpha trial
+
+A fresh ordinary-extension trial on Linux with native Pi 1.5.2, Herdr 0.9.5
+(protocol 22) and real worker/supervisor/coordinator models exercised the earlier
+held-report failure. A deliberate initial completion attempt while held was
+refused; explicit human Clear retained the same report/stop while preserving
+independent pauses and budget/history. After separate activation, the same
+supervisor model session reassessed current evidence and sent one completion
+notice. Repeated events did not duplicate it. A subsequent undelegated choice
+remained a decision after Clear; no choice or continuation was supplied.
+
+Initial prompts and the protocol were fixed before launch, with no mid-trial
+supervisor coaching. The model also corrected an absent-evidence refusal on its
+own. This is one focused passing trial, not a general reliability guarantee or a
+full repeat of P1–P7. Earlier competing-owner/restart and bounded-nudge checks
+remain separate controlled/source evidence. Existing-worker migration, live
+settings installation and platform runtime acceptance were not performed.
+
+The current isolated suite has 188 passing tests, including a native-command
+lifecycle regression for held rejection followed by same-nonce reassessment,
+bound-coordinator completion delivery and consequential refusal/dedup checks.
+
 ## Narrative and historical evidence
 
 A prior independent blind model exercise selected acceptable dispositions for

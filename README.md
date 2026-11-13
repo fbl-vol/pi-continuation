@@ -1,8 +1,8 @@
 # pi-continuation
 
-An experimental, private **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
+An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Not released, installed into live settings or accepted for existing workers.** The GitHub repository is public; npm publication is disabled (`private: true`). Linux, macOS and native Windows are targets, not verified runtime support claims. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Alpha prerelease: `v0.1.0-alpha.1`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.1.0-alpha.1); npm publication remains disabled (`private: true`). A focused Linux Pi 1.5.2/Herdr 0.9.5 trial passed. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,7 +14,25 @@ An experimental, private **ordinary Pi extension** for explicitly registered Her
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Development and separately authorized disposable use
+## Install the alpha
+
+Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. This alpha was exercised on Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); normal package discovery was also checked with Pi 1.5.0.
+
+```sh
+pi install git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.1
+```
+
+Installation changes that profile's Pi settings; restart or reload Pi afterward. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
+
+To remove this package from the same profile:
+
+```sh
+pi remove git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.1
+```
+
+Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
+
+## Development and disposable use
 
 Run `npm ci --legacy-peer-deps`, `npm test`, and `npm run check:package`. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.
 
@@ -37,7 +55,7 @@ The existing workflow used Herdr state and model interpretation, not authoritati
 
 Clear hold preserves the same nonce only for a current unchanged successful report produced while held. Stale, missing, aborted/error or previously eligible reports are not rearmed; attempted/delivered/ambiguous work remains subject to existing no-replay guards. The supervisor must still interpret the report and cannot infer action approval from Clear. Source checks are not personal workflow acceptance; see [validation](docs/validation.md).
 
-Source tests, historical synthetic narrative exercises and isolated package loads do not establish whole-workflow or user acceptance. No exhaustive native-UI proof is a hidden delivery prerequisite. Real-worker rehearsal, installation, migration, secrets and npm publication still require their own scoped instruction.
+Source tests, synthetic narrative exercises, isolated package loads and a focused controlled real-model trial do not establish general reliability, whole-workflow or user acceptance. No exhaustive native-UI proof is a hidden delivery prerequisite. Real-worker rehearsal, installation, migration, secrets and npm publication still require their own scoped instruction.
 
 ## Recovery and archival experiment
 
@@ -47,4 +65,4 @@ The partial SDK/native-UI detour is preserved on [`experiment/sdk-host-native-ui
 
 For an authorized disposable installation, `pi remove /absolute/path/to/pi-continuation` removes the package. This extension never autonomously installs packages, starts workers, migrates supervisors, changes timers or publishes npm.
 
-MIT licensed. Planned npm name: `@fbl-vol/pi-continuation`; scope ownership/availability has not been verified for publication.
+MIT licensed. Package name: `@fbl-vol/pi-continuation`. This alpha is available from GitHub, not npm.
