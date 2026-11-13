@@ -68,8 +68,10 @@ test('P1 ordinary profile registers a paused exact session without first-option 
   await s.pi.command(s.checkpoint, s.ctx);
   assert.equal(s.observer.registered, true);
   assert.deepEqual(s.sent, []);
-  const record = JSON.parse(await readFile(join(s.root, (await readdir(s.root)).find(name =>
-    name.startsWith('worker-'))), 'utf8'));
+  // Worker-prefixed entries can also be sockets (including truncated Unix paths).
+  await writeFile(join(s.root, 'worker-!not-a-record'), 'not a registration');
+  const workerId = s.entries.find(entry => entry.customType === 'pi-continuation-worker').data.workerId;
+  const record = JSON.parse(await readFile(join(s.root, `worker-${workerId}.json`), 'utf8'));
   assert.equal(record.paused, true);
   assert.equal(record.sessionId, 'native');
   assert.equal(record.sessionFile, '/sessions/native.jsonl');
