@@ -2,6 +2,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readJson } from './store.mjs';
 import { sameOccupant } from './herdr.mjs';
+import { isId } from './contracts.mjs';
 
 // Registration joins durable Pi identity with live Herdr identity. No caller may
 // infer a replacement from a pane name or silently follow a different checkpoint.
@@ -52,6 +53,29 @@ export async function workerCandidate(root, workerId, route, state, live, superv
       throw new Error('Duplicate worker or checkpoint');
   }
   return binding;
+}
+
+/** A private IPC request is not approval: require the exact one-use opt-in
+ * persisted by the worker command, current owner, and unchanged native binding.
+ */
+export async function workerStartCandidate(root, request, state, live, supervisorPane) {
+  if (!state.acceptStarts || request?.type !== 'worker-start' ||
+      request.ownerToken !== state.ownerToken || !isId(request.workerId) || !isId(request.nonce))
+    throw new Error('Supervisor is not accepting this worker start; run supervisor start first');
+  const record = await readWorkerRegistration(root, request.workerId);
+  if (record.managedInput !== true || record.stateRoot !== root || record.start?.nonce !== request.nonce ||
+      record.start.ownerToken !== state.ownerToken)
+    throw new Error('Worker start has no matching confirmed opt-in');
+  const agent = live.agents.find(item => item.pane_id === record.paneId);
+  const existing = state.workers[request.workerId];
+  const route = agent?.workspace_id;
+  if (!route || (existing && (!sameOccupant(agent, existing) || existing.route !== route ||
+      existing.checkpoint !== record.checkpoint)))
+    throw new Error('Worker binding changed; inspect before start');
+  const others = { ...state, workers: { ...state.workers } };
+  delete others.workers[request.workerId];
+  const candidate = await workerCandidate(root, request.workerId, route, others, live, supervisorPane);
+  return { binding: existing ?? candidate, route, repeated: existing?.lastStartNonce === request.nonce };
 }
 
 export async function coordinatorCandidate(root, id, state, live, supervisorPane) {

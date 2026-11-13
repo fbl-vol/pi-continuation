@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { access, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { atomicJson, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { atomicJson, atomicText, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { ownerAlive, sendAction } from './ipc.mjs';
+import { managedCheckpointPath, managedCheckpointText } from './checkpoint.mjs';
 import { receive } from './receiver.mjs';
 import { currentSession } from './session.mjs';
 import { readyWorkerRegistration } from './bindings.mjs';
 import { commitReady } from './registration.mjs';
-import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation, isId } from './contracts.mjs';
+import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation, readSupervisor, isId } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { guardPromptUI } from './prompt-guard.mjs';
 
@@ -32,8 +34,9 @@ const latestConversation = ctx => [...ctx.sessionManager.getBranch()].reverse().
   (entry.type === 'message' && entry.message?.role !== 'system') ||
   ['custom_message', 'compaction', 'branch_summary', 'context_edit'].includes(entry.type));
 
-// Only an approval observation minted while held can become reviewable here.
-// Never recapture an old eligible stop or mint a replacement deduplication key.
+// Recover only a fresh, unchanged successful reply. Managed input fences can
+// park the same native stop for explicit start; never mint a replacement nonce.
+// Delivered/handled effects remain guarded by the supervisor's retained history.
 function currentHeldReport(prior, ctx, version, session) {
   if (prior.schemaVersion !== SCHEMA_VERSION || prior.outcome !== 'approval' || !prior.hold ||
       !isId(prior.stop) || prior.version !== version || !prior.finalReply?.trim() ||
@@ -48,12 +51,16 @@ function currentHeldReport(prior, ctx, version, session) {
 
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope,
-  reviewCurrentReports = false } = {}) {
+  reviewCurrentReports = false, isInterrupt = data => data === '\u001b' } = {}) {
   let worker;
   let preparing;
+  let starting = false;
   let initialPending;
   const report = diagnostics('worker');
   let hold = false;
+  let holdReason;
+  let parkedReport;
+  let lastObserved;
   let stopVersion = 0;
   let previousAssistantId;
   const lastAssistantId = ctx => [...ctx.sessionManager.getBranch()].reverse().find(e =>
@@ -72,14 +79,41 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (event.source !== 'interactive' && event.source !== 'rpc') return;
     stopVersion++;
     if (preparing) preparing.interrupted = true;
-    if (worker) return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+    if (!worker) return;
+    // Submitted task text relinquishes only a provisional typing fence. Native
+    // prompts, Escape, aborts and errors remain sticky until explicit start.
+    if (worker.managedInput && holdReason === 'typing') {
+      hold = false;
+      holdReason = undefined;
+    }
+    parkedReport = undefined;
+    return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
   });
   const observe = (value, ctx) => {
     const owner = worker;
     // Hold is independent of activity: a new turn must not erase an unresolved stop.
     const saved = { ...value, schemaVersion: SCHEMA_VERSION, hold, version: stopVersion,
+      holdReason: owner.managedInput && hold ? holdReason ?? 'restored' : undefined,
+      parkedReport: owner.managedInput ? parkedReport : undefined,
       ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
-    pendingWrite = pendingWrite.then(() => atomicJson(`${root}/observation-${owner.workerId}.json`, saved))
+    let checkpoint;
+    let checkpointError;
+    try { if (owner.managedCheckpoint) checkpoint = managedCheckpointText(ctx); }
+    catch (error) { checkpointError = error; }
+    lastObserved = saved;
+    pendingWrite = pendingWrite.then(async () => {
+      try {
+        if (checkpointError) throw checkpointError;
+        if (checkpoint !== undefined) await atomicText(owner.checkpoint, checkpoint);
+      } catch (error) {
+        hold = true;
+        holdReason = 'error';
+        await atomicJson(`${root}/observation-${owner.workerId}.json`, {
+          ...saved, outcome: 'error', stop: null, hold: true, holdReason: 'error', parkedReport: undefined });
+        throw error;
+      }
+      await atomicJson(`${root}/observation-${owner.workerId}.json`, saved);
+    })
       .then(() => true)
       .catch(error => {
         if (worker === owner) worker = undefined;
@@ -108,13 +142,17 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     return observe(existing, ctx);
   };
   const watchTerminalInput = ctx => {
-    // This callback runs before Pi handles built-in menus and dialogs, which do
-    // not emit ui_prompt_start. Any human interaction invalidates the stop.
-    stopTerminalInput = ctx.ui.onTerminalInput(() => {
+    // Fence immediately, even before Pi knows whether typing will submit a task
+    // or open a native menu. Only a confirmed start may recover a parked report.
+    stopTerminalInput = ctx.ui.onTerminalInput(data => {
       if (preparing) { preparing.interrupted = true; stopVersion++; return; }
-      if (!worker || hold) return;
+      if (!worker || (hold && (!worker.managedInput || !isInterrupt(data)))) return;
+      if (worker.managedInput && !hold) parkedReport = lastObserved?.stop ? lastObserved : undefined;
       hold = true;
+      holdReason = isInterrupt(data) ? 'interruption' : 'typing';
       stopVersion++;
+      if (parkedReport) parkedReport = { ...parkedReport, outcome: 'approval', hold: true,
+        parkedReport: undefined, version: stopVersion };
       void observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
     });
   };
@@ -122,6 +160,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (preparing) { preparing.interrupted = true; stopVersion++; return; }
     if (!worker) return;
     hold = true;
+    holdReason = 'prompt';
+    parkedReport = undefined;
     stopVersion++;
     void observe({ session: currentSession(ctx), outcome: 'approval', stop: null }, ctx);
   };
@@ -142,6 +182,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (event.isError && preparing) { preparing.interrupted = true; stopVersion++; }
     if (!event.isError || !worker) return;
     hold = true;
+    holdReason = 'error';
+    parkedReport = undefined;
     stopVersion++;
     return observe({ session: currentSession(ctx), outcome: 'error', stop: null }, ctx);
   });
@@ -152,6 +194,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopTerminalInput?.();
     stopTerminalInput = undefined;
     worker = undefined;
+    holdReason = undefined; parkedReport = undefined; lastObserved = undefined;
     prompts?.dispose(); prompts = undefined; promptUI = undefined;
     if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') return;
     try { promptsFor(ctx); }
@@ -181,6 +224,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
             prior.promptScope?.revision !== scope?.revision;
           promptInterrupted = prompts.blocked || prompts.revision !== restoreRevision || !!scopeChanged;
           hold = prior.hold || prior.bootstrapPending === true || promptInterrupted;
+          holdReason = hold ? promptInterrupted ? 'prompt' : prior.holdReason ?? 'restored' : undefined;
+          parkedReport = promptInterrupted ? undefined : prior.parkedReport;
+          lastObserved = prior;
           if (Number.isSafeInteger(prior.version) && prior.version >= 0)
             stopVersion = Math.max(stopVersion, prior.version);
         } catch (error) { hold = true; report('restore observation', error, ctx); }
@@ -204,8 +250,17 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   });
 
   pi.registerCommand('continuation-worker', {
-    description: 'Register a Pi worker; optional explicit first turn: /continuation-worker --start {"checkpoint":"/path","message":"task"}',
+    description: 'Start or return to supervision: start | advanced registration: <checkpoint> or --start {"checkpoint":"/path","message":"task"}',
     handler: async (argument, ctx) => {
+      if (argument.trim() !== 'start') return registerWorker(argument, ctx);
+      if (starting) { ctx.ui.notify('Worker start is already in progress', 'info'); return; }
+      starting = true;
+      try { return await startWorker(ctx); }
+      finally { starting = false; }
+    },
+  });
+
+  const registerWorker = async (argument, ctx, managed = false) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
       }
@@ -239,22 +294,25 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         checkpointPath = request.checkpoint;
         initialMessage = request.message;
       }
-      const checkpoint = resolve(ctx.cwd, checkpointPath);
-      try { await access(checkpoint); } catch {
+      const workerId = randomUUID();
+      const checkpoint = managed ? managedCheckpointPath(root, workerId) : resolve(ctx.cwd, checkpointPath);
+      if (!managed) try { await access(checkpoint); } catch {
         ctx.ui.notify('Existing checkpoint path required', 'error'); return;
       }
       const session = currentSession(ctx);
       if (guard.blocked || guard.revision !== registrationRevision || stopVersion !== registrationVersion) {
         ctx.ui.notify('Registration interrupted by another interaction; inspect before retrying.', 'warning'); return;
       }
-      if (!await guard.confirm('Register continuation worker?',
+      if (!await guard.confirm(managed ? 'Start worker supervision?' : 'Register continuation worker?', managed ?
+        'Join the running supervisor and enable this exact session. Ordinary task messages remain supervised; Escape, prompts and errors stop it. Confirm no other continuation owner supervises this worker.' :
         `Bind this session and checkpoint for observation?\n${checkpoint}${initialMessage ?
           '\nStart the explicitly supplied initial user message after registration?' : ''}`)) return;
       if (stopVersion !== registrationVersion || guard.revision !== registrationRevision) {
         ctx.ui.notify('Registration interrupted during confirmation; no message sent.', 'warning'); return;
       }
-      const record = { workerId: randomUUID(), sessionId: session.id, sessionFile: session.file,
-        paneId, checkpoint, cwd: ctx.cwd, socketPath, paused: true, requiresReady: true };
+      const record = { workerId, sessionId: session.id, sessionFile: session.file,
+        paneId, checkpoint, cwd: ctx.cwd, socketPath, stateRoot: root, paused: true, requiresReady: true,
+        ...(managed ? { managedInput: true, managedCheckpoint: true } : {}) };
       const candidate = { interrupted: false, version: stopVersion };
       preparing = candidate;
       let receiver;
@@ -264,6 +322,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       try {
         watchTerminalInput(ctx);
         await ensureRoot(root);
+        if (managed) await atomicText(checkpoint, managedCheckpointText(ctx));
         await atomicJson(`${root}/worker-${record.workerId}.json`, record);
         workerSaved = true;
         await atomicJson(`${root}/observation-${record.workerId}.json`, {
@@ -323,7 +382,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           ctx.ui.notify(`Worker ${record.workerId} registered paused; awaiting initial user turn`, 'info');
         } else {
           if (reviewCurrentReports && !await captureExisting(ctx)) return;
-          ctx.ui.notify(`Worker ${record.workerId} registered paused; no continuation is active`, 'info');
+          ctx.ui.notify(managed ? 'Worker registered; joining the supervisor' :
+            `Worker ${record.workerId} registered paused; no continuation is active`, 'info');
         }
       } catch (error) {
         if (published) {
@@ -342,15 +402,108 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
             try { await receiver(); } catch (error) { closeReceiver = receiver; throw error; }
           }),
             observationSaved && (() => rm(`${root}/observation-${record.workerId}.json`)),
-            workerSaved && (() => rm(`${root}/worker-${record.workerId}.json`))];
+            workerSaved && (() => rm(`${root}/worker-${record.workerId}.json`)),
+            managed && (() => rm(checkpoint, { force: true }))];
           for (const effect of discard) {
             if (!effect) continue;
             try { await effect(); } catch (error) { report('discard provisional registration', error, ctx); }
           }
         }
       }
-    },
-  });
+  };
+
+  const startWorker = async ctx => {
+    if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
+      ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
+    }
+    if (preparing) { ctx.ui.notify('Worker registration is still in progress', 'warning'); return; }
+    let supervisor;
+    try {
+      supervisor = await readSupervisor(root);
+      if (!supervisor.acceptStarts || !await ownerAlive(root, supervisor.ownerToken)) {
+        ctx.ui.notify('Run /continuation-supervisor start in the intended supervisor first', 'warning'); return;
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') ctx.ui.notify('Run /continuation-supervisor start first', 'warning');
+      else report('find supervisor', error, ctx);
+      return;
+    }
+    const session = currentSession(ctx);
+    const entries = ctx.sessionManager.getBranch();
+    if (session.id === supervisor.supervisorSession || entries.some(entry =>
+      entry.type === 'custom' && entry.customType === 'pi-continuation-coordinator' &&
+      entry.data?.sessionId === session.id)) {
+      ctx.ui.notify('A supervisor or coordinator cannot become a worker', 'error'); return;
+    }
+    if (!worker) {
+      // Do not create a new registration to escape a disabled committed binding.
+      for (const entry of entries.filter(entry => entry.type === 'custom' &&
+        entry.customType === 'pi-continuation-worker' && entry.data?.sessionId === session.id)) {
+        if (entry.data.stateRoot !== root || !isId(entry.data.workerId)) {
+          ctx.ui.notify('This session has another or unknown registration owner; inspect before start', 'warning'); return;
+        }
+        try {
+          await access(`${root}/ready-${entry.data.workerId}.json`);
+          ctx.ui.notify('This session has an inactive registration; inspect and reload before start', 'warning'); return;
+        } catch (error) { if (error.code !== 'ENOENT') { report('inspect registration', error, ctx); return; } }
+      }
+      await registerWorker('', ctx, true);
+      if (!worker) return;
+    } else {
+      const guard = promptsFor(ctx);
+      const version = stopVersion;
+      if (guard.blocked || (!ctx.isIdle() && hold && holdReason !== 'typing')) {
+        ctx.ui.notify('Resolve the current interruption or prompt and wait until idle before start', 'warning'); return;
+      }
+      if (!await guard.confirm('Return worker to supervision?',
+        'Clear the resolved hold and enable this exact worker. Unanswered decisions are not approved; other scope pauses and delivery history remain unchanged.')) return;
+      const now = currentSession(ctx);
+      if (version !== stopVersion || now.id !== session.id || now.file !== session.file ||
+          now.leaf !== session.leaf || guard.blocked) {
+        ctx.ui.notify('Worker changed during confirmation; start not accepted', 'warning'); return;
+      }
+      await pendingWrite;
+      const prior = await readObservation(root, worker.workerId);
+      const fresh = currentSession(ctx);
+      if (worker?.sessionId !== session.id || version !== stopVersion ||
+          fresh.id !== now.id || fresh.file !== now.file || fresh.leaf !== now.leaf || guard.blocked) {
+        ctx.ui.notify('Worker changed while inspecting the held report; start not accepted', 'warning'); return;
+      }
+      const currentReport = ctx.isIdle() ? currentHeldReport(prior, ctx, version, now) ??
+        (worker.managedInput && prior.parkedReport ? currentHeldReport(prior.parkedReport, ctx, version, now) : null) : null;
+      const unchanged = !prior.hold && prior.version === version &&
+        prior.session.id === now.id && prior.session.file === now.file && prior.session.leaf === now.leaf;
+      worker.managedInput = true;
+      hold = false; holdReason = undefined; parkedReport = undefined;
+      stopVersion++;
+      if (!await observe(currentReport ?? (unchanged ? prior :
+        { session: now, outcome: ctx.isIdle() ? 'unknown' : 'working', stop: null }), ctx)) return;
+    }
+    const record = worker;
+    if (!record) return;
+    record.stateRoot = root;
+    record.start = { nonce: randomUUID(), ownerToken: supervisor.ownerToken };
+    try {
+      await atomicJson(`${root}/worker-${record.workerId}.json`, record);
+      const result = await sendAction(root, { type: 'worker-start', workerId: record.workerId,
+        nonce: record.start.nonce, ownerToken: supervisor.ownerToken }, 'supervisor');
+      if (!result.accepted || result.workerId !== record.workerId || result.nonce !== record.start.nonce ||
+          result.ownerToken !== supervisor.ownerToken) {
+        hold = true; holdReason = 'restored'; stopVersion++;
+        await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+        ctx.ui.notify('Worker start not accepted; inspect supervisor status before retrying', 'warning'); return;
+      }
+      ctx.ui.notify(result.globalPaused || result.routePaused || result.workerPaused ?
+        'Worker joined; an independent supervision scope remains paused' :
+        'Worker supervision started; ordinary task messages remain supervised', 'info');
+    } catch (error) {
+      // The owner may have accepted before the response was lost. Fence delivery,
+      // retain the confirmed nonce/history, and never retry this request blindly.
+      hold = true; holdReason = 'restored'; stopVersion++;
+      if (worker === record) await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+      report('start worker', error, ctx);
+    }
+  };
 
   pi.on('before_agent_start', (event) => {
     if (initialPending && worker === initialPending.worker && !hold &&
@@ -368,6 +521,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (!worker) return;
     previousAssistantId = lastAssistantId(ctx);
     // Every new turn invalidates the previous stop, including a human prompt.
+    parkedReport = undefined;
     return observe({ session: currentSession(ctx), outcome: 'working', stop: null }, ctx);
   });
   pi.on('agent_settled', async (event, ctx) => {
@@ -379,7 +533,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     }
     stopVersion++;
     if (event.aborted || [...ctx.sessionManager.getBranch()].reverse().find(e =>
-      e.type === 'message' && e.message?.role === 'assistant')?.message?.stopReason === 'error') hold = true;
+      e.type === 'message' && e.message?.role === 'assistant')?.message?.stopReason === 'error') {
+      hold = true;
+      holdReason = event.aborted ? 'interruption' : 'error';
+      parkedReport = undefined;
+    }
     try {
       const stopped = stopObservation(ctx, event.aborted, hold, stopVersion, previousAssistantId);
       if (stopped.outcome === 'approval') hold = true;
@@ -411,8 +569,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           now.file !== session.file || now.leaf !== session.leaf || !ctx.isIdle()) {
         ctx.ui.notify('Worker changed during confirmation; hold retained.', 'warning'); return;
       }
-      const currentReport = prior ? currentHeldReport(prior, ctx, version, now) : null;
+      const currentReport = prior ? currentHeldReport(prior, ctx, version, now) ??
+        (worker.managedInput && prior.parkedReport ? currentHeldReport(prior.parkedReport, ctx, version, now) : null) : null;
       hold = false;
+      holdReason = undefined;
+      parkedReport = undefined;
       stopVersion++;
       await observe(currentReport ?? { session: now, outcome: 'unknown', stop: null }, ctx);
     },
