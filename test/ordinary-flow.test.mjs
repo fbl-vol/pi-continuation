@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { bindContinuation } from '../src/ordinary.mjs';
 import { endpoint } from '../src/herdr.mjs';
 import { readJson } from '../src/store.mjs';
+import { checkpointHash } from '../src/policy.mjs';
 
 // Real role composition, registration, owner/worker sockets, records and receipts.
 // Only native Pi/Herdr and the model's chosen disposition are fake, not eligibility.
@@ -90,16 +91,9 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
       const held = await readJson(join(root, `observation-${workerId}.json`));
       assert.equal(held.outcome, 'approval');
       assert.equal(held.hold, true);
-      // Native command dispatch precedes Pi's input event. Raw terminal keys still occur.
-      worker.rawInput();
-      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
-      const cleared = await readJson(join(root, `observation-${workerId}.json`));
-      assert.equal(cleared.stop, held.stop);
-      assert.equal(cleared.finalReply, held.finalReply);
-      assert.equal(cleared.hold, false);
     }
-    const observation = await readJson(join(root, `observation-${workerId}.json`));
-    assert.equal(observation.outcome, 'completed');
+    let observation = await readJson(join(root, `observation-${workerId}.json`));
+    assert.equal(observation.outcome, recovery ? 'approval' : 'completed');
     assert.equal(worker.messages.length, 0);
     supervisor.ctx.isIdle = () => false;
     const command = args => supervisor.commands.get('continuation-supervisor')(args, supervisor.ctx);
@@ -119,6 +113,25 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     await command(`activate worker ${workerId}`);
     await command('activate route w');
     await command('activate global');
+    if (recovery) {
+      // Reproduce the real failure: completion is rejected while held, then a
+      // human Clear makes this same report/nonce reviewable without a new turn.
+      const completion = await supervisor.tools.get('continuation_disposition')('held-completion',
+        { workerId, stop: observation.stop, action: 'notify', kind: 'completion',
+          evidence, reportHash: checkpointHash(evidence) }, undefined, undefined, supervisor.ctx);
+      assert.match(completion.content[0].text, /Report held; requested action was not accepted/);
+      const beforeClear = await readJson(join(root, 'supervisor.json'));
+      worker.rawInput();
+      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
+      const cleared = await readJson(join(root, `observation-${workerId}.json`));
+      assert.equal(cleared.stop, observation.stop);
+      assert.equal(cleared.finalReply, observation.finalReply);
+      assert.equal(cleared.outcome, 'completed');
+      assert.equal(cleared.hold, false);
+      const afterClear = await readJson(join(root, 'supervisor.json'));
+      assert.deepEqual(afterClear, beforeClear);
+      observation = cleared;
+    }
     let awaken;
     const attention = new Promise(resolve => { awaken = resolve; });
     supervisor.pi.sendMessage = (message, options) => { supervisor.messages.push([message, options]); awaken(message); };
@@ -127,10 +140,14 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     const message = await attention;
     assert.match(message.content, /Approved work remains/);
     assert.match(message.content, new RegExp(workerId));
+    assert.match(message.content, /Human Clear can retain the same stop ID/);
+    assert.match(message.content, /reassess the current evidence/);
+    assert.match(message.content, /"hold":false/);
+    assert.match(message.content, /"coordinatorBound":false/);
     assert.match((await dispose()).content[0].text, /Continuation delivered/);
     assert.equal(worker.messages.length, 1);
     assert.equal(worker.messages[0][1].triggerTurn, true);
-    assert.match((await dispose()).content[0].text, /Stale or ineligible/);
+    assert.match((await dispose()).content[0].text, /Continuation already delivered/);
     assert.equal(worker.messages.length, 1);
     state = await readJson(join(root, 'supervisor.json'));
     assert.equal(state.resumed[workerId], observation.stop);
@@ -142,7 +159,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
       const invalidated = await readJson(join(root, `observation-${workerId}.json`));
       assert.equal(invalidated.stop, null);
       assert.equal(invalidated.outcome, 'unknown');
-      assert.match((await dispose()).content[0].text, /Stale or ineligible/);
+      assert.match((await dispose()).content[0].text, /Stale report or stop ID/);
       assert.equal(worker.messages.length, 1);
       const afterClear = await readJson(join(root, 'supervisor.json'));
       assert.equal(afterClear.resumed[workerId], observation.stop);

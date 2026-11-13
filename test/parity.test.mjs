@@ -160,10 +160,10 @@ test('P3 blocked mid-turn attention is distinct, deduplicated and material-only'
   assert.notEqual(token, s.observation.stop);
   s.event();
   assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
-    action: 'resume', evidence: 'Validated result' })).content[0].text, /ineligible/);
+    action: 'resume', evidence: 'Validated result' })).content[0].text, /no eligible settled Herdr turn/);
   assert.equal((await s.state()).blocked[s.worker.id].stop, token);
   assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
-    action: 'notify', kind: 'completion', evidence: 'Validated result' })).content[0].text, /ineligible/);
+    action: 'notify', kind: 'completion', evidence: 'Validated result' })).content[0].text, /not a successfully completed eligible turn/);
   const notice = await s.dispose({ workerId: s.worker.id, stop: token,
     action: 'notify', kind: 'decision', evidence: 'Herdr reports blocked' });
   assert.match(notice.content[0].text, /Material notice sent/);
@@ -177,7 +177,7 @@ test('P3 blocked mid-turn attention is distinct, deduplicated and material-only'
   assert.equal((await s.state()).workers[s.worker.id].paused, false);
   assert.equal((await s.state()).blocked[s.worker.id].handled, undefined);
   assert.match((await s.dispose({ workerId: s.worker.id, stop: token,
-    action: 'resume', evidence: 'Validated result' })).content[0].text, /ineligible/);
+    action: 'resume', evidence: 'Validated result' })).content[0].text, /no eligible settled Herdr turn/);
   assert.deepEqual(await readJson(join(s.root, `observation-${s.worker.id}.json`)), native);
 });
 
@@ -238,6 +238,35 @@ for (const settledState of ['idle', 'done']) test(
   await eventually(async () => Object.values((await s.state()).notices)[0].status === 'sent');
   assert.equal(s.notices.length, 1);
   assert.equal(s.wakes.length, 0);
+});
+
+test('P3/P4/P6 current attention distinguishes held rejection from same-stop completion reassessment', async t => {
+  const s = await fixture(t, { ordinary: true });
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`),
+    { ...s.observation, outcome: 'approval', hold: true });
+  for (const action of ['resume', 'acknowledge', 'notify']) {
+    const result = await s.disposition(action, action === 'notify' ? 'completion' : undefined);
+    assert.match(result.content[0].text, /Report held; requested action was not accepted/);
+    assert.match(result.content[0].text, /fresh attention/);
+  }
+  assert.deepEqual((await s.state()).handled, {});
+  assert.deepEqual((await s.state()).notices, {});
+
+  // The real command lifecycle is covered by ordinary-flow; emulate its resulting
+  // observation here to exercise bound-coordinator guidance and notice delivery.
+  await atomicJson(join(s.root, `observation-${s.worker.id}.json`), s.observation);
+  s.ctx.isIdle = () => true;
+  await s.command('activate global');
+  assert.equal(s.wakes.length, 1);
+  assert.match(s.wakes[0].content, /"coordinatorBound":true/);
+  assert.match(s.wakes[0].content, /use notify with kind completion/);
+  assert.match(s.wakes[0].content, /Human Clear can retain the same stop ID/);
+  await s.disposition('notify', 'completion');
+  assert.equal(s.notices.length, 1);
+  assert.equal(Object.values((await s.state()).notices)[0].status, 'sent');
+  assert.match((await s.disposition('notify', 'completion')).content[0].text, /Notice already sent/);
+  assert.match((await s.disposition('acknowledge')).content[0].text, /Stop already handled/);
+  assert.equal(s.notices.length, 1);
 });
 
 test('a queued completion notice is discarded if the report changes without a new stop', async t => {
@@ -426,12 +455,14 @@ test('an observation without an explicit cleared hold cannot be acknowledged or 
   const s = await fixture(t);
   const { hold, ...legacy } = s.observation;
   await atomicJson(join(s.root, `observation-${s.worker.id}.json`), legacy);
-  assert.equal((await s.disposition('acknowledge')).content[0].text, 'Stale or ineligible stop');
-  assert.equal((await s.disposition('resume')).content[0].text, 'Stale or ineligible stop');
-  assert.equal((await s.disposition('notify', 'completion')).content[0].text, 'Stale or ineligible stop');
+  for (const action of ['acknowledge', 'resume', 'notify']) {
+    assert.match((await s.disposition(action, action === 'notify' ? 'completion' : undefined)).content[0].text,
+      /Report held; requested action was not accepted/);
+  }
   await atomicJson(join(s.root, `observation-${s.worker.id}.json`),
     { ...s.observation, outcome: 'approval', hold: true });
-  assert.equal((await s.disposition('notify', 'completion')).content[0].text, 'Stale or ineligible stop');
+  assert.match((await s.disposition('notify', 'completion')).content[0].text,
+    /Report held; requested action was not accepted/);
   assert.equal((await s.state()).handled[s.worker.id], undefined);
   assert.deepEqual((await s.state()).notices, {});
 });

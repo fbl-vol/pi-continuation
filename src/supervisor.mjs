@@ -17,6 +17,9 @@ import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareR
 
 const stateFile = root => join(root, 'supervisor.json');
 const lockFile = root => join(root, 'supervisor.lock');
+const heldReport = 'Report held; requested action was not accepted. Do not retry while held or clear it yourself. ' +
+  'After explicit human Clear, fresh attention may allow reassessment of the same current report and stop ID. ' +
+  'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
   let state;
@@ -72,16 +75,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     });
     return serial;
   };
-  const current = async workerId => {
+  const current = async (workerId, stop) => {
     const binding = state.workers[workerId];
-    if (!binding || !lastSnapshot) return null;
-    const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
-    if (!sameOccupant(agent, binding) || !isSettled(agent) || agent.completion_seq == null)
-      return null;
+    const agent = lastSnapshot?.agents.find(a => a.pane_id === binding?.paneId);
+    if (!binding || !sameOccupant(agent, binding))
+      return { refusal: 'Worker identity unavailable; inspect the exact binding. No action accepted.' };
+    if (!isSettled(agent) || agent.completion_seq == null)
+      return { refusal: 'Worker has no eligible settled Herdr turn. No action accepted; await fresh attention.' };
     const observation = await readObservation(root, workerId);
     if (observation.session.id !== binding.sessionId || observation.session.file !== binding.sessionFile ||
-        observation.outcome !== 'completed' || observation.hold || !observation.stop) return null;
-    return observation;
+        !observation.stop || observation.stop !== stop)
+      return { refusal: 'Stale report or stop ID; use current attention, not this old request. No action accepted.' };
+    if (observation.hold || observation.outcome === 'approval') return { refusal: heldReport };
+    if (observation.outcome !== 'completed')
+      return { refusal: 'Report is not a successfully completed eligible turn. No action accepted; inspect the worker.' };
+    return { observation };
   };
   // Herdr can block mid-turn, before any native assistant stop exists. This is
   // supervisor-owned attention only: never write it into worker observations.
@@ -240,7 +248,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       try {
         const path = await checkpointPath(id);
         const reportText = await readFile(path, 'utf8');
-        evidence.push({ id, outcome: stop.outcome, stop: stop.stop,
+        evidence.push({ id, outcome: stop.outcome, stop: stop.stop, hold: stop.hold,
+          coordinatorBound: !!state.routes[state.workers[id].route]?.coordinator,
           checkpointPath: path, reportHash: checkpointHash(reportText),
           finalReply: stop.finalReply, statusEvidence: stop.statusEvidence,
           checkpoint: reportText.slice(0, 4096) });
@@ -514,7 +523,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
                 if (observation.session?.id !== binding.sessionId) observation = undefined;
               }
             }
-          } else observation = await current(args.workerId);
+          } else {
+            const currentReport = await current(args.workerId, args.stop);
+            if (currentReport.refusal) return currentReport.refusal;
+            observation = currentReport.observation;
+          }
         } catch (error) {
           binding.paused = true;
           report('read disposition observation', error, ctx);
@@ -522,12 +535,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           await commit();
           return 'Worker observation unreadable; only that worker paused';
         }
-        if (!observation || observation.stop !== args.stop ||
-            (args.action === 'notify' && args.kind === 'completion' &&
-              (observation.outcome !== 'completed' || observation.hold)) ||
-            (args.action === 'resume' && state.resumed[args.workerId] === args.stop) ||
-            (args.action !== 'notify' && state.handled[args.workerId] === args.stop))
-          return 'Stale or ineligible stop';
+        if (!observation || observation.stop !== args.stop)
+          return 'Stale report or stop ID; use current attention, not this old request. No action accepted.';
+        if (args.action === 'notify' && args.kind === 'completion') {
+          if (observation.hold || observation.outcome === 'approval') return heldReport;
+          if (observation.outcome !== 'completed')
+            return 'Report is not a successfully completed eligible turn; completion notice not accepted.';
+        }
+        if (args.action === 'resume' && state.resumed[args.workerId] === args.stop)
+          return 'Continuation already delivered for this stop; do not resend it.';
+        if (args.action !== 'notify' && state.handled[args.workerId] === args.stop)
+          return 'Stop already handled; do not replay it. Only fresh attention can request a new assessment.';
         let checkpoint;
         try {
           checkpoint = await readFile(await checkpointPath(args.workerId), 'utf8');

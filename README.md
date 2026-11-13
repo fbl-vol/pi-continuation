@@ -27,6 +27,8 @@ Only for a **separately authorized disposable** environment, `pi install /absolu
 
 Registration rejects role collisions and duplicate canonical checkpoint paths. A changed checkpoint isolates its worker. Repeating setup preserves pauses; a coordinator cannot silently replace another. Explicit reactivation rearms unresolved attention once without resetting budget or replaying a delivered stop.
 
+Supervisor attention carries current hold state and whether an exact coordinator is bound. It distinguishes a temporary held-action rejection from a stale report or an already handled/delivered action: fresh eligible attention can request reassessment of the same unchanged stop after human Clear, never blind retry or new authority. For whole-assignment completion, guidance requests one completion notice when a coordinator is bound, otherwise acknowledgement. This is model guidance, not a guarantee against misinterpretation.
+
 The model tool `continuation_disposition` resumes, acknowledges, pauses or queues one material notice per stop/kind. Resume/completion require pinned checkpoint evidence; material holds can cite the final reply or labeled blocked status evidence. Completion also requires the full checkpoint `reportHash` supplied with attention. No mandatory structured worker declarations replace narrative interpretation. Acknowledgement is not independent acceptance; a hash proves freshness, not meaning.
 
 ## Approval limits and acceptance

@@ -169,7 +169,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     await pi.command('activate worker ' + workerId, ctx);
     const repeat = await pi.tool('call', { workerId, stop, action: 'resume', evidence: 'concrete result A' },
       undefined, undefined, ctx);
-    assert.match(repeat.content[0].text, /Stale/);
+    assert.match(repeat.content[0].text, /Continuation already delivered/);
     const second = randomUUID();
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: second });
     const secondAnswer = await pi.tool('call', { workerId, stop: second, action: 'resume', evidence: 'concrete result A' },
