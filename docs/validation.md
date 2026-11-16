@@ -32,7 +32,11 @@ Five selected blocked/final-recheck regressions failed against isolated pre-chan
 source, then passed on the ordinary implementation. No production source was
 modified for that red comparison. Deterministic policy tests are not model judgment.
 
-## Unreleased start workflow evidence
+## Alpha.2 candidate start workflow evidence
+
+The prepared `v0.1.0-alpha.2` packages the merged start workflow. It is not yet
+published. Earlier real-model trials below used pre-start-workflow revisions;
+they are not real-model acceptance of this candidate.
 
 The source suite has **204 passing tests**, including 15 focused start-workflow tests. They compose ordinary worker/supervisor roles with fake native sessions/Herdr, real owner/worker IPC and temporary records. Covered outcomes: blank start-only enrollment without a task; ordinary task submission without rearming; consumed input never exposing an old stop; sticky Escape/prompt/error/abort; same-nonce confirmed return; one-use delivery and two nudges despite growing history/repeated start; independent pauses; missing/cancelled/foreign/self/forged opt-ins; and checkpoint-write failure fencing stale evidence. The unresolved-decision case asserts that start sends no new turn or choice; it is not real-model judgment evidence.
 

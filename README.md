@@ -2,7 +2,9 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Alpha prerelease: `v0.1.0-alpha.1`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.1.0-alpha.1); npm publication remains disabled (`private: true`). A focused Linux Pi 1.5.2/Herdr 0.9.5 trial passed. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Prepared candidate: `v0.1.0-alpha.2`, not yet published.** This source includes the two-command start workflow below. It has not had a real-model start-workflow trial; the known same-decision reassessment limitation remains. Preparation does not install or activate anything.
+
+**Latest published alpha: `v0.1.0-alpha.1`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.1.0-alpha.1); npm publication remains disabled (`private: true`). A focused Linux Pi 1.5.2/Herdr 0.9.5 trial passed. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,7 +16,7 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install the alpha
+## Install the published alpha.1
 
 Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. This alpha was exercised on Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); normal package discovery was also checked with Pi 1.5.0.
 
@@ -32,9 +34,9 @@ pi remove git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.1
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
 
-## Unreleased two-command workflow
+## Prepared alpha.2 two-command workflow
 
-**These commands are in source, not the `v0.1.0-alpha.1` release above.** After a separately authorized disposable installation:
+**These commands are included in the `v0.1.0-alpha.2` candidate source, not the published `v0.1.0-alpha.1` above.** No alpha.2 Git tag or release is available yet. After a separately authorized disposable installation:
 
 1. In the intended supervisor, `/continuation-supervisor start` and confirm.
 2. In each selected worker, `/continuation-worker start` and confirm that it has no other continuation owner.
