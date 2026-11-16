@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -132,6 +132,62 @@ test('wrong target, replaced identity and missing witness never authorize contin
   await rm(reference.identity.sessionFile);
   await assert.rejects(withHandoff(reference, {}, () => assert.fail('missing session ran')), { code: 'ENOENT' });
   await assert.rejects(inspectHandoff(f.root, join(f.root, 'other-session')), { code: 'ENOENT' });
+});
+
+test('pending blank enrollment shares the future journal mutex but cannot deliver before persistence', async t => {
+  const f = await fixture(t);
+  await ensureRoot(f.target.root);
+  const sessionFile = await realpath(f.identity.sessionFile);
+  await rm(sessionFile);
+  const binding = { sessionFile, pendingSession: sessionFile };
+  await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, { sessionFile }, {},
+    () => assert.fail('unmarked missing session enrolled')), { code: 'OWNERSHIP_FENCE' });
+  assert.equal(await checkWorkerHandoff(f.target.root, f.target.workerId, binding), false);
+  await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, binding, { effect: true },
+    () => assert.fail('missing journal delivered')), { code: 'OWNERSHIP_FENCE' });
+
+  await withWorkerHandoff(f.target.root, f.target.workerId, binding, {}, async () => {
+    // Native Pi materializes the same path, not a second identity/mutex.
+    await writeFile(sessionFile, '{}\n');
+    await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, binding, { effect: true },
+      () => assert.fail('journal creation changed ownership key')), /worker busy/);
+  });
+  assert.equal(await checkWorkerHandoff(f.target.root, f.target.workerId, binding), true);
+  await withWorkerHandoff(f.target.root, f.target.workerId, binding, { effect: true }, () => {});
+  await assert.rejects(prepareHandoff(f.root, f, f.reserve), /standalone delivery already attempted/);
+});
+
+test('pending enrollment cannot bypass a reserved handoff or a changed canonical journal path', async t => {
+  const f = await fixture(t);
+  const reference = await prepareHandoff(f.root, f, f.reserve);
+  const sessionFile = reference.identity.sessionFile;
+  await rm(sessionFile);
+  const binding = { sessionFile, pendingSession: sessionFile };
+  await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, binding, {},
+    () => assert.fail('blank enrollment ignored reserved owner')), /handoff witness exists/);
+  await assert.rejects(checkWorkerHandoff(f.target.root, f.target.workerId, binding), /handoff witness exists/);
+  await assert.rejects(withWorkerHandoff(f.target.root, f.target.workerId, { ...binding, handoff: reference }, {},
+    () => assert.fail('missing handed-off journal enrolled')), { code: 'OWNERSHIP_FENCE' });
+
+  const g = await fixture(t);
+  await ensureRoot(g.target.root);
+  const pending = await realpath(g.identity.sessionFile);
+  await rm(pending);
+  const alias = { sessionFile: pending, pendingSession: pending };
+  const target = join(pending, '..', 'not-created.jsonl');
+  // Windows file symlinks require privileges; hard paths still exercise the pin
+  // mismatch there, while native POSIX tests also cover dangling/replaced links.
+  if (process.platform !== 'win32') {
+    await symlink(target, pending);
+    await assert.rejects(checkWorkerHandoff(g.target.root, g.target.workerId, alias), /not an absent file/);
+    await writeFile(target, '{}\n');
+    await assert.rejects(checkWorkerHandoff(g.target.root, g.target.workerId, alias), /identity changed/);
+  }
+  await assert.rejects(checkWorkerHandoff(g.target.root, g.target.workerId,
+    { sessionFile: g.identity.checkpoint, pendingSession: pending }), /identity changed/);
+  await rm(pending, { force: true });
+  await mkdir(pending);
+  await assert.rejects(checkWorkerHandoff(g.target.root, g.target.workerId, alias), /not a file/);
 });
 
 test('competing process cannot roll back during a new-owner effect', async t => {

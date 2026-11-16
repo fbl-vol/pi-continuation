@@ -18,7 +18,7 @@ The baseline comparison used the available local continuation workflow and its i
 
 The old workflow rechecked Herdr identity/state near delivery and refused blocked/unknown workers. It used model interpretation for prose approval requests; it did not provide authoritative observation of every Pi-native or third-party dialog. The extension retains that bounded behavior, its existing local prompt/input/error holds and receipt checks. It does not claim to solve arbitrary UI changes between checks, hidden unreported dialogs, or model misinterpretation. Neither a status signal nor model interpretation grants additional user authority.
 
-### User-approved start workflow amendment (unreleased)
+### User-approved start workflow amendment (since alpha.2)
 
 The approved `start-v1` workflow adds two explicit opt-ins, not automatic worker discovery: `/continuation-supervisor start` enables the one owner in the current private state scope; `/continuation-worker start` confirms enrollment/activation of that exact worker, derives its route and creates a private checkpoint from native projected task/result text. No user-maintained checkpoint declaration or copied ID is required for a fresh worker. Missing/conflicting ownership is refused, never guessed. Existing explicit controls remain available; an existing manually pinned checkpoint is not replaced or overwritten by start.
 
@@ -33,7 +33,7 @@ separate live-use authority exists.
 
 | ID | Setup → action → expected result |
 | --- | --- |
-| P1 — registration/identity | Normal Pi loading, an unregistered saved TUI session → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation; replacement is refused, never followed automatically. |
+| P1 — registration/identity | Normal Pi loading, an unregistered TUI session (including a fresh blank start) → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation; replacement is refused, never followed automatically. |
 | P2 — idle continuation/interpretation | Registered active exact worker, fresh eligible settled stop, approved unfinished assignment → supervisor reads final reply and pinned checkpoint against all obligations and resumes → one native continuation of that assignment, not a new authority grant; ordinary tasks in a start-opted-in worker need no manual rearming; a positive review alone never proves whole-assignment completion. |
 | P3 — blocked/approval | Exact worker reports blocked, or final reply asks for a genuine approval → reconcile and attempt disposition → blocked attention exists even without a completed assistant stop; resume is refused while blocked/held; ordinary task text does not clear a deliberate interruption or unresolved approval; model routes a material decision or pause, never supplies approval. |
 | P4 — scoped pause | Active sibling scopes → user pauses one worker/route or global scope, then an event arrives → affected continuation stops, unrelated scopes retain their settings; a model disposition cannot lift the user pause. |

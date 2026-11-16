@@ -1,9 +1,15 @@
 # Changelog
 
-## [0.1.0-alpha.2] - Prepared, not yet published
+## Unreleased
 
-This candidate packages the merged start workflow for controlled trials. The latest
-published GitHub prerelease remains `v0.1.0-alpha.1`; npm publication is disabled.
+- Fix fresh blank-worker start before Pi has created its session journal. Pin the future canonical path for enrollment only; delivery still requires persistence, and existing ownership witnesses remain enforced. No synthetic task or native journal write is used.
+- Classify ownership refusals as `OWNERSHIP_FENCE` rather than hiding them behind `UNEXPECTED`.
+- Correct the start fixture's premature journal creation and check the blank-to-first-task lifecycle and ownership refusals. Native Pi 1.5.0/1.5.2 temporary-session probes pass; no live installation or worker changes are implied.
+
+## [0.1.0-alpha.2] - 2026-11-16
+
+GitHub prerelease packaging the merged start workflow for controlled trials;
+npm publication remains disabled.
 
 - Add human-confirmed `/continuation-supervisor start` and `/continuation-worker start`: automatic exact-session joining, routing, fresh-worker checkpoint bookkeeping and bounded activation, without copying IDs or sending a task.
 - Keep ordinary submitted tasks supervised after opt-in, while preserving sticky interruptions/prompts/errors, pending decisions, independent scope pauses, budgets, receipts and same-stop no-replay history. Advanced explicit setup remains available.

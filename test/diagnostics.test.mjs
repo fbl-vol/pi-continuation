@@ -13,6 +13,10 @@ test('failure reports preserve causes privately and expose only bounded classifi
   assert.match(output[0][0], /persist observation.*ENOSPC/);
   assert.equal(output[0][1], 'error');
   assert.doesNotMatch(JSON.stringify(output) + error.message, /secret|private\/path/);
+  const ownership = report('join confirmed worker',
+    Object.assign(new Error('missing /private/session.jsonl'), { code: 'OWNERSHIP_FENCE' }));
+  assert.equal(ownership.code, 'OWNERSHIP_FENCE');
+  assert.doesNotMatch(ownership.message, /private|session.jsonl/);
   const unknown = report('restore', Object.assign(new Error('sensitive'), { code: 'sensitive' }));
   assert.equal(unknown.code, 'UNEXPECTED');
   assert.doesNotMatch(unknown.message, /sensitive/);

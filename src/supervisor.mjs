@@ -124,7 +124,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       else {
         try {
           await checkpointPath(id);
-          await checkWorkerHandoff(root, id, binding);
+          const persisted = await checkWorkerHandoff(root, id, binding);
+          if (persisted && binding.pendingSession) {
+            delete binding.pendingSession;
+            changed = true;
+          }
         } catch (error) {
           reason = error.code === 'OWNERSHIP_FENCE' ? 'Worker ownership unavailable' : 'Worker checkpoint unavailable';
           report('read checkpoint', error, diagnosticContext);
