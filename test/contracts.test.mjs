@@ -41,6 +41,19 @@ test('P3 blocked attention is additive, sequence-pinned status rather than a wor
   assert.deepEqual(decodeSupervisor(state).blocked, {});
 });
 
+test('retirement records round-trip and cannot also be active or lose their paused provenance', () => {
+  const id = 'd520bc3f-2318-48de-a544-9e3c49ac9067';
+  const retiredBy = 'a8671bd7-4c5c-4cee-aeab-59b6b20915eb';
+  const worker = { workerId: id, sessionId: id, sessionFile: '/old-session', paused: true, retiredBy };
+  const state = { ...newSupervisor(), retiredWorkers: { [id]: worker } };
+  assert.deepEqual(decodeSupervisor(state), state);
+  for (const patch of [{ paused: false }, { retiredBy: undefined }, { workerId: retiredBy }])
+    assert.throws(() => decodeSupervisor({ ...state, retiredWorkers: { [id]: { ...worker, ...patch } } }),
+      { code: 'INVALID_RECORD' });
+  assert.throws(() => decodeSupervisor({ ...state, workers: { [id]: { paused: true, route: 'r' } } }),
+    { code: 'INVALID_RECORD' });
+});
+
 test('old completion notices remain readable, but malformed report hashes cannot be persisted', () => {
   const state = newSupervisor();
   state.routes.r = { paused: false };

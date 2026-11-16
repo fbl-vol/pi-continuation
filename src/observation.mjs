@@ -9,7 +9,7 @@ import { currentSession } from './session.mjs';
 import { readyWorkerRegistration } from './bindings.mjs';
 import { commitReady } from './registration.mjs';
 import { SCHEMA_VERSION, MAX_FINAL_REPLY_BYTES, readObservation, readSupervisor, isId } from './contracts.mjs';
-import { diagnostics } from './diagnostics.mjs';
+import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { guardPromptUI } from './prompt-guard.mjs';
 
 const replyText = entry => Array.isArray(entry?.message?.content) ? entry.message.content
@@ -441,6 +441,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     }
     const session = currentSession(ctx);
     const entries = ctx.sessionManager.getBranch();
+    if (Object.values(supervisor.retiredWorkers).some(old => old.sessionId === session.id || old.sessionFile === session.file)) {
+      ctx.ui.notify(workerStartRefusal('WORKER_RETIRED'), 'warning'); return;
+    }
     if (session.id === supervisor.supervisorSession || entries.some(entry =>
       entry.type === 'custom' && entry.customType === 'pi-continuation-coordinator' &&
       entry.data?.sessionId === session.id)) {
@@ -496,13 +499,38 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     record.start = { nonce: randomUUID(), ownerToken: supervisor.ownerToken };
     try {
       await atomicJson(`${root}/worker-${record.workerId}.json`, record);
-      const result = await sendAction(root, { type: 'worker-start', workerId: record.workerId,
-        nonce: record.start.nonce, ownerToken: supervisor.ownerToken }, 'supervisor');
+      const sendJoin = () => sendAction(root, { type: 'worker-start', workerId: record.workerId,
+        ...record.start }, 'supervisor');
+      const guard = promptsFor(ctx);
+      const version = stopVersion;
+      const pinned = currentSession(ctx);
+      const unchanged = () => {
+        const now = currentSession(ctx);
+        return worker === record && version === stopVersion && !guard.blocked &&
+          now.id === pinned.id && now.file === pinned.file && now.leaf === pinned.leaf;
+      };
+      let result = await sendJoin();
+      if (result.replacementRequired && result.workerId === record.workerId &&
+          result.nonce === record.start.nonce && result.ownerToken === supervisor.ownerToken &&
+          isId(result.replaceWorkerId) && unchanged()) {
+        const replaceWorkerId = result.replaceWorkerId;
+        if (await guard.confirm('Retire old worker registration and start this session?',
+          `This pane has an older registration (${replaceWorkerId}). Retire it and register this session as a fresh worker? ` +
+          'Old history is retained; no approvals, continuation budget or task authority are inherited. Other scope pauses remain unchanged.')) {
+          if (unchanged()) {
+            record.start = { nonce: randomUUID(), ownerToken: supervisor.ownerToken, replaceWorkerId };
+            await atomicJson(`${root}/worker-${record.workerId}.json`, record);
+            if (unchanged()) result = await sendJoin();
+          }
+        }
+      }
       if (!result.accepted || result.workerId !== record.workerId || result.nonce !== record.start.nonce ||
           result.ownerToken !== supervisor.ownerToken) {
         hold = true; holdReason = 'restored'; stopVersion++;
         await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
-        ctx.ui.notify('Worker start not accepted; inspect supervisor status before retrying', 'warning'); return;
+        ctx.ui.notify(result.replacementRequired ?
+          'Replacement not confirmed or worker changed; old registration retained, new worker held' :
+          workerStartRefusal(result.code), 'warning'); return;
       }
       ctx.ui.notify(result.globalPaused || result.routePaused || result.workerPaused ?
         'Worker joined; an independent supervision scope remains paused' :

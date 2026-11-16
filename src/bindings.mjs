@@ -39,6 +39,9 @@ export async function pinnedCheckpoint(root, workerId, binding) {
 
 export async function workerCandidate(root, workerId, route, state, live, supervisorPane) {
   const record = await readWorkerRegistration(root, workerId);
+  if (state.retiredWorkers?.[workerId] || Object.values(state.retiredWorkers ?? {}).some(old =>
+    old.sessionId === record.sessionId || old.sessionFile === record.sessionFile))
+    throw Object.assign(new Error('Retired worker session cannot be registered again'), { code: 'WORKER_RETIRED' });
   const checkpoint = record.checkpoint;
   const agent = live.agents.find(a => a.pane_id === record.paneId);
   const binding = { ...nativeBinding(record, agent), workerId, route, checkpoint, paused: true };
@@ -51,7 +54,7 @@ export async function workerCandidate(root, workerId, route, state, live, superv
   for (const existing of Object.values(state.workers)) {
     if (existing.paneId === binding.paneId || existing.sessionId === binding.sessionId ||
         (await readWorkerRegistration(root, existing.workerId)).checkpoint === checkpoint)
-      throw new Error('Duplicate worker or checkpoint');
+      throw Object.assign(new Error('Duplicate worker or checkpoint'), { code: 'WORKER_CONFLICT' });
   }
   return binding;
 }
@@ -65,7 +68,9 @@ export async function workerStartCandidate(root, request, state, live, superviso
     throw new Error('Supervisor is not accepting this worker start; run supervisor start first');
   const record = await readWorkerRegistration(root, request.workerId);
   if (record.managedInput !== true || record.stateRoot !== root || record.start?.nonce !== request.nonce ||
-      record.start.ownerToken !== state.ownerToken)
+      record.start.ownerToken !== state.ownerToken ||
+      record.start.replaceWorkerId !== request.replaceWorkerId ||
+      (request.replaceWorkerId !== undefined && !isId(request.replaceWorkerId)))
     throw new Error('Worker start has no matching confirmed opt-in');
   const agent = live.agents.find(item => item.pane_id === record.paneId);
   const existing = state.workers[request.workerId];
@@ -75,8 +80,31 @@ export async function workerStartCandidate(root, request, state, live, superviso
     throw new Error('Worker binding changed; inspect before start');
   const others = { ...state, workers: { ...state.workers } };
   delete others.workers[request.workerId];
+  const conflicts = Object.values(others.workers).filter(old => old.paneId === record.paneId);
+  const replacement = !existing && conflicts.length === 1 &&
+    conflicts[0].sessionId !== record.sessionId && conflicts[0].sessionFile !== record.sessionFile ? conflicts[0] : null;
+  if (replacement) {
+    if (record.checkpoint === replacement.checkpoint)
+      throw Object.assign(new Error('Replacement must keep a separate checkpoint'), { code: 'WORKER_CONFLICT' });
+    delete others.workers[replacement.workerId];
+  }
+  const repeated = existing?.lastStartNonce === request.nonce;
+  // A replay of an already committed join preserves subsequent pauses. A new
+  // request must still name the exact collision that the human confirmed.
+  if (request.replaceWorkerId && !repeated && replacement?.workerId !== request.replaceWorkerId)
+    throw Object.assign(new Error('Replacement binding changed'), { code: 'WORKER_CONFLICT' });
   const candidate = await workerCandidate(root, request.workerId, route, others, live, supervisorPane);
-  return { binding: existing ?? candidate, route, repeated: existing?.lastStartNonce === request.nonce };
+  return { binding: existing ?? candidate, route, repeated, replacement };
+}
+
+// Retirement is not recovery of an uncertain effect. Keep every pending notice
+// and resume attached to its original worker until explicitly reconciled.
+export function requireReplaceableWorker(state, old, live) {
+  if (live.agents.some(agent => agent.agent_session?.value === old.sessionFile))
+    throw Object.assign(new Error('Old session is still live'), { code: 'WORKER_LIVE' });
+  if (state.inflight[old.workerId] || Object.values(state.notices).some(notice =>
+    notice.workerId === old.workerId && ['pending', 'sending', 'uncertain'].includes(notice.status)))
+    throw Object.assign(new Error('Old worker delivery needs inspection'), { code: 'DELIVERY_PENDING' });
 }
 
 export async function coordinatorCandidate(root, id, state, live, supervisorPane) {

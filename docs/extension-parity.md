@@ -24,6 +24,21 @@ The approved `start-v1` workflow adds two explicit opt-ins, not automatic worker
 
 For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and errors remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
 
+### User-approved confirmed replacement amendment (unreleased)
+
+When a pane now hosts a different saved Pi session, worker `start` may offer an
+additional explicit retirement confirmation. The supervisor rechecks the exact
+old/new bindings and ownership under both session mutexes before atomically
+retiring the old binding and joining the fresh worker. It refuses an old session
+still reported live anywhere in Herdr, unknown/busy ownership, unresolved resume
+delivery, or pending/sending/uncertain old-worker notices. Cancellation or a changed
+confirmation leaves the old registration intact and the new worker held.
+
+Retirement preserves the old binding, checkpoint, observations, receipts, notices
+and disposition/budget history. Retired sessions cannot be re-added. The new worker
+inherits no task authority, approvals or budget; independent global/route pauses
+remain. No automatic replacement, live migration or delivery retry is introduced.
+
 ## Observable baseline scenarios
 
 These seven scenarios are the bounded acceptance set, not an exhaustive matrix.
@@ -33,7 +48,7 @@ separate live-use authority exists.
 
 | ID | Setup → action → expected result |
 | --- | --- |
-| P1 — registration/identity | Normal Pi loading, an unregistered TUI session (including a fresh blank start) → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation; replacement is refused, never followed automatically. |
+| P1 — registration/identity | Normal Pi loading, an unregistered TUI session (including a fresh blank start) → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation; replacement is never followed automatically; worker start may explicitly confirm retirement of a verifiably inactive old session and fresh registration, otherwise it refuses. |
 | P2 — idle continuation/interpretation | Registered active exact worker, fresh eligible settled stop, approved unfinished assignment → supervisor reads final reply and pinned checkpoint against all obligations and resumes → one native continuation of that assignment, not a new authority grant; ordinary tasks in a start-opted-in worker need no manual rearming; a positive review alone never proves whole-assignment completion. |
 | P3 — blocked/approval | Exact worker reports blocked, or final reply asks for a genuine approval → reconcile and attempt disposition → blocked attention exists even without a completed assistant stop; resume is refused while blocked/held; ordinary task text does not clear a deliberate interruption or unresolved approval; model routes a material decision or pause, never supplies approval. |
 | P4 — scoped pause | Active sibling scopes → user pauses one worker/route or global scope, then an event arrives → affected continuation stops, unrelated scopes retain their settings; a model disposition cannot lift the user pause. |
