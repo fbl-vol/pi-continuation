@@ -32,13 +32,31 @@ Five selected blocked/final-recheck regressions failed against isolated pre-chan
 source, then passed on the ordinary implementation. No production source was
 modified for that red comparison. Deterministic policy tests are not model judgment.
 
-## Alpha.2 candidate start workflow evidence
+## Unreleased blank-session correction (P1/P2/P7)
 
-The prepared `v0.1.0-alpha.2` packages the merged start workflow. It is not yet
-published. Earlier real-model trials below used pre-start-workflow revisions;
-they are not real-model acceptance of this candidate.
+A real alpha.2 blank-worker start exposed a fixture gap: Pi allocates a journal
+path before creating the file, while the fixture had pre-created it. With realistic
+lazy persistence, blank enrollment failed before the correction. The source fix
+pins the future canonical path only at fresh confirmed managed registration.
+Ownership observation/enrollment can await that file, but delivery and handoff
+still require persistence. Pending state is retired when the supervisor observes
+the real journal; a missing established journal remains an ownership failure.
 
-The source suite has **204 passing tests**, including 15 focused start-workflow tests. They compose ordinary worker/supervisor roles with fake native sessions/Herdr, real owner/worker IPC and temporary records. Covered outcomes: blank start-only enrollment without a task; ordinary task submission without rearming; consumed input never exposing an old stop; sticky Escape/prompt/error/abort; same-nonce confirmed return; one-use delivery and two nudges despite growing history/repeated start; independent pauses; missing/cancelled/foreign/self/forged opt-ins; and checkpoint-write failure fencing stale evidence. The unresolved-decision case asserts that start sends no new turn or choice; it is not real-model judgment evidence.
+The corrected blank-start scenario checks no synthetic task or journal creation,
+first ordinary-task persistence, pending retirement, one-use delivery and refusal
+after journal deletion. Ownership regressions retain the same mutex before/after
+persistence and reject premature effects, reserved handoffs and path substitution.
+An isolated probe repeats the join with actual native Pi 1.5.0/1.5.2 SessionManager
+instances, fake Herdr/transport and temporary state; no model, live profile or real
+worker is used. This fix is not in the published alpha.2 and is not live acceptance.
+
+## Alpha.2 start workflow evidence
+
+Published `v0.1.0-alpha.2` packages the merged start workflow. Earlier real-model
+trials below used pre-start-workflow revisions; they are not real-model acceptance
+of the start commands.
+
+The alpha.2 suite had **204 passing tests**, including 15 focused start-workflow tests; the blank-session correction adds ownership protection and corrects the start fixture. They compose ordinary worker/supervisor roles with fake native sessions/Herdr, real owner/worker IPC and temporary records. Covered outcomes: blank start-only enrollment without a task; ordinary task submission without rearming; consumed input never exposing an old stop; sticky Escape/prompt/error/abort; same-nonce confirmed return; one-use delivery and two nudges despite growing history/repeated start; independent pauses; missing/cancelled/foreign/self/forged opt-ins; and checkpoint-write failure fencing stale evidence. The unresolved-decision case asserts that start sends no new turn or choice; it is not real-model judgment evidence.
 
 An isolated Linux probe against installed Pi 1.5.0 and 1.5.2 uses actual native compaction/context-edit projections, verifies bookkeeping does not change checkpoint text, checks the native Escape helper and discovers/binds the packed normal extension with empty isolated auth paths and no model/Herdr request. The source payload contains 27 explicit files; tests/private/SDK resources remain excluded. These checks are not a live installation, a new real-model start-command trial, existing-worker migration or native Windows/macOS runtime acceptance.
 
@@ -88,7 +106,7 @@ held becomes available for supervisor reassessment, retaining its nonce/reply.
 Identity, leaf, generation and current conversation must still match. Clear is
 not action approval, scope activation, pause lifting or a budget reset. Existing
 handled/resumed/intent/receipt guards still refuse consumed or ambiguous work;
-stale, aborted/error and missing reports are not rearmed. Unreleased start-mode typing/Escape can park the same previously idle report for explicit return, without minting a nonce or bypassing any consumed-stop guard.
+stale, aborted/error and missing reports are not rearmed. Start-mode typing/Escape can park the same previously idle report for explicit return, without minting a nonce or bypassing any consumed-stop guard.
 The regression fails on the prior unknown/null clear behavior. Ordinary lifecycle
 tests cover raw input, a fresh held report, confirmation, independent scopes,
 reassessment and one-use delivery. An isolated native Pi 1.5.0 probe verifies real

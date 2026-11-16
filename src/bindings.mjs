@@ -10,7 +10,8 @@ function nativeBinding(record, agent) {
   return { paneId: record.paneId, sessionId: record.sessionId,
     sessionFile: record.sessionFile, cwd: record.cwd, terminalId: agent?.terminal_id,
     workspaceId: agent?.workspace_id, tabId: agent?.tab_id,
-    sessionKind: 'path', sessionValue: record.sessionFile };
+    sessionKind: 'path', sessionValue: record.sessionFile,
+    ...(record.pendingSession ? { pendingSession: record.pendingSession } : {}) };
 }
 
 export async function readyWorkerRegistration(root, record) {

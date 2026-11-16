@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { access, rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { access, lstat, realpath, rm } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { atomicJson, atomicText, defaultRoot, ensureRoot, readJson } from './store.mjs';
 import { ownerAlive, sendAction } from './ipc.mjs';
 import { managedCheckpointPath, managedCheckpointText } from './checkpoint.mjs';
@@ -322,6 +322,17 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       try {
         watchTerminalInput(ctx);
         await ensureRoot(root);
+        // Pi allocates a journal path before its first conversation is persisted.
+        // Pin that future path only for a confirmed, truly blank managed session;
+        // never create the journal or a synthetic task to force native persistence.
+        if (managed && !ctx.sessionManager.getEntries().some(entry =>
+          entry.type === 'message' && ['user', 'assistant'].includes(entry.message?.role))) {
+          try { await lstat(session.file); }
+          catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+            record.pendingSession = join(await realpath(dirname(session.file)), basename(session.file));
+          }
+        }
         if (managed) await atomicText(checkpoint, managedCheckpointText(ctx));
         await atomicJson(`${root}/worker-${record.workerId}.json`, record);
         workerSaved = true;

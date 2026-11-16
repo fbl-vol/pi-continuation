@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, rm, mkdir } from 'node:fs/promises';
+import { access, readFile, readdir, rm, mkdir } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
 import { readJson } from '../src/store.mjs';
@@ -32,14 +33,17 @@ const disposition = async (f, action, evidence) => {
     evidence, reportHash: checkpointHash(checkpoint) });
 };
 
-test('start-only setup arms a blank worker, manages its checkpoint, and sends no task', { timeout: 10000 }, async t => {
+test('blank start sends no task and the first ordinary task persists its journal before one-use continuation', { timeout: 10000 }, async t => {
   const f = await startFixture(t, { blank: true });
+  await assert.rejects(access(f.worker.file), { code: 'ENOENT' });
   await start(f);
+  await assert.rejects(access(f.worker.file), { code: 'ENOENT' });
   const state = await f.state(), binding = state.workers[f.workerId()];
   assert.equal(state.paused, false);
   assert.equal(state.acceptStarts, true);
   assert.equal(state.routes.w.paused, false);
   assert.equal(binding.paused, false);
+  assert.equal(binding.pendingSession, f.worker.file);
   assert.equal(binding.paneId, 'w:p1');
   assert.equal(binding.sessionId, f.worker.id);
   const record = await readJson(join(f.root, `worker-${f.workerId()}.json`));
@@ -50,6 +54,38 @@ test('start-only setup arms a blank worker, manages its checkpoint, and sends no
   assert.equal(f.worker.messages.length, 0);
   assert.equal(f.supervisor.confirmations.length, 1);
   assert.equal(f.worker.confirmations.length, 1);
+
+  const evidence = 'First approved stage produced its artifact; the final approved stage remains.';
+  await turn(f, 'Complete both approved stages.', evidence);
+  await access(f.worker.file);
+  assert.match((await disposition(f, 'resume', evidence)).content[0].text, /Continuation delivered/);
+  assert.equal((await f.state()).workers[f.workerId()].pendingSession, undefined);
+  assert.equal(f.worker.messages.length, 1);
+  assert.match((await disposition(f, 'resume', evidence)).content[0].text, /already delivered/);
+  assert.equal(f.worker.messages.length, 1);
+
+  // Pending enrollment is one-way: a missing established journal is not blank.
+  await rm(f.worker.file);
+  assert.match((await disposition(f, 'resume', evidence)).content[0].text, /Paused/);
+  assert.equal((await f.state()).workers[f.workerId()].paused, true);
+  await f.workerStart();
+  assert.equal((await f.state()).workers[f.workerId()].paused, true);
+  assert.equal(f.worker.messages.length, 1);
+});
+
+test('an existing conversation whose journal disappears during registration is not enrolled as blank', { timeout: 10000 }, async t => {
+  const f = await startFixture(t);
+  const append = f.worker.pi.appendEntry;
+  f.worker.pi.appendEntry = (...args) => {
+    append(...args);
+    rmSync(f.worker.file);
+  };
+  await f.supervisorCommand('start');
+  await f.workerStart();
+  assert.deepEqual((await f.state()).workers, {});
+  assert.equal((await f.observation()).hold, true);
+  assert.equal(f.worker.messages.length, 0);
+  assert.ok(f.supervisor.notifications.some(([text]) => text.includes('OWNERSHIP_FENCE')));
 });
 
 test('ordinary submitted tasks remain supervised and reach one-use native continuation', { timeout: 10000 }, async t => {

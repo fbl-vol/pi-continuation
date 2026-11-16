@@ -12,7 +12,7 @@ import { readJson } from './store.mjs';
  *   finalReply?: string, at?: string, promptScope?: {id: string, revision: number}}} Observation
  * @typedef {{sessionId: string, sessionFile: string, paneId: string, cwd: string,
  *   terminalId: string, workspaceId: string, tabId: string,
- *   sessionKind: string, sessionValue: string}} NativeBinding
+ *   sessionKind: string, sessionValue: string, pendingSession?: string}} NativeBinding
  * @typedef {NativeBinding & {workerId: string, route: string, checkpoint?: string,
  *   paused: boolean, reason?: string}} WorkerBinding
  * @typedef {{paused: boolean, coordinator?: NativeBinding & {id: string}, reason?: string}} Route

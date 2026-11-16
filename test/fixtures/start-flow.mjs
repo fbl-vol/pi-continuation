@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bindContinuation } from '../../src/ordinary.mjs';
 import { endpoint } from '../../src/herdr.mjs';
 import { readJson } from '../../src/store.mjs';
 
-export async function startFixture(t, { blank = false } = {}) {
+export async function startFixture(t, { blank = false, sessionManagerFactory } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'continuation-start-')));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const sockets = new Set();
@@ -23,19 +24,29 @@ export async function startFixture(t, { blank = false } = {}) {
     });
   });
   function native(paneId) {
-    const id = randomUUID(), file = join(root, `${id}.jsonl`);
+    const manager = sessionManagerFactory?.(root);
+    const id = manager?.getSessionId() ?? randomUUID();
+    const file = manager?.getSessionFile() ?? join(root, `${id}.jsonl`);
     const handlers = new Map(), commands = new Map(), tools = new Map(), input = new Set();
     const entries = [], messages = [], notifications = [], confirmations = [];
     let leaf = 'initial', confirm = true;
     const ctx = { mode: 'tui', cwd: root, isIdle: () => true,
-      sessionManager: { getSessionId: () => id, getSessionFile: () => file,
-        getLeafId: () => leaf, getBranch: () => entries,
+      sessionManager: manager ?? { getSessionId: () => id, getSessionFile: () => file,
+        getLeafId: () => leaf, getBranch: () => entries, getEntries: () => entries,
         buildSessionProjection: () => ({ messages: entries.filter(e => e.type === 'message').map(e => e.message) }) },
       ui: { confirm: async (...args) => { confirmations.push(args); return confirm; },
         select: async () => undefined, input: async () => undefined, editor: async () => undefined,
         custom: async () => undefined, onTerminalInput: fn => { input.add(fn); return () => input.delete(fn); },
         notify: (...args) => notifications.push(args) } };
-    const append = entry => { leaf = randomUUID(); entries.push({ id: leaf, ...entry }); };
+    const append = entry => {
+      if (manager) return entry.type === 'custom' ?
+        manager.appendCustomEntry(entry.customType, entry.data) : manager.appendMessage(entry.message);
+      leaf = randomUUID();
+      entries.push({ id: leaf, ...entry });
+      // Like native Pi, setup/custom entries do not create a blank journal.
+      if (entries.some(e => e.type === 'message' && ['user', 'assistant'].includes(e.message.role)))
+        writeFileSync(file, entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+    };
     const pi = { on: (name, fn) => handlers.set(name, [...(handlers.get(name) ?? []), fn]),
       registerCommand: (name, command) => commands.set(name, command.handler),
       registerTool: tool => tools.set(tool.name, tool.execute),
@@ -43,7 +54,8 @@ export async function startFixture(t, { blank = false } = {}) {
       sendMessage: (...args) => messages.push(args),
       sendUserMessage: () => assert.fail('Start enrollment must not send another task') };
     bindContinuation(pi, { root, socketPath, paneId });
-    return { pi, ctx, id, file, entries, messages, notifications, confirmations,
+    return { pi, ctx, id, file, get entries() { return manager?.getEntries() ?? entries; },
+      messages, notifications, confirmations,
       confirm: value => { confirm = value; },
       raw: data => { for (const fn of input) fn(data); },
       user: text => append({ type: 'message', message: { role: 'user', content: text } }),
@@ -67,8 +79,6 @@ export async function startFixture(t, { blank = false } = {}) {
     if (prior === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = prior;
     await rm(root, { recursive: true, force: true });
   });
-  await writeFile(worker.file, '{}\n');
-  await writeFile(supervisor.file, '{}\n');
   await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
   if (!blank) {
     worker.user('Complete both approved stages, documenting concrete results before whole-task completion.');

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, realpath, rmdir, stat } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { lstat, mkdir, realpath, rmdir, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { atomicJson, claim, ensureRoot, readJson } from './store.mjs';
 
 const uuid = value => typeof value === 'string' &&
@@ -136,17 +136,32 @@ async function ownedWitness(path, reference) {
   return record;
 }
 
-async function workerFence(root, workerId, binding) {
-  if (typeof binding?.sessionFile !== 'string') fail('missing session file binding');
-  const sessionFile = await realpath(binding.sessionFile);
-  const directory = await witnessRoot(root);
+async function workerFence(root, workerId, binding, { effect = false } = {}) {
+  if (!isAbsolute(binding?.sessionFile ?? '')) fail('missing session file binding');
   const reference = binding.handoff;
+  let sessionFile;
+  let pending = false;
+  try { sessionFile = await realpath(binding.sessionFile); }
+  catch (error) {
+    if (error.code !== 'ENOENT' || !binding.pendingSession || reference !== undefined || effect) throw error;
+    // Only an absent leaf in the pinned canonical directory is provisional.
+    // A dangling symlink, missing parent, handoff or effect still fails closed.
+    try { await lstat(binding.sessionFile); fail('pending journal is not an absent file'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    sessionFile = join(await realpath(dirname(binding.sessionFile)), basename(binding.sessionFile));
+    pending = true;
+  }
+  if (binding.pendingSession) {
+    if (sessionFile !== binding.pendingSession) fail('pending journal identity changed');
+    if (!pending && !(await stat(sessionFile)).isFile()) fail('pending journal is not a file');
+  }
+  const directory = await witnessRoot(root);
   if (reference !== undefined && (reference?.root !== directory ||
       reference?.target?.workerId !== workerId || reference.target?.root !== await realpath(root) ||
       reference.identity?.sessionId !== binding.sessionId ||
       reference.identity?.sessionFile !== binding.sessionFile ||
       reference.identity?.checkpoint !== binding.checkpoint)) fail('handoff does not match worker binding');
-  return { sessionFile, directory, reference };
+  return { sessionFile, directory, reference, pending };
 }
 
 async function requireStandalone(path) {
@@ -156,13 +171,16 @@ async function requireStandalone(path) {
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
-/** Observation only, never permission to deliver. Do not contend with an active effect. */
+/** Observation only, never permission to deliver. Does not contend with an active
+ * effect. Returns false only while the pinned blank journal is not yet persisted.
+ */
 export async function checkWorkerHandoff(root, workerId, binding) {
   try {
-    const { sessionFile, directory, reference } = await workerFence(root, workerId, binding);
+    const { sessionFile, directory, reference, pending } = await workerFence(root, workerId, binding);
     const { record } = paths(directory, sessionFile);
     if (reference === undefined) await requireStandalone(record);
     else await ownedWitness(record, reference);
+    return !pending;
   } catch (error) { error.code = 'OWNERSHIP_FENCE'; throw error; }
 }
 
@@ -170,7 +188,7 @@ export async function checkWorkerHandoff(root, workerId, binding) {
 export async function withWorkerHandoff(root, workerId, binding, options, operation) {
   let entered = false;
   try {
-    const { sessionFile, directory, reference } = await workerFence(root, workerId, binding);
+    const { sessionFile, directory, reference } = await workerFence(root, workerId, binding, options);
     if (reference === undefined) {
       return await locked(directory, sessionFile, async path => {
         // Discovery is mandatory: omitting attachment cannot turn a reserved

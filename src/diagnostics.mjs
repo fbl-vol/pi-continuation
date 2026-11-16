@@ -1,6 +1,7 @@
 const codes = new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO', 'EISDIR',
   'ENOTDIR', 'EEXIST', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EADDRINUSE',
-  'IPC_TIMEOUT', 'IPC_CLOSED', 'IPC_FRAME', 'INVALID_RECORD', 'UNSUPPORTED_FORMAT']);
+  'IPC_TIMEOUT', 'IPC_CLOSED', 'IPC_FRAME', 'INVALID_RECORD', 'UNSUPPORTED_FORMAT',
+  'OWNERSHIP_FENCE']);
 
 // One terminal owner reports a failure. Never render raw paths, payloads or messages.
 // The original cause remains in memory for inspection, not in persisted/model output.
