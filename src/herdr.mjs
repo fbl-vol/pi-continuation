@@ -11,6 +11,7 @@ export function request(socketPath, method, params, { timeoutMs = 2500 } = {}) {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
     const socket = net.createConnection(endpoint(socketPath));
+    socket.setEncoding('utf8');
     let buffer = '';
     let finished = false;
     const timer = setTimeout(() => finish(new Error('Herdr request timed out')), timeoutMs);
@@ -24,7 +25,7 @@ export function request(socketPath, method, params, { timeoutMs = 2500 } = {}) {
     }
     socket.on('connect', () => socket.write(`${JSON.stringify({ id, method, params })}\n`));
     socket.on('data', chunk => {
-      buffer += chunk.toString('utf8');
+      buffer += chunk;
       if (buffer.length > 2_000_000) return finish(new Error('Herdr response too large'));
       const end = buffer.indexOf('\n');
       if (end < 0) return;

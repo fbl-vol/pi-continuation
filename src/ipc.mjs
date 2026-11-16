@@ -40,6 +40,8 @@ function requestLine(address, line, limit, timeout) {
 
 async function listenLine(address, limit, handle, reject, onError) {
   const idle = new Set();
+  const handlers = new Set();
+  const failures = [];
   const server = net.createServer(socket => {
     idle.add(socket);
     socket.setEncoding('utf8');
@@ -47,7 +49,7 @@ async function listenLine(address, limit, handle, reject, onError) {
     socket.on('error', () => {}); // A disconnected peer is not an application failure.
     socket.on('close', () => idle.delete(socket));
     let input = '';
-    socket.on('data', async chunk => {
+    socket.on('data', chunk => {
       input += chunk;
       if (Buffer.byteLength(input) > limit) { socket.destroy(); return; }
       const end = input.indexOf('\n');
@@ -55,11 +57,18 @@ async function listenLine(address, limit, handle, reject, onError) {
       socket.removeAllListeners('data');
       socket.setTimeout(0);
       idle.delete(socket);
-      try { socket.end(await handle(input.slice(0, end)) + '\n'); }
-      catch (error) {
-        onError(error);
-        socket.end(reject + '\n');
-      }
+      const handler = (async () => {
+        try { socket.end(await handle(input.slice(0, end)) + '\n'); }
+        catch (error) {
+          onError(error);
+          socket.end(reject + '\n');
+        }
+      })();
+      handlers.add(handler);
+      void handler.then(() => handlers.delete(handler), error => {
+        handlers.delete(handler);
+        failures.push(error);
+      });
     });
   });
   await new Promise((resolve, reject) => {
@@ -69,10 +78,12 @@ async function listenLine(address, limit, handle, reject, onError) {
   let closing;
   return () => closing ??= (async () => {
     const closed = new Promise(resolve => server.close(resolve));
-    // Drain accepted handlers, but do not let an incomplete frame hold shutdown open.
+    // Incomplete frames cannot hold shutdown; accepted work outlives its socket.
     for (const socket of idle) socket.destroy();
     await closed;
+    await Promise.allSettled(handlers);
     if (process.platform !== 'win32') await rm(address, { force: true });
+    if (failures.length) throw new AggregateError(failures, 'IPC handler reporting failed');
   })();
 }
 
