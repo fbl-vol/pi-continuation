@@ -34,6 +34,26 @@ test('socket response identity, protocol and disconnect fail closed', async () =
   }
 });
 
+test('fragmented Herdr response preserves multibyte session identity', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(directory, 'server.sock');
+  const server = net.createServer(socket => socket.once('data', chunk => {
+    const { id } = JSON.parse(chunk.toString());
+    const frame = Buffer.from(JSON.stringify({ id, result: { type: 'session_snapshot',
+      snapshot: { protocol: 22, agents: [{ agent_session: { value: '/sessions/café.jsonl' } }] } } }) + '\n');
+    const split = frame.indexOf(Buffer.from('é')) + 1;
+    socket.write(frame.subarray(0, split));
+    setTimeout(() => socket.end(frame.subarray(split)), 15);
+  }));
+  try {
+    await new Promise(resolve => server.listen(endpoint(socketPath), resolve));
+    assert.equal((await snapshot(socketPath)).agents[0].agent_session.value, '/sessions/café.jsonl');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('same name or pane is insufficient: native ref, terminal and cwd must match', () => {
   const binding = { paneId: 'w1:p1', terminalId: 'terminal-1', workspaceId: 'w1', tabId: 'w1:t1',
     cwd: '/workspace', sessionKind: 'path', sessionValue: '/sessions/a.jsonl' };

@@ -57,6 +57,40 @@ test('closing drops incomplete peers but drains an accepted handler without retr
   assert.equal(calls, 1);
 });
 
+test('closing waits for an accepted handler after its peer disconnects', { timeout: 5000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const id = randomUUID();
+  let enter, finish;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const release = new Promise(resolve => { finish = resolve; });
+  let calls = 0;
+  let handled = false;
+  const close = await listenJson(root, id, async () => {
+    calls++;
+    enter();
+    await release;
+    handled = true;
+    return { accepted: true };
+  }, error => assert.fail(error));
+  t.after(async () => { finish(); await close(); await rm(root, { recursive: true, force: true }); });
+  const client = net.createConnection(workerEndpoint(root, id));
+  await once(client, 'connect');
+  client.write('{}\n');
+  await entered;
+  const disconnected = once(client, 'close');
+  client.destroy();
+  await disconnected;
+
+  let closeReturned = false;
+  const closing = close().then(() => { closeReturned = true; });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(closeReturned, false, 'accepted handler must outlive its disconnected peer');
+  finish();
+  await closing;
+  assert.equal(handled, true);
+  assert.equal(calls, 1);
+});
+
 test('native owner challenge does not accept a wrong token and withdraws on close', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const token = randomUUID();

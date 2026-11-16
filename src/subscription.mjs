@@ -6,6 +6,7 @@ import { endpoint, snapshot } from './herdr.mjs';
 export function observe(socketPath, onSnapshot, onDisconnect, paneIds = []) {
   const id = randomUUID();
   const socket = net.createConnection(endpoint(socketPath));
+  socket.setEncoding('utf8');
   let buffer = '';
   let started = false;
   let reading = false;
@@ -42,7 +43,7 @@ export function observe(socketPath, onSnapshot, onDisconnect, paneIds = []) {
       ...[...new Set(paneIds)].map(pane_id => ({ type: 'pane.agent_status_changed', pane_id }))],
   } }) + '\n'));
   socket.on('data', chunk => {
-    buffer += chunk.toString('utf8');
+    buffer += chunk;
     if (buffer.length > 2_000_000) return disconnect(new Error('Herdr event buffer too large'));
     for (let end; (end = buffer.indexOf('\n')) >= 0;) {
       const line = buffer.slice(0, end);

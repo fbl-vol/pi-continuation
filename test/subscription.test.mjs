@@ -32,6 +32,37 @@ test('events_lost invalidates subscription instead of replaying a partial histor
   }
 });
 
+test('fragmented subscription error preserves multibyte transport text', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(directory, 'herdr.sock');
+  const server = net.createServer(socket => socket.once('data', chunk => {
+    const { id, method } = JSON.parse(chunk.toString());
+    if (method === 'session.snapshot') {
+      socket.write(JSON.stringify({ id, result: { type: 'session_snapshot',
+        snapshot: { protocol: 22, agents: [] } } }) + '\n');
+      return;
+    }
+    const frame = Buffer.from(JSON.stringify({ id, error: { code: 'café' } }) + '\n');
+    const split = frame.indexOf(Buffer.from('é')) + 1;
+    socket.write(JSON.stringify({ id, result: { type: 'subscription_started' } }) + '\n');
+    socket.write(frame.subarray(0, split));
+    setTimeout(() => socket.end(frame.subarray(split)), 15);
+  }));
+  let close;
+  try {
+    await new Promise(resolve => server.listen(endpoint(socketPath), resolve));
+    const disconnected = new Promise(resolve => {
+      close = observe(socketPath, () => {}, resolve);
+    });
+    await close.ready;
+    assert.match((await disconnected).message, /café/);
+  } finally {
+    close?.();
+    await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('subscribe before snapshot; overlapping events cause another authoritative read', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'continuation-'));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(directory, 'herdr.sock');
