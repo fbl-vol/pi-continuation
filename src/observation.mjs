@@ -146,6 +146,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     // or open a native menu. Only a confirmed start may recover a parked report.
     stopTerminalInput = ctx.ui.onTerminalInput(data => {
       if (preparing) { preparing.interrupted = true; stopVersion++; return; }
+      // Native dialog keys reach this hook too. Our own confirmation must not
+      // fence itself; Escape and concurrent external UI still interrupt it.
+      if (prompts?.confirming && !isInterrupt(data)) return;
       if (!worker || (hold && (!worker.managedInput || !isInterrupt(data)))) return;
       if (worker.managedInput && !hold) parkedReport = lastObserved?.stop ? lastObserved : undefined;
       hold = true;

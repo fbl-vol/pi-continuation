@@ -39,6 +39,11 @@ test('start confirms retirement of a replaced pane session, preserves history an
   await f.supervisorCommand('pause route w');
   await f.supervisorCommand('pause global');
   const before = await f.state();
+  // Native confirmation keys also reach onTerminalInput, unlike our fake UI.
+  f.worker.confirm(title => {
+    if (title.startsWith('Retire')) f.worker.raw('\r');
+    return true;
+  });
   await f.workerStart();
   const id = f.workerId(), state = await f.state();
   assert.notEqual(id, oldId);

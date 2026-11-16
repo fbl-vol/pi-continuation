@@ -56,7 +56,7 @@ The source suite passes **225 tests**. Focused replacement cases use fake native
 sessions/Herdr, real local IPC, session mutexes and temporary state. They cover
 explicit acceptance/cancellation, old live sessions in another pane, pending or
 uncertain delivery, busy/missing ownership records, forged replacement opt-ins,
-changed live identity and Escape during confirmation. They also check atomic
+changed live identity, native confirmation-key input and Escape during confirmation. They also check atomic
 binding retirement, retained history/checkpoint, independent pauses, fresh budgets,
 retired receiver refusal, no duplicate join effects and retirement across restart.
 The original reused-pane failure was reproduced before the change.
