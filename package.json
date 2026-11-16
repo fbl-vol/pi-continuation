@@ -1,6 +1,6 @@
 {
   "name": "@fbl-vol/pi-continuation",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.1",
   "private": true,
   "description": "Explicit, bounded continuation supervision for Pi workers in Herdr.",
   "type": "module",
