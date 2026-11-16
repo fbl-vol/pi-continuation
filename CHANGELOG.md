@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## [0.1.0-alpha.2] - Prepared, not yet published
+
+This candidate packages the merged start workflow for controlled trials. The latest
+published GitHub prerelease remains `v0.1.0-alpha.1`; npm publication is disabled.
 
 - Add human-confirmed `/continuation-supervisor start` and `/continuation-worker start`: automatic exact-session joining, routing, fresh-worker checkpoint bookkeeping and bounded activation, without copying IDs or sending a task.
 - Keep ordinary submitted tasks supervised after opt-in, while preserving sticky interruptions/prompts/errors, pending decisions, independent scope pauses, budgets, receipts and same-stop no-replay history. Advanced explicit setup remains available.
