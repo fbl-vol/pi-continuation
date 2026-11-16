@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Let worker `start` offer explicit retirement of an older session registered in the same pane. Preserve the old binding/history, recheck ownership and pending delivery, and join the new session as a fresh worker without lifting other scope pauses. Never silently follow replacements or retry ambiguous effects.
+- Explain live-session, pending-delivery, retired-session and registration conflicts instead of hiding them behind `UNEXPECTED`.
+
 - Fix fresh blank-worker start before Pi has created its session journal. Pin the future canonical path for enrollment only; delivery still requires persistence, and existing ownership witnesses remain enforced. No synthetic task or native journal write is used.
 - Classify ownership refusals as `OWNERSHIP_FENCE` rather than hiding them behind `UNEXPECTED`.
 - Correct the start fixture's premature journal creation and check the blank-to-first-task lifecycle and ownership refusals. Native Pi 1.5.0/1.5.2 temporary-session probes pass; no live installation or worker changes are implied.

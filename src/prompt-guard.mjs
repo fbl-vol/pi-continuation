@@ -59,6 +59,7 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
   return {
     get intact() { return intact(); },
     get blocked() { return !intact() || busy(); },
+    get confirming() { return intact() && own > 0 && external === 0 && !lifecycleExternal && !scope?.active; },
     get revision() { return revision; },
     start() {
       // Our native confirmation is not an approval hold. A wrapped concurrent

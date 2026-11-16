@@ -50,6 +50,24 @@ An isolated probe repeats the join with actual native Pi 1.5.0/1.5.2 SessionMana
 instances, fake Herdr/transport and temporary state; no model, live profile or real
 worker is used. This fix is not in the published alpha.2 and is not live acceptance.
 
+## Confirmed pane replacement evidence (unreleased)
+
+The source suite passes **225 tests**. Focused replacement cases use fake native
+sessions/Herdr, real local IPC, session mutexes and temporary state. They cover
+explicit acceptance/cancellation, old live sessions in another pane, pending or
+uncertain delivery, busy/missing ownership records, forged replacement opt-ins,
+changed live identity, native confirmation-key input and Escape during confirmation. They also check atomic
+binding retirement, retained history/checkpoint, independent pauses, fresh budgets,
+retired receiver refusal, no duplicate join effects and retirement across restart.
+The original reused-pane failure was reproduced before the change.
+
+An isolated Linux probe repeats confirmed replacement with actual Pi 1.5.0/1.5.2
+SessionManager instances and then exercises one-use continuation of a fresh task.
+Herdr and confirmation UI are fakes; this is not a real-model/TUI acceptance trial.
+Normal packed-extension discovery/binding probes and the 27-file payload check
+also pass. No live settings, registrations, worker state, installation or release
+was changed; native Windows/macOS runtime verification remains absent.
+
 ## Alpha.2 start workflow evidence
 
 Published `v0.1.0-alpha.2` packages the merged start workflow. Earlier real-model

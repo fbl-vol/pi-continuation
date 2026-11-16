@@ -11,6 +11,7 @@ test('all shared UI calls hold synchronously before display and preserve argumen
     assert.equal(this, ui);
     assert.ok(holds > 0);
     assert.equal(guard.blocked, true);
+    assert.equal(guard.confirming, false);
     return Promise.resolve(args);
   });
   const guard = guardPromptUI(ui, () => { holds++; });
@@ -25,18 +26,23 @@ test('all shared UI calls hold synchronously before display and preserve argumen
 test('an external prompt entirely inside an owned confirmation cannot be hidden by coalesced lifecycle events', async () => {
   const own = Promise.withResolvers();
   let holds = 0;
-  const ui = uiWith(async () => 'external result');
+  const ui = uiWith(async () => {
+    assert.equal(guard.confirming, false);
+    return 'external result';
+  });
   ui.confirm = () => { guard.start(); return own.promise.finally(() => guard.end()); };
   const guard = guardPromptUI(ui, () => { holds++; });
   const confirmation = guard.confirm('own', 'message');
   assert.equal(holds, 0);
   assert.equal(guard.blocked, true);
+  assert.equal(guard.confirming, true);
   // Pi emits no additional outer start/end for this fully overlapping call.
   await ui.input('other approval');
   own.resolve(true);
   assert.equal(await confirmation, false);
   assert.equal(holds, 1);
   assert.equal(guard.blocked, false);
+  assert.equal(guard.confirming, false);
   guard.dispose();
 });
 

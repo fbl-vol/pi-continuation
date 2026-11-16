@@ -41,6 +41,14 @@ After a separately authorized installation:
 
 **Unreleased blank-session fix:** current source permits a fresh blank worker to join before Pi creates its journal. It sends no task and leaves journal creation to native Pi; continuation still requires a persisted session. Published alpha.2 lacks this fix: for that version, send a harmless ordinary message and let it finish before worker start.
 
+**Unreleased pane-reuse recovery:** if this pane previously hosted another registered
+session, current source offers a separate **retire old registration and start this
+session** confirmation. It retains old history and registers a fresh worker, never
+inherits approvals or silently follows a replacement. A still-live old session,
+pending/uncertain delivery or unverifiable ownership blocks replacement. Cancelling
+keeps the old registration and holds the new worker. Independent scope pauses stay
+paused. Published alpha.2 lacks this workflow.
+
 Then send ordinary tasks normally. Fresh registrations get an automatically maintained private checkpoint from native projected user/assistant text and compaction summaries—not system prompts, tool payloads, thinking or image bytes. No copied IDs, checkpoint declarations or separate scope activation are needed. Visible workers are never auto-enrolled; missing/conflicting ownership is refused. Existing manually pinned checkpoints remain manual and are not replaced.
 
 Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.

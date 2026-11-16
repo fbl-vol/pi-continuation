@@ -34,7 +34,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
       sessionManager: manager ?? { getSessionId: () => id, getSessionFile: () => file,
         getLeafId: () => leaf, getBranch: () => entries, getEntries: () => entries,
         buildSessionProjection: () => ({ messages: entries.filter(e => e.type === 'message').map(e => e.message) }) },
-      ui: { confirm: async (...args) => { confirmations.push(args); return confirm; },
+      ui: { confirm: async (...args) => { confirmations.push(args); return typeof confirm === 'function' ? confirm(...args) : confirm; },
         select: async () => undefined, input: async () => undefined, editor: async () => undefined,
         custom: async () => undefined, onTerminalInput: fn => { input.add(fn); return () => input.delete(fn); },
         notify: (...args) => notifications.push(args) } };
@@ -65,7 +65,8 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
       emit: async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn(event, ctx); },
       dispose: args => tools.get('continuation_disposition')('call', args, undefined, undefined, ctx) };
   }
-  const worker = native('w:p1'), supervisor = native('s:p1');
+  let worker = native('w:p1');
+  const supervisor = native('s:p1');
   agents.push({ agent: 'pi', pane_id: 'w:p1', terminal_id: 'terminal', cwd: root,
     workspace_id: 'w', tab_id: 'w:t1', agent_status: 'idle', completion_seq: 1, state_change_seq: 1,
     agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: worker.file } });
@@ -91,5 +92,13 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
   const state = () => readJson(join(root, 'supervisor.json'));
   const workerId = () => worker.entries.find(e => e.customType === 'pi-continuation-worker')?.data.workerId;
   const observation = () => readJson(join(root, `observation-${workerId()}.json`));
-  return { root, agents, worker, supervisor, supervisorCommand, workerStart, state, workerId, observation };
+  const replaceWorker = async () => {
+    await worker.emit('session_shutdown');
+    worker = native('w:p1');
+    agents[0].agent_session.value = worker.file;
+    await worker.emit('session_start');
+    return worker;
+  };
+  return { root, agents, get worker() { return worker; }, supervisor, supervisorCommand,
+    workerStart, state, workerId, observation, replaceWorker };
 }

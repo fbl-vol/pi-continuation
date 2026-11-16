@@ -8,11 +8,11 @@ import { sameOccupant, snapshot, isSettled } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
-import { diagnostics } from './diagnostics.mjs';
+import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { attentionContent } from './attention.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
-  coordinatorCandidate } from './bindings.mjs';
+  coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
   resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
 
@@ -314,23 +314,51 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     try {
       const version = inputVersion;
       const live = await snapshot(socketPath);
-      const { binding, route, repeated } = await workerStartCandidate(root, request, state, live, paneId);
+      const { binding, route, repeated, replacement } = await workerStartCandidate(root, request, state, live, paneId);
       if (state.inflight[request.workerId] || Object.values(state.notices).some(notice =>
         notice.route === route && notice.status === 'uncertain'))
-        return { accepted: false, message: 'Uncertain delivery requires inspection and resolution, not start.' };
+        return { accepted: false, code: 'DELIVERY_PENDING', message: workerStartRefusal('DELIVERY_PENDING') };
       if (!repeated) {
-        await withWorkerHandoff(root, request.workerId, binding, {}, async () => {
+        const join = () => withWorkerHandoff(root, request.workerId, binding, {}, async () => {
+          // Both session mutexes remain held through the durable transition.
+          // Confirmation is not a lease: re-read identity/opt-in after all waits.
+          if (replacement) {
+            const fresh = await snapshot(socketPath);
+            const checked = await workerStartCandidate(root, request, state, fresh, paneId);
+            requireReplaceableWorker(state, replacement, fresh);
+            if (checked.replacement !== replacement || JSON.stringify(checked.binding) !== JSON.stringify(binding))
+              throw Object.assign(new Error('Replacement changed'), { code: 'WORKER_CONFLICT' });
+          }
           if (!active() || !subscriptionLive || promptActive || version !== inputVersion ||
               (state.workers[request.workerId] && state.workers[request.workerId] !== binding))
             throw new Error('Supervisor changed during worker start');
+          if (replacement && !request.replaceWorkerId)
+            return { accepted: false, replacementRequired: true, replaceWorkerId: replacement.workerId,
+              workerId: request.workerId, nonce: request.nonce, ownerToken: state.ownerToken };
           // A confirmed worker opt-in enables only its newly created route. An
           // independently paused existing route/global scope is never lifted.
+          if (replacement) {
+            state.retiredWorkers[replacement.workerId] = { ...replacement, paused: true, retiredBy: request.workerId };
+            delete state.workers[replacement.workerId];
+          }
           state.routes[route] ??= { paused: false, coordinator: null };
           state.workers[request.workerId] ??= binding;
           setScopePaused(state, 'worker', request.workerId, false);
           binding.lastStartNonce = request.nonce;
           await commit();
         });
+        let preview;
+        if (replacement) {
+          requireReplaceableWorker(state, replacement, live);
+          preview = await withWorkerHandoff(root, replacement.workerId, replacement, {}, async () => {
+            const old = await readWorkerRegistration(root, replacement.workerId);
+            if (old.sessionId !== replacement.sessionId || old.sessionFile !== replacement.sessionFile ||
+                old.paneId !== replacement.paneId || old.checkpoint !== replacement.checkpoint)
+              throw Object.assign(new Error('Old registration changed'), { code: 'OWNERSHIP_FENCE' });
+            return join();
+          });
+        } else await join();
+        if (preview) return preview;
         await subscribe(ctx);
         await wake(ctx);
       }
@@ -339,7 +367,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         routePaused: state.routes[route].paused, workerPaused: binding.paused };
     } catch (error) {
       report('join confirmed worker', error, ctx);
-      return { accepted: false, message: 'Worker start refused; inspect identity, ownership and supervisor diagnostics.' };
+      return { accepted: false, code: error.code, message: workerStartRefusal(error.code) };
     }
   });
 
@@ -444,9 +472,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               observed.stop && observed.stop !== state.handled[workerId] ?
                 'disposition pending' : 'await new work' };
         }
+        const retiredWorkers = Object.fromEntries(Object.entries(state.retiredWorkers).map(([id, old]) =>
+          [id, { paneId: old.paneId, sessionId: old.sessionId, retiredBy: old.retiredBy }]));
         notify(ctx, JSON.stringify({ globalPaused: state.paused, globalReason: state.reason,
           failure: state.failure, subscriptionLive,
-          routes: state.routes, workers, notices: state.notices }).slice(0, 6000)); return;
+          routes: state.routes, workers, notices: state.notices, retiredWorkers }).slice(0, 6000)); return;
       }
       if (verb === 'coordinator') {
         if (!state.routes[kind] || !uuid(id)) throw new Error('Usage: coordinator <route> <coordinator-id>');

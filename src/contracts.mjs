@@ -24,6 +24,7 @@ import { readJson } from './store.mjs';
  * @typedef {{id: string, status: 'accepted'|'sent'}} Receipt
  * @typedef {{schemaVersion: number, paused: boolean, ownerToken?: string, ownerPid?: number,
  *   workers: Object<string, WorkerBinding>, routes: Object<string, Route>,
+ *   retiredWorkers: Object<string, WorkerBinding & {retiredBy: string}>,
  *   handled: Object<string, string>, resumed: Object<string, string>,
  *   dispositions: Object<string, {stop: string, action: string}>,
  *   budgets: Object<string, {count: number, hash: string, checkpoint: string}>,
@@ -61,6 +62,14 @@ export function decodeSupervisor(record) {
   for (const name of ['handled', 'dispositions', 'budgets', 'repair', 'notices', 'inflight']) {
     if (version === 0 && state[name] == null) state[name] = {};
     if (!object(state[name])) invalid();
+  }
+  // Retired bindings remain provenance; they can never be activated or re-added.
+  if (state.retiredWorkers === undefined) state.retiredWorkers = {};
+  if (!object(state.retiredWorkers)) invalid();
+  for (const [id, worker] of Object.entries(state.retiredWorkers)) {
+    if (!isId(id) || !object(worker) || worker.workerId !== id || worker.paused !== true ||
+        !isId(worker.retiredBy) || typeof worker.sessionId !== 'string' ||
+        typeof worker.sessionFile !== 'string' || Object.hasOwn(state.workers, id)) invalid();
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
