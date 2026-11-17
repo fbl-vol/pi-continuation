@@ -28,6 +28,8 @@ test('human attachment preserves pauses and conservative budget; retired ownersh
       subscriptions.add(socket);
       socket.on('close', () => subscriptions.delete(socket));
       socket.write(JSON.stringify({ id: request.id, result: { type: 'subscription_started' } }) + '\n');
+    } else if (request.method.endsWith('.report_metadata')) {
+      socket.end(JSON.stringify({ id: request.id, result: { type: 'ok' } }) + '\n');
     } else {
       assert.equal(request.method, 'session.snapshot');
       socket.end(JSON.stringify({ id: request.id, result: { type: 'session_snapshot',

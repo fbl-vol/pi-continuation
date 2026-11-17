@@ -17,6 +17,18 @@ continuations/notices/startups, distinguish listed Pause from withdrawn Stop, an
 refuse a Start confirmed before a concurrent Stop. These are local P1/P3/P4/P7
 checks, not live menu interaction, native platform or user acceptance.
 
+`test/annotations.test.mjs` checks namespaced/TTL/sequence payloads, unchanged-event
+deduplication and renewal, shutdown clearing including lost first acknowledgements,
+separate workspace counts, missing observations, owner/native replacement, stale
+snapshots, concurrent Pause and isolated transport/ownership failure. Fake-clock
+renewal checks inspect requested TTL; they do not prove native expiry behavior.
+`test/annotations-flow.test.mjs` checks the ordinary binder's Pause/Stop/Return
+metadata and that slow optional metadata cannot delay authority-subscription
+withdrawal on shutdown. Prior disposable Linux Herdr 0.9.5 rendering evidence
+covers compact narrow labels, token colors, ordinary-row elision, stale-sequence
+rejection and pane/workspace TTL expiry—not this adapter's live lifecycle or native
+20-worker scale. No current-adapter live or Windows/macOS runtime claim is made.
+
 ## Ordinary-extension evidence
 
 `npm test` uses fake Pi/Herdr, real local sockets and temporary state/processes,

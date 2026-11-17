@@ -12,6 +12,7 @@ import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
+import { createAnnotations } from './annotations.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
@@ -25,7 +26,8 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
-  let state;
+  let state, displayState, annotations;
+  const annotationReport = diagnostics('annotations');
   const report = diagnostics('supervisor');
   let diagnosticContext;
   let closeOwner;
@@ -46,7 +48,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const saved = structuredClone(state);
     const writing = writes.then(async () => {
       if (persistenceFailed) saved.paused = true;
-      try { await atomicJson(stateFile(root), saved); }
+      try {
+        await atomicJson(stateFile(root), saved);
+        displayState = saved;
+        void annotations?.refresh();
+      }
       catch (error) {
         // Fence every entry point, including human commands outside the model queue.
         // A failed pause must not leave receivers trusting the old active snapshot.
@@ -54,6 +60,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         state.paused = true;
         subscriptionLive = false;
         closeEvents?.();
+        void annotations?.refresh();
         const closing = closeOwner;
         closeOwner = undefined;
         try { await closing?.(); }
@@ -292,7 +299,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     closeEvents?.();
     subscriptionLive = false;
     closeEvents = observe(socketPath, value => {
-      lastSnapshot = value; void queue(() => wake(ctx));
+      lastSnapshot = value;
+      void queue(() => wake(ctx));
+      void annotations?.refresh();
     }, error => {
       report('observe Herdr', error, ctx);
       state.failure = report.last;
@@ -316,6 +325,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
     }
   });
+
+  const startAnnotations = ctx => {
+    const agent = lastSnapshot.agents.find(a => a.pane_id === paneId);
+    const file = ctx.sessionManager.getSessionFile?.();
+    const candidate = { paneId, sessionId: ctx.sessionManager.getSessionId(), sessionFile: file,
+      cwd: ctx.cwd, terminalId: agent?.terminal_id, workspaceId: agent?.workspace_id,
+      tabId: agent?.tab_id, sessionKind: 'path', sessionValue: file };
+    annotations = createAnnotations({ root, socketPath, ownerToken: state.ownerToken,
+      readSnapshot: async () => lastSnapshot,
+      ownerBinding: file && sameOccupant(agent, candidate) ? candidate : undefined,
+      readState: () => active() && subscriptionLive &&
+        ctx.sessionManager.getSessionId() === displayState?.supervisorSession ? structuredClone(displayState) : undefined,
+      onError: error => annotationReport('publish display', error, ctx) });
+    void annotations.refresh();
+  };
 
   const acceptWorkerStart = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive || !allowExperimentalActivation)
@@ -460,6 +484,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           state.ownerPid = process.pid;
           await commit();
           await subscribe(ctx);
+          startAnnotations(ctx);
           watcher = watch(root, (_event, filename) => {
             // Own state/receipt writes must not retry a deferred notice in a hot loop.
             if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
@@ -469,9 +494,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             'Supervisor started; use /continuation-worker start in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
         } catch (error) {
+          const closingAnnotations = annotations?.close(); annotations = undefined;
           closeEvents?.(); closeEvents = undefined;
           await closeOwner?.(); closeOwner = undefined;
           await release(lockFile(root), token);
+          await closingAnnotations;
           throw error;
         }
         return;
@@ -779,6 +806,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     });
   });
   pi.on('session_shutdown', async () => {
+    const closingAnnotations = annotations?.close(); annotations = undefined;
     watcher?.close(); closeEvents?.(); subscriptionLive = false;
     await serial; // Finish any queued receipt/notice before releasing the owner and state root.
     await writes; // Human command snapshots share this tail, not the model queue.
@@ -787,6 +815,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await closeOwner(); closeOwner = undefined;
       await release(lockFile(root), token);
     }
+    await closingAnnotations;
   });
   return { get active() { return active(); }, command };
 }

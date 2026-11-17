@@ -22,8 +22,11 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
     socket.once('data', async data => {
       const request = JSON.parse(data.toString());
       try {
-        const result = await handleRequest?.(request) ?? (request.method === 'events.subscribe' ?
-          { type: 'subscription_started' } : { type: 'session_snapshot', snapshot: { protocol: 22, agents } });
+        const result = await handleRequest?.(request, socket) ?? (request.method === 'events.subscribe' ?
+          { type: 'subscription_started' } : request.method.endsWith('.report_metadata') ? { type: 'ok' } :
+            { type: 'session_snapshot', snapshot: { protocol: 22, agents,
+              workspaces: [...new Set(agents.map(a => a.workspace_id))].map(workspace_id =>
+                ({ workspace_id, label: `Workspace ${workspace_id}` })) } });
         socket.write(JSON.stringify({ id: request.id, result }) + '\n');
       } catch { socket.destroy(); }
     });

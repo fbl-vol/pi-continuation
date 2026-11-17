@@ -78,6 +78,11 @@ consumed/uncertain effects. Resolve the actual hold before returning. Changed
 session/owner identity or ambiguous control delivery requires inspection, not
 automatic retry. Installation alone still registers and activates nothing.
 
+Current source also reports compact, expiring supervision labels in Herdr's
+existing Agents/Spaces views. Native activity stays separate; badges never grant
+permission. See the [one-time optional sidebar setup](docs/herdr-annotations.md).
+No live configuration is rewritten and no extra plugin is required.
+
 ## Supervised delegation (unreleased source)
 
 For an already installed ordinary extension and an **already-running intended

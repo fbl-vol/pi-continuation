@@ -98,6 +98,12 @@ independent pauses, holds, consumed stops and uncertainty cannot be bypassed by
 returning. Permanent replacement retirement remains distinct. This extends the
 human control surface within P1/P3/P4/P7, not the seven-scenario acceptance set.
 
+Display-only Herdr annotations reuse the existing Agents/Spaces views and native
+snapshots. Exact verified bindings receive compact, namespaced, expiring labels;
+workspace counts are reported separately. Native activity and pane labels remain
+Herdr-owned. Badges never grant eligibility or control; their absence does not
+prove that no other supervisor exists. See [setup and display limits](herdr-annotations.md).
+
 ## Observable baseline scenarios
 
 These seven scenarios are the bounded acceptance set, not an exhaustive matrix.

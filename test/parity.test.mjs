@@ -69,9 +69,10 @@ async function fixture(t, { coordinatorInput = false, ordinary = false, priorHan
     socket.once('data', data => {
       const req = JSON.parse(data.toString());
       if (req.method === 'events.subscribe') subscriptions.add(socket);
-      else snapshotHook();
+      else if (req.method === 'session.snapshot') snapshotHook();
       socket.write(JSON.stringify({ id: req.id, result: req.method === 'events.subscribe' ?
-        { type: 'subscription_started' } : { type: 'session_snapshot', snapshot: { protocol: 22, agents } } }) + '\n');
+        { type: 'subscription_started' } : req.method.endsWith('.report_metadata') ? { type: 'ok' } :
+          { type: 'session_snapshot', snapshot: { protocol: 22, agents } } }) + '\n');
     });
   });
   const ch = new Map(), sh = new Map();

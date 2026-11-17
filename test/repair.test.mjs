@@ -31,7 +31,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const herdr = net.createServer(socket => socket.once('data', data => {
     const request = JSON.parse(data.toString());
     socket.write(JSON.stringify({ id: request.id, result: request.method === 'events.subscribe' ?
-      { type: 'subscription_started' } : { type: 'session_snapshot',
+      { type: 'subscription_started' } : request.method.endsWith('.report_metadata') ? { type: 'ok' } : { type: 'session_snapshot',
         snapshot: { protocol: 22, agents: [agent] } } }) + '\n');
   }));
   const handlers = new Map();
