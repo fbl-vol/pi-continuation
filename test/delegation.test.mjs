@@ -320,10 +320,25 @@ test('P3 accepted message without a matching native run stays uncertain and cann
 
 test('P3/P5 cancellation after pane creation and concurrent calls retain one attempt without duplicate effects', async t => {
   const controller = new AbortController();
-  const f = await fixture(t, { beforeSplit: () => controller.abort() });
+  let signalCreated, releaseSplit;
+  const paneCreated = new Promise(resolve => { signalCreated = resolve; });
+  const splitResponse = new Promise(resolve => { releaseSplit = resolve; });
+  const f = await fixture(t, { beforeSplit: async () => {
+    controller.abort();
+    signalCreated();
+    await splitResponse;
+  } });
   await f.authorize();
-  const results = await Promise.allSettled([f.worker.spawn(task, controller.signal), f.worker.spawn(task)]);
+  const first = f.worker.spawn(task, controller.signal);
+  // Make the cancellable caller own the claim before racing its duplicate.
+  // If it fails before pane creation, surface that failure instead of hanging.
+  await Promise.race([paneCreated, first]);
+  const pending = Promise.allSettled([first, f.worker.spawn(task)]);
+  releaseSplit();
+  const results = await pending;
   assert.equal(results.every(r => r.status === 'rejected'), true);
+  assert.match(results[0].reason.message, /held for inspection/);
+  assert.equal(results[1].reason.code, 'EEXIST');
   assert.deepEqual(f.effects, ['split']);
   assert.equal((await f.attempt()).status, 'held');
 });
