@@ -15,7 +15,7 @@ native cross-platform runtime, live adapter, delegated-spawn or real-model accep
 the model/platform evidence limits below remain. Historical section counts describe
 their original revisions, not the current integrated suite.
 
-## Readable worker menu follow-up (unreleased)
+## Readable worker menu release (v0.3.1)
 
 Focused management scenarios cover the native `snapshot.panes` label separately
 from agent titles, current versus closed/replaced registrations, a live pane with
@@ -26,6 +26,20 @@ fake Herdr snapshots and temporary state through the actual command handler; no
 live workers or registrations are changed. Existing Stop/Return and stale-identity
 checks remain in place. The integrated source suite passes 287 isolated tests;
 package resources remain the same explicit 32-file payload.
+
+Independent review of the menu refinement found no material findings. Its PR CI
+passed Linux, Windows and macOS; merged-source CI passed Linux and Windows, while
+the macOS job was cancelled before executing any steps. Native Windows/macOS
+runtime verification remains unclaimed.
+
+Focused ordinary native Pi 1.5.2 Linux keyboard checks used the packed merged
+artifact, isolated profiles/sessions and fake Herdr protocol 22. Three bounded
+runs exercised pane labels, current/previous menus, read-only previous Details,
+Pause → Stop → own-session Return, retained independent pauses and history, clean
+exits and zero model requests. Native selector component frames at 80/40 columns
+also covered current, previous, empty and unknown-observation states. These are
+not real Herdr adapter, real-model, whole-workflow or user acceptance. No installed
+extension, live worker, settings or supervision state was changed by these checks.
 
 ## Contextual management source evidence (v0.3.0)
 

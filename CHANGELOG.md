@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## [0.3.1] - 2026-11-17
+
+GitHub patch release for controlled trials; npm publication remains disabled.
+Update the pinned Git tag and reload only intended Pi sessions to use it.
+Installation does not enroll workers or migrate supervision.
 
 - Prefer Herdr pane labels in `/continuation`. Show exact current worker bindings separately from retained previous/unavailable registrations, distinguish Pane closed from Session changed, and keep previous entries inspectable without control actions or history deletion. Unknown observations remain visible among current workers.
+- Validate with 287 isolated tests and the unchanged explicit 32-file payload. Focused native Linux Pi 1.5.2 keyboard checks with isolated profiles and fake Herdr cover labels, history/Details and Pause → Stop → Return with pauses/history retained and zero model requests. This is not live Herdr, real-model or native Windows/macOS acceptance; existing limitations remain.
 
 ## [0.3.0] - 2026-11-17
 
