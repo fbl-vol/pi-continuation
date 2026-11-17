@@ -25,7 +25,10 @@ export function workerStatus(state, binding, agent, observation) {
   return status('Supervised', 'active');
 }
 
-export function displayName(agent, fallback) {
-  return String(agent?.name || agent?.terminal_title_stripped || fallback)
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, 80);
+export function displayName(agent, fallback, paneLabel) {
+  for (const value of [paneLabel, agent?.name, agent?.terminal_title_stripped, fallback]) {
+    const name = String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim();
+    if (name) return name.slice(0, 80);
+  }
+  return '';
 }

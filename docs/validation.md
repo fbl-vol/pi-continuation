@@ -15,6 +15,18 @@ native cross-platform runtime, live adapter, delegated-spawn or real-model accep
 the model/platform evidence limits below remain. Historical section counts describe
 their original revisions, not the current integrated suite.
 
+## Readable worker menu follow-up (unreleased)
+
+Focused management scenarios cover the native `snapshot.panes` label separately
+from agent titles, current versus closed/replaced registrations, a live pane with
+no agent report, duplicate pane labels with exact selected-worker controls, unknown
+observations remaining current, cancellation and read-only previous-registration
+browsing even when the original identity reappears. These use synthetic sessions,
+fake Herdr snapshots and temporary state through the actual command handler; no
+live workers or registrations are changed. Existing Stop/Return and stale-identity
+checks remain in place. The integrated source suite passes 287 isolated tests;
+package resources remain the same explicit 32-file payload.
+
 ## Contextual management source evidence (v0.3.0)
 
 `test/management.test.mjs` exercises the actual ordinary binder, guarded native
