@@ -5,6 +5,18 @@ Tests/reviews verify it; they do not create requirements. Owner completion is no
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,
 real-worker migration, secrets or npm publication is implied.
 
+## Contextual management source evidence (unreleased)
+
+`test/management.test.mjs` exercises the actual ordinary binder, guarded native
+command callbacks, owner IPC, disk records and ownership mutexes with fake Pi/Herdr
+sessions. It checks selected versus sibling controls, duplicate labels, cancelled
+selection/confirmation, caller/target/owner changes, concurrent external prompts,
+unknown/corrupt observations and consumed control requests. Retained Stop tests
+preserve consumed-stop/budget history and independent pauses, reject unresolved
+continuations/notices/startups, distinguish listed Pause from withdrawn Stop, and
+refuse a Start confirmed before a concurrent Stop. These are local P1/P3/P4/P7
+checks, not live menu interaction, native platform or user acceptance.
+
 ## Ordinary-extension evidence
 
 `npm test` uses fake Pi/Herdr, real local sockets and temporary state/processes,

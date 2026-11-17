@@ -11,11 +11,12 @@ import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
+import { applyManagementControl, managementMessage } from './management.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
-  resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
+  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
 
 const stateFile = root => join(root, 'supervisor.json');
 const lockFile = root => join(root, 'supervisor.lock');
@@ -285,7 +286,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     // Discovery read filters stale pane IDs; the authoritative read follows the
     // subscription acknowledgement so snapshot/event overlap remains safe.
     const discovery = await snapshot(socketPath);
-    const candidates = [...Object.values(state.workers).map(w => w.paneId),
+    const candidates = [...Object.values(state.workers).filter(w => !w.stopped).map(w => w.paneId),
       ...Object.values(state.routes).map(r => r.coordinator?.paneId).filter(Boolean)];
     const paneIds = candidates.filter(id => discovery.agents.some(a => a.pane_id === id));
     closeEvents?.();
@@ -352,7 +353,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           }
           state.routes[route] ??= { paused: false, coordinator: null };
           state.workers[request.workerId] ??= binding;
-          setScopePaused(state, 'worker', request.workerId, false);
+          if (binding.stopped) returnStoppedWorker(state, request.workerId);
+          else setScopePaused(state, 'worker', request.workerId, false);
           binding.lastStartNonce = request.nonce;
           await commit();
         });
@@ -380,9 +382,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
-  pi.registerCommand('continuation-supervisor', {
-    description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
-    handler: async (args, ctx) => {
+  const acceptManagement = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive) return { accepted: false, message: 'Supervisor unavailable' };
+    try {
+      return await applyManagementControl(root, request, state, () => snapshot(socketPath), commit);
+    } catch (error) {
+      report('manage worker', error, ctx);
+      return { accepted: false, message: managementMessage(error) };
+    }
+  });
+
+  const command = async (args, ctx) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
         notify(ctx, 'Herdr-managed Pi TUI required', 'error'); return;
@@ -417,7 +427,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const token = randomUUID();
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
-          closeOwner = await ownerServer(root, token, request => acceptWorkerStart(request, ctx));
+          closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
+            acceptManagement(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
@@ -586,7 +597,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         return;
       }
       notify(ctx, 'Unknown continuation-supervisor action', 'warning');
-    },
+  };
+  pi.registerCommand('continuation-supervisor', {
+    description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
+    handler: command,
   });
 
   pi.registerTool({
@@ -604,7 +618,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'No active owner or missing evidence';
         if (!allowExperimentalActivation) return 'Activation disabled: prompt-hold boundary unverified';
         const binding = state.workers[args.workerId];
-        if (!binding || (args.action !== 'acknowledge' &&
+        if (!binding || binding.stopped || (args.action !== 'acknowledge' &&
             (state.paused || binding.paused || state.routes[binding.route]?.paused))) return 'Paused';
         lastSnapshot = await snapshot(socketPath);
         const reviewedAgent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
@@ -774,4 +788,5 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await release(lockFile(root), token);
     }
   });
+  return { get active() { return active(); }, command };
 }

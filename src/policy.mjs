@@ -79,6 +79,8 @@ export function resolveResume(state, workerId) {
 // Called only after a human confirms changing this scope. No other pause is lifted.
 export function setScopePaused(state, kind, id, paused) {
   const target = kind === 'global' ? state : kind === 'route' ? state.routes[id] : state.workers[id];
+  if (!paused && kind === 'worker' && target.stopped)
+    throw new Error('Stopped worker must return explicitly from its own session');
   if (!paused && target.paused && kind === 'worker') {
     delete state.repair[id];
     if (state.blocked?.[id]) delete state.blocked[id].handled;
@@ -87,6 +89,31 @@ export function setScopePaused(state, kind, id, paused) {
         ['pause', 'blocker', 'decision'].includes(disposition.action)) delete state.handled[id];
   }
   target.paused = paused;
+}
+
+/** Retained withdrawal, not permanent retirement or resolution of an effect. */
+export function stopWorker(state, workerId, stopToken) {
+  const worker = state.workers[workerId];
+  if (!worker || worker.stopped) throw new Error('Worker is not actively supervised');
+  if (state.inflight[workerId] || Object.values(state.notices).some(notice =>
+    notice.workerId === workerId && ['pending', 'sending', 'uncertain'].includes(notice.status)))
+    throw Object.assign(new Error('Unresolved worker delivery requires inspection before Stop'), { code: 'DELIVERY_PENDING' });
+  worker.stoppedPaused = worker.paused;
+  worker.stopToken = stopToken;
+  worker.stopped = true;
+  worker.paused = true;
+}
+
+/** Only the existing confirmed own-session start path may call this. */
+export function returnStoppedWorker(state, workerId) {
+  const worker = state.workers[workerId];
+  if (!worker?.stopped) throw new Error('Worker is not stopped');
+  // Joining the list is not permission to lift a pause that predated Stop, nor
+  // to rearm a handled stop or the unresolved-attention/continuation budget.
+  worker.paused = worker.stoppedPaused;
+  delete worker.stopped;
+  delete worker.stoppedPaused;
+  delete worker.stopToken;
 }
 
 export function recoverUncertain(state) {

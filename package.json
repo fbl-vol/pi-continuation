@@ -37,6 +37,8 @@
     "src/diagnostics.mjs",
     "src/delegation.mjs",
     "src/ipc.mjs",
+    "src/management.mjs",
+    "src/status.mjs",
     "src/policy.mjs",
     "src/prompt-guard.mjs",
     "src/session.mjs",
