@@ -5,7 +5,17 @@ Tests/reviews verify it; they do not create requirements. Owner completion is no
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,
 real-worker migration, secrets or npm publication is implied.
 
-## Contextual management source evidence (unreleased)
+## v0.3.0 release baseline
+
+The integrated suite passes **283 isolated tests** and the package contains **32
+explicit files**. Main-branch CI for the feature revision `8ae5c21` passed on Linux,
+Windows and macOS. The earlier reported Windows source-test failures are historical,
+not current blockers. Package versions now match the new release tag. This is not
+native cross-platform runtime, live adapter, delegated-spawn or real-model acceptance;
+the model/platform evidence limits below remain. Historical section counts describe
+their original revisions, not the current integrated suite.
+
+## Contextual management source evidence (v0.3.0)
 
 `test/management.test.mjs` exercises the actual ordinary binder, guarded native
 command callbacks, owner IPC, disk records and ownership mutexes with fake Pi/Herdr
@@ -59,7 +69,7 @@ Five selected blocked/final-recheck regressions failed against isolated pre-chan
 source, then passed on the ordinary implementation. No production source was
 modified for that red comparison. Deterministic policy tests are not model judgment.
 
-## Unreleased scoped delegation (P1–P7)
+## Scoped delegation source evidence (v0.3.0, P1–P7)
 
 `test/delegation.test.mjs` composes the ordinary extension with fake native Pi
 sessions, fake protocol-22 Herdr creation/start responses, actual local bootstrap /
@@ -81,11 +91,11 @@ Native startup/tool/messaging shapes were checked against installed Pi 1.5.2
 extension documentation/source and the installed Herdr 0.9.5 protocol-22 schema.
 This is source/isolated transport evidence, **not a live delegated spawn trial**,
 installation, settings change, real-model acceptance or native Windows/macOS
-runtime verification. The reported main-branch Windows failure at
-`test/supervisor.test.mjs:133` remains unconfirmed and is not claimed cleared by
-Linux tests. Existing release-version and model/platform evidence gaps remain.
+runtime verification. Subsequent integrated source CI passed on Linux, Windows
+and macOS as recorded in the release baseline above; model/platform runtime
+evidence gaps remain.
 
-## Unreleased blank-session correction (P1/P2/P7)
+## Blank-session correction (P1/P2/P7)
 
 A real alpha.2 blank-worker start exposed a fixture gap: Pi allocates a journal
 path before creating the file, while the fixture had pre-created it. With realistic
@@ -103,9 +113,9 @@ An isolated probe repeats the join with actual native Pi 1.5.0/1.5.2 SessionMana
 instances, fake Herdr/transport and temporary state; no model, live profile or real
 worker is used. This fix is not in the published alpha.2 and is not live acceptance.
 
-## Confirmed pane replacement evidence (unreleased)
+## Confirmed pane replacement evidence (v0.3.0)
 
-The source suite passes **225 tests**. Focused replacement cases use fake native
+The replacement revision's source suite passed **225 tests**. Focused replacement cases use fake native
 sessions/Herdr, real local IPC, session mutexes and temporary state. They cover
 explicit acceptance/cancellation, old live sessions in another pane, pending or
 uncertain delivery, busy/missing ownership records, forged replacement opt-ins,

@@ -1,4 +1,4 @@
-# Herdr supervision annotations (unreleased source)
+# Herdr supervision annotations (since v0.3.0)
 
 The ordinary extension can add compact supervision labels to Herdr's existing
 Agents rows and counts to Spaces. Herdr still owns navigation and working/idle/
@@ -7,7 +7,7 @@ No additional plugin, dashboard or service is needed.
 
 ## One-time sidebar setup
 
-For an already installed source build, merge the following rows into your Herdr
+For an already installed v0.3.0 or newer extension, merge the following rows into your Herdr
 configuration using Herdr's normal configuration/reload workflow. Applying this
 example changes your profile and is a separate explicit action; the extension
 never edits configuration or installs itself.

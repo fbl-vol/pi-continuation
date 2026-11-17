@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## [0.3.0] - 2026-11-17
+
+GitHub feature release; npm publication remains disabled. Existing installations
+must update their pinned Git tag and reload the intended Pi session. Installation
+does not enroll workers or migrate supervision.
+
+- Add `/continuation`: readable session status, worker selection, Details and exact-worker Pause/Stop controls. Retained Stop preserves history, budgets and receipts; Return requires fresh confirmation in the worker's own session and preserves independent pauses.
+- Add display-only, expiring supervision badges and workspace counts in Herdr's existing Agents/Spaces views. Optional sidebar rows require the separate one-time setup in `docs/herdr-annotations.md`; installation never rewrites Herdr configuration. Missing native owner verification suppresses annotations, not continuation authority.
+- Add explicitly scoped `/continuation-delegate` and `continuation_spawn` for new workers through ordinary Pi startup, with exact supervisor enrollment before task dispatch, role ceilings, checkout writer exclusion and retained duplicate/uncertainty guards.
+- Validate the integrated source with 283 isolated tests and a 32-file explicit package payload. Linux/Windows/macOS source CI is not native runtime or real-model acceptance. Known model reassessment and platform limitations remain.
 
 - Let worker `start` offer explicit retirement of an older session registered in the same pane. Preserve the old binding/history, recheck ownership and pending delivery, and join the new session as a fresh worker without lifting other scope pauses. Never silently follow replacements or retry ambiguous effects.
 - Explain live-session, pending-delivery, retired-session and registration conflicts instead of hiding them behind `UNEXPECTED`.
@@ -8,6 +17,14 @@
 - Fix fresh blank-worker start before Pi has created its session journal. Pin the future canonical path for enrollment only; delivery still requires persistence, and existing ownership witnesses remain enforced. No synthetic task or native journal write is used.
 - Classify ownership refusals as `OWNERSHIP_FENCE` rather than hiding them behind `UNEXPECTED`.
 - Correct the start fixture's premature journal creation and check the blank-to-first-task lifecycle and ownership refusals. Native Pi 1.5.0/1.5.2 temporary-session probes pass; no live installation or worker changes are implied.
+
+## [0.2.1] - 2026-11-16
+
+- Correct package and lockfile versions to match the immutable `v0.2.1` Git tag. That tag did not have a separate GitHub release entry.
+
+## [0.2.0] - 2026-11-16
+
+- Historical GitHub release of the start workflow with a blank-session correction. Its package metadata still reported `0.1.0-alpha.2`; the tag is retained unchanged. The matching-version correction followed in `v0.2.1`.
 
 ## [0.1.0-alpha.2] - 2026-11-16
 

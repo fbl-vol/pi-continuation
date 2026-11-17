@@ -2,32 +2,32 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Latest published alpha: `v0.1.0-alpha.2`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.1.0-alpha.2); npm publication remains disabled (`private: true`). The start workflow has no real-model acceptance yet; earlier focused Linux Pi 1.5.2/Herdr 0.9.5 trials exercised the advanced workflow. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Current release: `v0.3.0`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.3.0); npm publication remains disabled (`private: true`). The start workflow has no real-model acceptance yet; earlier focused Linux Pi 1.5.2/Herdr 0.9.5 trials exercised the advanced workflow. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
 - Pins a worker's current saved Pi session, checkpoint, terminal, pane, cwd and workspace. A replacement/fork never silently inherits registration.
 - Uses Pi lifecycle/persistence/messaging and Herdr's existing identity/status reporting. The dedicated supervisor interprets the final reply and checkpoint against the **whole assignment**, including follow-ups. A favorable review alone is not completion; interpretation never grants new authority.
 - Gives blocked workers attention even mid-turn, before an assistant stop exists. Herdr status evidence is explicitly labeled, not a fabricated worker reply or resumable native stop. Blocked/held workers cannot be resumed or declared complete. Genuine approval requests require a decision/pause, not invented approval.
-- Keeps human-confirmed global, route and worker control. Only the unreleased scoped delegation path can enroll its newly created worker without per-worker confirmation; model tools cannot otherwise activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
+- Keeps human-confirmed global, route and worker control. Only the scoped delegation path can enroll its newly created worker without per-worker confirmation; model tools cannot otherwise activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
 - Delivers through a worker-owned local receiver, not `agent.prompt`. A final Herdr identity/status/sequence check precedes addressed delivery; the receiver rechecks exact native stop, session, owner, hold and pauses. One-use receipts prevent replay. Uncertain delivery pauses for inspection, not retry.
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install the published alpha.2
+## Install v0.3.0
 
 Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
 
 ```sh
-pi install git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.2
+pi install git:github.com/fbl-vol/pi-continuation@v0.3.0
 ```
 
-Installation changes that profile's Pi settings; restart or reload Pi afterward. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
+Installation changes that profile's Pi settings; restart or reload the intended Pi session afterward. To upgrade an existing pinned installation, run the same install command with the new tag; `pi update --extensions` alone does not advance a pinned tag. Other running sessions keep their loaded code until individually restarted or reloaded. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
 
 To remove this package from the same profile:
 
 ```sh
-pi remove git:github.com/fbl-vol/pi-continuation@v0.1.0-alpha.2
+pi remove git:github.com/fbl-vol/pi-continuation@v0.3.0
 ```
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
@@ -39,9 +39,9 @@ After a separately authorized installation:
 1. In the intended supervisor, `/continuation-supervisor start` and confirm.
 2. In each selected worker, `/continuation-worker start` and confirm that it has no other continuation owner.
 
-**Unreleased blank-session fix:** current source permits a fresh blank worker to join before Pi creates its journal. It sends no task and leaves journal creation to native Pi; continuation still requires a persisted session. Published alpha.2 lacks this fix: for that version, send a harmless ordinary message and let it finish before worker start.
+**Blank-session start:** current source permits a fresh blank worker to join before Pi creates its journal. It sends no task and leaves journal creation to native Pi; continuation still requires a persisted session. Published alpha.2 lacks this fix: for that version, send a harmless ordinary message and let it finish before worker start.
 
-**Unreleased pane-reuse recovery:** if this pane previously hosted another registered
+**Pane-reuse recovery:** if this pane previously hosted another registered
 session, current source offers a separate **retire old registration and start this
 session** confirmation. It retains old history and registers a fresh worker, never
 inherits approvals or silently follows a replacement. A still-live old session,
@@ -53,7 +53,7 @@ Then send ordinary tasks normally. Fresh registrations get an automatically main
 
 Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
 
-## Session management (unreleased source)
+## Session management (since v0.3.0)
 
 Use `/continuation` in a Herdr-managed Pi session to see its supervision status and
 known supervised workers. Native menus show session labels and status; exact IDs
@@ -83,7 +83,7 @@ existing Agents/Spaces views. Native activity stays separate; badges never grant
 permission. See the [one-time optional sidebar setup](docs/herdr-annotations.md).
 No live configuration is rewritten and no extra plugin is required.
 
-## Supervised delegation (unreleased source)
+## Supervised delegation (since v0.3.0)
 
 For an already installed ordinary extension and an **already-running intended
 supervisor**, the planning session need not enroll in continuation:
