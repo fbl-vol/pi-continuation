@@ -262,11 +262,18 @@ for (const boundary of ['splitLost', 'startLost']) {
 test('P3/P4 held supervised parent and revoked authority cannot subdelegate', async t => {
   const f = await fixture(t);
   await f.authorize();
-  await f.worker.spawn(task);
+  const result = (await f.worker.spawn(task)).details;
   const child = f.children[0];
   child.native.raw('\u001b');
-  await new Promise(resolve => setTimeout(resolve, 20));
+  // Await the native abort lifecycle, not a disk-speed-dependent sleep. The
+  // synchronous local fence can reject before the durable hold is visible.
+  await child.native.emit('agent_settled', { aborted: true });
+  const held = await readJson(join(f.root, `observation-${result.workerId}.json`));
+  assert.equal(held.hold, true);
+  assert.equal(held.holdReason, 'interruption');
+  const before = [...f.effects];
   await assert.rejects(child.native.spawn({ key: 'paused-sub', task: 'Inspect only', role: 'read-only' }), /paused or held/);
+  assert.deepEqual(f.effects, before);
   await f.worker.command('continuation-delegate', 'revoke');
   await assert.rejects(f.worker.spawn({ key: 'revoked', task: 'Inspect another thing', role: 'read-only' }), /revoked/);
   assert.equal(f.children.length, 1);
