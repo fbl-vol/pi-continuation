@@ -48,8 +48,11 @@ not show all details; use Pi's `/continuation` menu for the explanation.
 - `Paused`, `Paused: global` and `Paused: workspace` preserve separate scopes.
   `Held: prompt`, `Held: decision`, `Held: error` and `Held: delivery` describe
   existing deterministic state. No prose classifier invents new authority.
-- A verified supervisor has `Supervisor` or `Supervisor: paused`. A supervisor
-  without a pinnable native path identity receives no badge.
+- A verified supervisor has `Supervisor` or `Supervisor: paused`. Without an
+  initial pinnable native path identity, the supervisor receives no badge and its
+  annotation source publishes no worker badges or workspace counts either.
+  This disables only display reporting, not supervisor startup or continuation
+  authority. Loss of a verified owner withdraws that source's annotations.
 - Spaces counts only verified, non-stopped worker bindings in that workspace,
   with a compact held/paused/unknown count when applicable. It is a separate
   workspace report, not an aggregation of native activity.

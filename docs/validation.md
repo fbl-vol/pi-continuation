@@ -24,8 +24,11 @@ snapshots, concurrent Pause and isolated transport/ownership failure. Fake-clock
 renewal checks inspect requested TTL; they do not prove native expiry behavior.
 `test/annotations-flow.test.mjs` checks the ordinary binder's Pause/Stop/Return
 metadata and that slow optional metadata cannot delay authority-subscription
-withdrawal on shutdown. Prior disposable Linux Herdr 0.9.5 rendering evidence
-covers compact narrow labels, token colors, ordinary-row elision, stale-sequence
+withdrawal on shutdown. Missing/mismatched initial native-owner regressions use
+valid workers and assert zero pane/workspace reports while ordinary enrollment
+and one exact-stop continuation still succeed; happy display flows pin the native
+owner instead of waiving its witness. Prior disposable Linux Herdr 0.9.5 rendering
+evidence covers compact narrow labels, token colors, ordinary-row elision, stale-sequence
 rejection and pane/workspace TTL expiry—not this adapter's live lifecycle or native
 20-worker scale. No current-adapter live or Windows/macOS runtime claim is made.
 

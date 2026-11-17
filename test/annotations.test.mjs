@@ -27,19 +27,38 @@ async function fixture(t, options = {}) {
     agents: [{ agent: 'pi', pane_id: 'w:p1', terminal_id: 'terminal', workspace_id: 'w',
       tab_id: 'w:t1', cwd: root, agent_status: 'working',
       agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: file } }] };
+  const ownerFile = join(root, 'owner.jsonl');
+  const ownerBinding = { paneId: 'w:p0', terminalId: 'owner', workspaceId: 'w', tabId: 'w:t1',
+    cwd: root, sessionId: state.supervisorSession, sessionFile: ownerFile,
+    sessionKind: 'path', sessionValue: ownerFile };
+  live.agents.push({ ...live.agents[0], pane_id: ownerBinding.paneId, terminal_id: ownerBinding.terminalId,
+    agent_session: { ...live.agents[0].agent_session, value: ownerFile } });
   const calls = [], errors = [];
   let clock = 0;
   const transport = async (_socket, method, params) => { calls.push({ method, params: structuredClone(params) }); return { type: 'ok' }; };
-  const overrides = typeof options === 'function' ? options({ root, state, binding, live, calls }) : options;
-  const reporter = createAnnotations({ root, socketPath: 'fake', ownerToken: state.ownerToken,
+  const overrides = typeof options === 'function' ? options({ root, state, binding, ownerBinding, live, calls }) : options;
+  const reporter = createAnnotations({ root, socketPath: 'fake', ownerToken: state.ownerToken, ownerBinding,
     readState: () => structuredClone(state), readSnapshot: async () => structuredClone(live),
     transport, now: () => clock, onError: error => errors.push(error), ...overrides });
   t.after(async () => { await reporter.close(); await rm(root, { recursive: true, force: true }); });
-  return { root, state, binding, observation, live, reporter, calls, errors, saveObservation,
+  return { root, state, binding, ownerBinding, observation, live, reporter, calls, errors, saveObservation,
     clock: value => { clock = value; } };
 }
 
-const paneCalls = f => f.calls.filter(c => c.method === 'pane.report_metadata');
+const paneCalls = f => f.calls.filter(c => c.method === 'pane.report_metadata' && c.params.pane_id === f.binding.paneId);
+const ownerCalls = f => f.calls.filter(c => c.method === 'pane.report_metadata' && c.params.pane_id === f.ownerBinding.paneId);
+
+test('a missing initial owner witness disables all display reports without mutating supervision', async t => {
+  const f = await fixture(t, { ownerBinding: undefined });
+  const before = structuredClone(f.state);
+  await f.reporter.refresh();
+  f.clock(5000);
+  await f.reporter.refresh();
+  await f.reporter.close();
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.state, before);
+  assert.deepEqual(f.errors, [], 'Unavailable annotations are not a control failure');
+});
 
 test('verified workers and separate workspace summaries publish only expiring namespaced display values', async t => {
   const f = await fixture(t);
@@ -103,7 +122,7 @@ test('Stop and native identity replacement clear annotations, never follow the r
   const f = await fixture(t);
   f.live.agents.push({ ...f.live.agents[0], pane_id: 'w:p2' });
   await f.reporter.refresh();
-  assert.ok(paneCalls(f).every(c => c.params.pane_id === 'w:p1'));
+  assert.ok(f.calls.filter(c => c.method === 'pane.report_metadata').every(c => ['w:p1', 'w:p0'].includes(c.params.pane_id)));
   f.binding.stopped = true;
   f.binding.paused = true;
   await f.reporter.refresh();
@@ -152,22 +171,15 @@ test('missing observations publish unknown rather than an eligible-looking activ
 
 test('a pinned native supervisor gets its own badge, and replacement withdraws its whole display source', async t => {
   let replaceDuringRead = false, reads = 0;
-  const f = await fixture(t, ({ root, state, binding, live }) => {
-    const file = join(root, 'owner.jsonl');
-    const ownerBinding = { ...binding, workerId: undefined, paneId: 'w:p0', terminalId: 'owner',
-      sessionId: state.supervisorSession, sessionFile: file, sessionValue: file };
-    live.agents.push({ ...live.agents[0], pane_id: 'w:p0', terminal_id: 'owner',
-      agent_session: { ...live.agents[0].agent_session, value: file } });
-    return { ownerBinding, readSnapshot: async () => {
-      if (replaceDuringRead && ++reads === 2) live.agents.find(a => a.pane_id === 'w:p0').terminal_id = 'replacement';
-      return structuredClone(live);
-    } };
-  });
+  const f = await fixture(t, ({ live }) => ({ readSnapshot: async () => {
+    if (replaceDuringRead && ++reads === 2) live.agents.find(a => a.pane_id === 'w:p0').terminal_id = 'replacement';
+    return structuredClone(live);
+  } }));
   await f.reporter.refresh();
-  assert.equal(paneCalls(f).find(c => c.params.pane_id === 'w:p0').params.tokens.pi_continuation, 'Supervisor');
+  assert.equal(ownerCalls(f).at(-1).params.tokens.pi_continuation, 'Supervisor');
   f.state.paused = true;
   await f.reporter.refresh();
-  assert.equal(paneCalls(f).filter(c => c.params.pane_id === 'w:p0').at(-1).params.tokens.pi_continuation, 'Supervisor: paused');
+  assert.equal(ownerCalls(f).at(-1).params.tokens.pi_continuation, 'Supervisor: paused');
   const before = f.calls.length;
   f.live.agents.find(a => a.pane_id === 'w:p0').terminal_id = 'replacement';
   await f.reporter.refresh();
@@ -234,7 +246,7 @@ test('a lost first acknowledgement still receives shutdown cleanup; another targ
   } }));
   await f.reporter.refresh();
   assert.equal(f.errors.length, 1);
-  assert.equal(f.calls[1].method, 'workspace.report_metadata');
+  assert.ok(f.calls.some(c => c.method === 'workspace.report_metadata' && c.params.tokens.pi_continuation_summary === '1 worker'));
   await f.reporter.close();
   assert.ok(paneCalls(f).some(c => Object.values(c.params.tokens).every(v => v === null)));
   assert.equal(f.state.workers[f.binding.workerId].paused, false);

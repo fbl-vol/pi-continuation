@@ -19,9 +19,11 @@ export function createAnnotations({ root, socketPath, ownerToken, ownerBinding, 
   let pending = Promise.resolve(), closing;
   const current = () => {
     const value = readState();
-    return value?.ownerToken === ownerToken && (!ownerBinding || value.supervisorSession === ownerBinding.sessionId) ? value : undefined;
+    // Missing native owner evidence disables display, not supervision authority.
+    return ownerBinding && value?.ownerToken === ownerToken &&
+      value.supervisorSession === ownerBinding.sessionId ? value : undefined;
   };
-  const ownerMatches = live => !ownerBinding ||
+  const ownerMatches = live => !!ownerBinding &&
     sameOccupant(live.agents.find(a => a.pane_id === ownerBinding.paneId), ownerBinding);
   const report = error => { failures++; if (!failed) { failed = true; onError(error); } };
   const send = async entry => {

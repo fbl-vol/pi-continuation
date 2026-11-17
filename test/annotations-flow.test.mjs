@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { checkpointHash } from '../src/policy.mjs';
 import { startFixture } from './fixtures/start-flow.mjs';
+
+function showOwner(f) {
+  const owner = { ...f.agents[0], pane_id: 's:p1', terminal_id: 'supervisor-terminal',
+    workspace_id: 's', tab_id: 's:t1',
+    agent_session: { ...f.agents[0].agent_session, value: f.supervisor.file } };
+  f.agents.push(owner);
+  return owner;
+}
 
 async function until(predicate) {
   const deadline = Date.now() + 5000;
@@ -12,6 +23,7 @@ async function until(predicate) {
 
 test('ordinary owner publishes display-only Pause, Stop withdrawal and retained own-session Return', async t => {
   const f = await startFixture(t);
+  showOwner(f);
   const frames = [];
   f.onRequest(req => {
     if (req.method.endsWith('.report_metadata')) { frames.push(req); return { type: 'ok' }; }
@@ -49,6 +61,7 @@ test('ordinary owner publishes display-only Pause, Stop withdrawal and retained 
 
 test('shutdown withdraws the authority subscription before waiting for slow optional metadata cleanup', { timeout: 10000 }, async t => {
   const f = await startFixture(t);
+  showOwner(f);
   let subscription, entered, release, failed;
   const started = new Promise(resolve => { entered = resolve; });
   const gate = new Promise(resolve => { release = resolve; });
@@ -74,3 +87,36 @@ test('shutdown withdraws the authority subscription before waiting for slow opti
   try { assert.equal(await Promise.race([withdrawn, metadataFailure]), 'withdrawn'); }
   finally { release(); await closing; }
 });
+
+for (const identity of ['missing', 'mismatched']) {
+  test(`initial ${identity} native owner disables annotations, not ordinary supervision`, async t => {
+    const f = await startFixture(t);
+    if (identity === 'mismatched') showOwner(f).agent_session.value = join(f.root, 'another-owner.jsonl');
+    const frames = [];
+    f.onRequest(req => {
+      if (req.method.endsWith('.report_metadata')) { frames.push(req); return { type: 'ok' }; }
+    });
+    await f.supervisorCommand('start');
+    await f.workerStart();
+    const before = await f.state();
+    const binding = before.workers[f.workerId()];
+    assert.equal(before.paused, false);
+    assert.equal(binding.paused, false);
+    assert.equal(before.routes[binding.route].paused, false);
+    const observed = await f.observation();
+    const answer = await f.supervisor.dispose({ workerId: f.workerId(), stop: observed.stop,
+      action: 'resume', evidence: observed.finalReply,
+      reportHash: checkpointHash(await readFile(binding.checkpoint, 'utf8')) });
+    assert.match(answer.content[0].text, /Continuation delivered to exact native stop/);
+    const after = await f.state();
+    assert.equal(after.ownerToken, before.ownerToken);
+    assert.equal(after.paused, false);
+    assert.equal(after.workers[f.workerId()].paused, false);
+    assert.equal(after.routes[binding.route].paused, false);
+    assert.equal(after.resumed[f.workerId()], observed.stop);
+    assert.equal(f.worker.messages.length, 1);
+    await f.supervisor.emit('session_shutdown'); // Drain display work before asserting absence.
+    assert.deepEqual(frames, [], 'No owner witness means no pane or workspace reports');
+    assert.equal(f.supervisor.notifications.some(([text]) => text.startsWith('Continuation annotations:')), false);
+  });
+}
