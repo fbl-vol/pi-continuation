@@ -58,6 +58,9 @@ export function decodeSupervisor(record) {
   }
   for (const worker of Object.values(state.workers)) {
     if (!object(worker) || typeof worker.paused !== 'boolean' || typeof worker.route !== 'string') invalid();
+    if (worker.stopped !== undefined && (worker.stopped !== true || worker.paused !== true ||
+        typeof worker.stoppedPaused !== 'boolean' || !isId(worker.stopToken))) invalid();
+    if (worker.stopped === undefined && (worker.stoppedPaused !== undefined || worker.stopToken !== undefined)) invalid();
   }
   for (const name of ['handled', 'dispositions', 'budgets', 'repair', 'notices', 'inflight']) {
     if (version === 0 && state[name] == null) state[name] = {};

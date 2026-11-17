@@ -2,6 +2,7 @@ import { bindObservation } from './observation.mjs';
 import { bindSupervisor } from './supervisor.mjs';
 import { bindCoordinator } from './coordinator.mjs';
 import { bindDelegation } from './delegation.mjs';
+import { bindManagement } from './management.mjs';
 
 /** Ordinary extension profile: explicit human controls, not exhaustive native UI coverage. */
 export function bindContinuation(pi, options = {}) {
@@ -10,8 +11,9 @@ export function bindContinuation(pi, options = {}) {
   options = { ...(process.env.PI_CONTINUATION_SPAWN && process.env.PI_CONTINUATION_ROOT ?
     { root: process.env.PI_CONTINUATION_ROOT } : {}), ...options };
   const worker = bindObservation(pi, { ...options, launchGuard: () => true, reviewCurrentReports: true });
-  bindSupervisor(pi, { ...options, allowExperimentalActivation: true });
+  const supervisor = bindSupervisor(pi, { ...options, allowExperimentalActivation: true });
   bindCoordinator(pi, options);
   bindDelegation(pi, worker, options);
+  bindManagement(pi, worker, supervisor, options);
   return worker;
 }

@@ -5,6 +5,33 @@ Tests/reviews verify it; they do not create requirements. Owner completion is no
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,
 real-worker migration, secrets or npm publication is implied.
 
+## Contextual management source evidence (unreleased)
+
+`test/management.test.mjs` exercises the actual ordinary binder, guarded native
+command callbacks, owner IPC, disk records and ownership mutexes with fake Pi/Herdr
+sessions. It checks selected versus sibling controls, duplicate labels, cancelled
+selection/confirmation, caller/target/owner changes, concurrent external prompts,
+unknown/corrupt observations and consumed control requests. Retained Stop tests
+preserve consumed-stop/budget history and independent pauses, reject unresolved
+continuations/notices/startups, distinguish listed Pause from withdrawn Stop, and
+refuse a Start confirmed before a concurrent Stop. These are local P1/P3/P4/P7
+checks, not live menu interaction, native platform or user acceptance.
+
+`test/annotations.test.mjs` checks namespaced/TTL/sequence payloads, unchanged-event
+deduplication and renewal, shutdown clearing including lost first acknowledgements,
+separate workspace counts, missing observations, owner/native replacement, stale
+snapshots, concurrent Pause and isolated transport/ownership failure. Fake-clock
+renewal checks inspect requested TTL; they do not prove native expiry behavior.
+`test/annotations-flow.test.mjs` checks the ordinary binder's Pause/Stop/Return
+metadata and that slow optional metadata cannot delay authority-subscription
+withdrawal on shutdown. Missing/mismatched initial native-owner regressions use
+valid workers and assert zero pane/workspace reports while ordinary enrollment
+and one exact-stop continuation still succeed; happy display flows pin the native
+owner instead of waiving its witness. Prior disposable Linux Herdr 0.9.5 rendering
+evidence covers compact narrow labels, token colors, ordinary-row elision, stale-sequence
+rejection and pane/workspace TTL expiry—not this adapter's live lifecycle or native
+20-worker scale. No current-adapter live or Windows/macOS runtime claim is made.
+
 ## Ordinary-extension evidence
 
 `npm test` uses fake Pi/Herdr, real local sockets and temporary state/processes,

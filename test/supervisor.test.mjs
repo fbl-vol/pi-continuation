@@ -53,6 +53,8 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     } else if (req.method === 'session.snapshot') {
       socket.end(JSON.stringify({ id: req.id, result: { type: 'session_snapshot',
         snapshot: { protocol: 22, agents: [agent, siblingAgent, coordinatorAgent] } } }) + '\n');
+    } else if (req.method.endsWith('.report_metadata')) {
+      socket.end(JSON.stringify({ id: req.id, result: { type: 'ok' } }) + '\n');
     } else assert.fail('unexpected Herdr method');
   }));
   let stopWorker;

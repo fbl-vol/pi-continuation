@@ -11,11 +11,13 @@ import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
+import { applyManagementControl, managementMessage } from './management.mjs';
+import { createAnnotations } from './annotations.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
-  resolveResume, setScopePaused, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
+  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
 
 const stateFile = root => join(root, 'supervisor.json');
 const lockFile = root => join(root, 'supervisor.lock');
@@ -24,7 +26,8 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
-  let state;
+  let state, displayState, annotations;
+  const annotationReport = diagnostics('annotations');
   const report = diagnostics('supervisor');
   let diagnosticContext;
   let closeOwner;
@@ -45,7 +48,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const saved = structuredClone(state);
     const writing = writes.then(async () => {
       if (persistenceFailed) saved.paused = true;
-      try { await atomicJson(stateFile(root), saved); }
+      try {
+        await atomicJson(stateFile(root), saved);
+        displayState = saved;
+        void annotations?.refresh();
+      }
       catch (error) {
         // Fence every entry point, including human commands outside the model queue.
         // A failed pause must not leave receivers trusting the old active snapshot.
@@ -53,6 +60,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         state.paused = true;
         subscriptionLive = false;
         closeEvents?.();
+        void annotations?.refresh();
         const closing = closeOwner;
         closeOwner = undefined;
         try { await closing?.(); }
@@ -285,13 +293,15 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     // Discovery read filters stale pane IDs; the authoritative read follows the
     // subscription acknowledgement so snapshot/event overlap remains safe.
     const discovery = await snapshot(socketPath);
-    const candidates = [...Object.values(state.workers).map(w => w.paneId),
+    const candidates = [...Object.values(state.workers).filter(w => !w.stopped).map(w => w.paneId),
       ...Object.values(state.routes).map(r => r.coordinator?.paneId).filter(Boolean)];
     const paneIds = candidates.filter(id => discovery.agents.some(a => a.pane_id === id));
     closeEvents?.();
     subscriptionLive = false;
     closeEvents = observe(socketPath, value => {
-      lastSnapshot = value; void queue(() => wake(ctx));
+      lastSnapshot = value;
+      void queue(() => wake(ctx));
+      void annotations?.refresh();
     }, error => {
       report('observe Herdr', error, ctx);
       state.failure = report.last;
@@ -315,6 +325,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
     }
   });
+
+  const startAnnotations = ctx => {
+    const agent = lastSnapshot.agents.find(a => a.pane_id === paneId);
+    const file = ctx.sessionManager.getSessionFile?.();
+    const candidate = { paneId, sessionId: ctx.sessionManager.getSessionId(), sessionFile: file,
+      cwd: ctx.cwd, terminalId: agent?.terminal_id, workspaceId: agent?.workspace_id,
+      tabId: agent?.tab_id, sessionKind: 'path', sessionValue: file };
+    annotations = createAnnotations({ root, socketPath, ownerToken: state.ownerToken,
+      readSnapshot: async () => lastSnapshot,
+      ownerBinding: file && sameOccupant(agent, candidate) ? candidate : undefined,
+      readState: () => active() && subscriptionLive &&
+        ctx.sessionManager.getSessionId() === displayState?.supervisorSession ? structuredClone(displayState) : undefined,
+      onError: error => annotationReport('publish display', error, ctx) });
+    void annotations.refresh();
+  };
 
   const acceptWorkerStart = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive || !allowExperimentalActivation)
@@ -352,7 +377,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           }
           state.routes[route] ??= { paused: false, coordinator: null };
           state.workers[request.workerId] ??= binding;
-          setScopePaused(state, 'worker', request.workerId, false);
+          if (binding.stopped) returnStoppedWorker(state, request.workerId);
+          else setScopePaused(state, 'worker', request.workerId, false);
           binding.lastStartNonce = request.nonce;
           await commit();
         });
@@ -380,9 +406,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
-  pi.registerCommand('continuation-supervisor', {
-    description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
-    handler: async (args, ctx) => {
+  const acceptManagement = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive) return { accepted: false, message: 'Supervisor unavailable' };
+    try {
+      return await applyManagementControl(root, request, state, () => snapshot(socketPath), commit);
+    } catch (error) {
+      report('manage worker', error, ctx);
+      return { accepted: false, message: managementMessage(error) };
+    }
+  });
+
+  const command = async (args, ctx) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
         notify(ctx, 'Herdr-managed Pi TUI required', 'error'); return;
@@ -417,7 +451,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const token = randomUUID();
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
-          closeOwner = await ownerServer(root, token, request => acceptWorkerStart(request, ctx));
+          closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
+            acceptManagement(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
@@ -449,6 +484,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           state.ownerPid = process.pid;
           await commit();
           await subscribe(ctx);
+          startAnnotations(ctx);
           watcher = watch(root, (_event, filename) => {
             // Own state/receipt writes must not retry a deferred notice in a hot loop.
             if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
@@ -458,9 +494,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             'Supervisor started; use /continuation-worker start in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
         } catch (error) {
+          const closingAnnotations = annotations?.close(); annotations = undefined;
           closeEvents?.(); closeEvents = undefined;
           await closeOwner?.(); closeOwner = undefined;
           await release(lockFile(root), token);
+          await closingAnnotations;
           throw error;
         }
         return;
@@ -586,7 +624,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         return;
       }
       notify(ctx, 'Unknown continuation-supervisor action', 'warning');
-    },
+  };
+  pi.registerCommand('continuation-supervisor', {
+    description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
+    handler: command,
   });
 
   pi.registerTool({
@@ -604,7 +645,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           return 'No active owner or missing evidence';
         if (!allowExperimentalActivation) return 'Activation disabled: prompt-hold boundary unverified';
         const binding = state.workers[args.workerId];
-        if (!binding || (args.action !== 'acknowledge' &&
+        if (!binding || binding.stopped || (args.action !== 'acknowledge' &&
             (state.paused || binding.paused || state.routes[binding.route]?.paused))) return 'Paused';
         lastSnapshot = await snapshot(socketPath);
         const reviewedAgent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
@@ -765,6 +806,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     });
   });
   pi.on('session_shutdown', async () => {
+    const closingAnnotations = annotations?.close(); annotations = undefined;
     watcher?.close(); closeEvents?.(); subscriptionLive = false;
     await serial; // Finish any queued receipt/notice before releasing the owner and state root.
     await writes; // Human command snapshots share this tail, not the model queue.
@@ -773,5 +815,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await closeOwner(); closeOwner = undefined;
       await release(lockFile(root), token);
     }
+    await closingAnnotations;
   });
+  return { get active() { return active(); }, command };
 }

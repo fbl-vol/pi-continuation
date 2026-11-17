@@ -53,6 +53,36 @@ Then send ordinary tasks normally. Fresh registrations get an automatically main
 
 Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
 
+## Session management (unreleased source)
+
+Use `/continuation` in a Herdr-managed Pi session to see its supervision status and
+known supervised workers. Native menus show session labels and status; exact IDs
+and checkpoint paths are available in Details rather than needed for normal use.
+An unsupervised planning session can inspect or pause a selected exact worker.
+Existing advanced commands remain available.
+
+- **Pause** changes only the selected worker and leaves it listed. Global controls
+  are available in the actual supervisor; their confirmations remain explicit.
+- **Stop supervising** withdraws the exact worker from the active list but retains
+  its identity, checkpoint, history, spent budgets, handled stops and receipts.
+  It refuses unresolved continuation, notices or delegated startup. This is not
+  permanent retirement and never terminates the Pi session.
+- **Return** is available only in that worker's own session, through the menu or
+  `/continuation-worker start`. It requires fresh explicit confirmation after Stop,
+  not an old in-flight start. A pause that predated Stop remains paused on return,
+  as do independent global/workspace pauses. Normal explicit worker activation
+  remains a separate action when such a pause needs lifting.
+
+Return does not answer approvals, select review findings, reset budgets or replay
+consumed/uncertain effects. Resolve the actual hold before returning. Changed
+session/owner identity or ambiguous control delivery requires inspection, not
+automatic retry. Installation alone still registers and activates nothing.
+
+Current source also reports compact, expiring supervision labels in Herdr's
+existing Agents/Spaces views. Native activity stays separate; badges never grant
+permission. See the [one-time optional sidebar setup](docs/herdr-annotations.md).
+No live configuration is rewritten and no extra plugin is required.
+
 ## Supervised delegation (unreleased source)
 
 For an already installed ordinary extension and an **already-running intended

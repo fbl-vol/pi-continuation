@@ -71,12 +71,16 @@ export async function workerStartCandidate(root, request, state, live, superviso
   const record = await readWorkerRegistration(root, request.workerId);
   if (record.managedInput !== true || record.stateRoot !== root || record.start?.nonce !== request.nonce ||
       record.start.ownerToken !== state.ownerToken ||
+      record.start.returnToken !== request.returnToken ||
       record.start.replaceWorkerId !== request.replaceWorkerId ||
       (request.replaceWorkerId !== undefined && !isId(request.replaceWorkerId)))
     throw new Error('Worker start has no matching confirmed opt-in');
   if (record.delegationId === request.nonce) await delegatedStart(root, record.delegationId, record, state, live);
   const agent = live.agents.find(item => item.pane_id === record.paneId);
   const existing = state.workers[request.workerId];
+  // A start confirmed before Stop cannot become an automatic post-Stop return.
+  if (existing?.stopped && request.returnToken !== existing.stopToken)
+    throw Object.assign(new Error('Stopped worker requires a fresh own-session return'), { code: 'WORKER_STOPPED' });
   const route = agent?.workspace_id;
   if (!route || (existing && (!sameOccupant(agent, existing) || existing.route !== route ||
       existing.checkpoint !== record.checkpoint)))

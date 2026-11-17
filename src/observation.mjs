@@ -254,15 +254,15 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     }
   });
 
+  const requestStart = async ctx => {
+    if (starting) { ctx.ui.notify('Worker start is already in progress', 'info'); return; }
+    starting = true;
+    try { return await startWorker(ctx); }
+    finally { starting = false; }
+  };
   pi.registerCommand('continuation-worker', {
     description: 'Start or return to supervision: start | advanced registration: <checkpoint> or --start {"checkpoint":"/path","message":"task"}',
-    handler: async (argument, ctx) => {
-      if (argument.trim() !== 'start') return registerWorker(argument, ctx);
-      if (starting) { ctx.ui.notify('Worker start is already in progress', 'info'); return; }
-      starting = true;
-      try { return await startWorker(ctx); }
-      finally { starting = false; }
-    },
+    handler: (argument, ctx) => argument.trim() === 'start' ? requestStart(ctx) : registerWorker(argument, ctx),
   });
 
   const registerWorker = async (argument, ctx, managed = false, delegated, stillEligible = () => true) => {
@@ -475,8 +475,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       if (guard.blocked || (!ctx.isIdle() && hold && holdReason !== 'typing')) {
         ctx.ui.notify('Resolve the current interruption or prompt and wait until idle before start', 'warning'); return;
       }
-      if (!await guard.confirm('Return worker to supervision?',
-        'Clear the resolved hold and enable this exact worker. Unanswered decisions are not approved; other scope pauses and delivery history remain unchanged.')) return;
+      const stopped = supervisor.workers[worker.workerId]?.stopped;
+      if (!await guard.confirm(stopped ? 'Return stopped worker to supervision?' : 'Return worker to supervision?',
+        stopped ? 'Rejoin this exact worker after resolving its hold. Pre-existing worker, global and workspace pauses, budgets and delivery history remain unchanged. No unanswered decision is approved.' :
+          'Clear the resolved hold and enable this exact worker. Unanswered decisions are not approved; other scope pauses and delivery history remain unchanged.')) return;
       const now = currentSession(ctx);
       if (version !== stopVersion || now.id !== session.id || now.file !== session.file ||
           now.leaf !== session.leaf || guard.blocked) {
@@ -502,7 +504,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     const record = worker;
     if (!record) return;
     record.stateRoot = root;
-    record.start = { nonce: delegated?.id ?? randomUUID(), ownerToken: supervisor.ownerToken };
+    record.start = { nonce: delegated?.id ?? randomUUID(), ownerToken: supervisor.ownerToken,
+      ...(supervisor.workers[record.workerId]?.stopped ?
+        { returnToken: supervisor.workers[record.workerId].stopToken } : {}) };
     try {
       await atomicJson(`${root}/worker-${record.workerId}.json`, record);
       const sendJoin = () => sendAction(root, { type: 'worker-start', workerId: record.workerId,
@@ -644,6 +648,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   // supervisor review evidence, never permission by itself.
   return {
     get registered() { return !!worker; }, get hold() { return hold; },
+    get interactionVersion() { return stopVersion; },
+    selectManagement(ctx, title, choices) { return promptsFor(ctx).select(title, choices); },
+    start: requestStart,
     get confirming() { return prompts?.confirming === true; },
     get promptBlocked() { return !prompts?.intact || prompts.blocked; },
     confirmDelegation(ctx, title, message) { return promptsFor(ctx).confirm(title, message); },

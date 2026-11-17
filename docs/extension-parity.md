@@ -85,6 +85,25 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
+### User-approved contextual management amendment (unreleased)
+
+The ordinary extension adds `/continuation`, a native menu for the current session
+and readable known worker labels, with exact identity available in Details. It
+reuses human confirmations and existing own-session Return; it does not add a model
+activation/hold-clear capability. Pause remains listed but inactive. Retained Stop
+withdraws the exact worker from the active list while retaining identity, history,
+checkpoint, budgets, handled stops, receipts and notices; unresolved effects refuse
+Stop. Only a fresh explicit OWN-session Start/Return may rejoin. A pre-Stop start,
+independent pauses, holds, consumed stops and uncertainty cannot be bypassed by
+returning. Permanent replacement retirement remains distinct. This extends the
+human control surface within P1/P3/P4/P7, not the seven-scenario acceptance set.
+
+Display-only Herdr annotations reuse the existing Agents/Spaces views and native
+snapshots. Exact verified bindings receive compact, namespaced, expiring labels;
+workspace counts are reported separately. Native activity and pane labels remain
+Herdr-owned. Badges never grant eligibility or control; their absence does not
+prove that no other supervisor exists. See [setup and display limits](herdr-annotations.md).
+
 ## Observable baseline scenarios
 
 These seven scenarios are the bounded acceptance set, not an exhaustive matrix.

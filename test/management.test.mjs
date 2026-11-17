@@ -1,0 +1,285 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { startFixture } from './fixtures/start-flow.mjs';
+import { newSupervisor, decodeSupervisor } from '../src/contracts.mjs';
+import { stopWorker, returnStoppedWorker, checkpointHash } from '../src/policy.mjs';
+import { managementSnapshot } from '../src/management.mjs';
+import { atomicJson } from '../src/store.mjs';
+import { sendAction } from '../src/ipc.mjs';
+
+async function started(t) {
+  const f = await startFixture(t);
+  await f.supervisorCommand('start');
+  await f.workerStart();
+  assert.ok(f.workerId());
+  return f;
+}
+
+async function planningSession(f) {
+  const planner = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2',
+    agent_session: { ...f.agents[0].agent_session, value: planner.file } });
+  await planner.emit('session_start');
+  return planner;
+}
+
+async function ownAction(f, action) {
+  let step = 0;
+  f.worker.select((_title, choices) => {
+    const choice = step++ === 0 ? 'This session: details' : action;
+    assert.ok(choices.includes(choice), JSON.stringify(choices));
+    return choice;
+  });
+  await f.worker.command('continuation', '');
+}
+
+async function resume(f) {
+  const observation = await f.observation();
+  const binding = (await f.state()).workers[f.workerId()];
+  return f.supervisor.dispose({ workerId: f.workerId(), stop: observation.stop,
+    action: 'resume', evidence: observation.finalReply,
+    reportHash: checkpointHash(await readFile(binding.checkpoint, 'utf8')) });
+}
+
+test('retained Stop withdraws the active row; own Return preserves identity, spent budget and consumed stop', async t => {
+  const f = await started(t);
+  assert.match((await resume(f)).content[0].text, /Continuation delivered/);
+  const before = await f.state();
+  const observed = await f.observation();
+  const checkpoint = before.workers[f.workerId()].checkpoint;
+  await ownAction(f, 'Stop supervising this worker');
+  const stopped = await f.state();
+  assert.equal(stopped.workers[f.workerId()].stopped, true, JSON.stringify(f.worker.notifications));
+  assert.equal(stopped.workers[f.workerId()].paused, true);
+  const view = await managementSnapshot(f.root, f.socketPath, f.worker.ctx);
+  assert.equal(view.workers.filter(w => !w.binding.stopped).length, 0);
+  assert.equal(view.own.status.label, 'Stopped');
+  assert.deepEqual(stopped.budgets, before.budgets);
+  assert.deepEqual(stopped.handled, before.handled);
+  assert.deepEqual(stopped.resumed, before.resumed);
+  assert.deepEqual(stopped.notices, before.notices);
+  assert.equal((await f.observation()).hold, observed.hold);
+  await assert.rejects(f.supervisorCommand(`activate worker ${f.workerId()}`), /own session/);
+  await f.workerStart();
+  const returned = await f.state();
+  assert.equal(returned.workers[f.workerId()].stopped, undefined);
+  assert.equal(returned.workers[f.workerId()].checkpoint, checkpoint);
+  assert.equal(returned.workers[f.workerId()].sessionId, f.worker.id);
+  assert.deepEqual(returned.retiredWorkers, {});
+  for (const key of ['budgets', 'handled', 'resumed', 'notices', 'repair'])
+    assert.deepEqual(returned[key], before[key], key);
+  assert.match((await resume(f)).content[0].text, /already delivered/);
+  assert.equal(f.worker.messages.length, 1);
+});
+
+test('Pause stays listed; Stop/Return preserves pre-existing worker, workspace and global pauses', async t => {
+  const f = await started(t);
+  await ownAction(f, 'Pause this worker');
+  let view = await managementSnapshot(f.root, f.socketPath, f.worker.ctx);
+  assert.equal(view.workers.filter(w => !w.binding.stopped).length, 1);
+  assert.equal(view.own.status.label, 'Paused');
+  await f.supervisorCommand('pause route w');
+  await f.supervisorCommand('pause global');
+  await ownAction(f, 'Stop supervising this worker');
+  await f.workerStart();
+  const state = await f.state();
+  assert.equal(state.paused, true);
+  assert.equal(state.routes.w.paused, true);
+  assert.equal(state.workers[f.workerId()].paused, true);
+  assert.equal(state.workers[f.workerId()].stopped, undefined);
+});
+
+test('Stop refuses a real accepted-but-uncertain continuation and retains its history', async t => {
+  const f = await started(t);
+  f.worker.pi.sendMessage = () => { throw new Error('synthetic recipient failure after acceptance'); };
+  assert.match((await resume(f)).content[0].text, /Ambiguous/);
+  const before = await f.state();
+  assert.ok(before.inflight[f.workerId()]);
+  await ownAction(f, 'Stop supervising this worker');
+  const after = await f.state();
+  assert.equal(after.workers[f.workerId()].stopped, undefined);
+  assert.deepEqual(after.inflight, before.inflight);
+  assert.match(f.worker.notifications.at(-1)[0], /Unresolved worker delivery/);
+});
+
+test('Stop refuses retained uncertain delegated startup, without deleting its attempt', async t => {
+  const f = await started(t);
+  const id = '11111111-1111-1111-1111-111111111111';
+  const path = join(f.root, `spawn-${id}.json`);
+  const attempt = { id, status: 'held', parent: { sessionId: 'parent', sessionFile: join(f.root, 'parent.jsonl') },
+    child: { sessionId: f.worker.id, sessionFile: f.worker.file } };
+  await atomicJson(path, attempt);
+  await ownAction(f, 'Stop supervising this worker');
+  assert.equal((await f.state()).workers[f.workerId()].stopped, undefined);
+  assert.match(f.worker.notifications.at(-1)[0], /Unresolved delegated startup/);
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), attempt);
+});
+
+test('an unsupervised planning session can pause the selected worker without activating or enrolling itself', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  planner.select((_title, choices) => choices.find(c => c.startsWith('1. ')) ?? 'Pause this worker');
+  await planner.command('continuation', '');
+  const state = await f.state();
+  assert.equal(state.workers[f.workerId()].paused, true, JSON.stringify(planner.notifications));
+  assert.equal(Object.keys(state.workers).length, 1);
+  assert.equal(state.paused, false);
+  assert.equal(state.routes.w.paused, false);
+});
+
+test('an own-session start confirmed before a concurrent Stop cannot automatically rejoin', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  planner.select((_title, choices) => choices.find(c => c.startsWith('1. ')) ?? 'Stop supervising this worker');
+  f.worker.confirm(async () => {
+    await planner.command('continuation', '');
+    assert.equal((await f.state()).workers[f.workerId()].stopped, true);
+    return true;
+  });
+  await f.workerStart();
+  assert.equal((await f.state()).workers[f.workerId()].stopped, true);
+  assert.match(f.worker.notifications.at(-1)[0], /fresh Start\/Return/);
+  f.worker.confirm(true);
+  await f.workerStart();
+  assert.equal((await f.state()).workers[f.workerId()].stopped, undefined);
+});
+
+test('retained Stop refuses each unresolved notice state and never mutates history on refusal', () => {
+  for (const status of ['pending', 'sending', 'uncertain']) {
+    const state = newSupervisor();
+    state.workers.worker = { paused: false, route: 'w' };
+    state.notices.notice = { workerId: 'worker', status };
+    const before = structuredClone(state);
+    assert.throws(() => stopWorker(state, 'worker'), /Unresolved/);
+    assert.deepEqual(state, before);
+  }
+});
+
+test('stopped representation cannot decode as active or lose its prior pause', () => {
+  const state = newSupervisor();
+  state.workers.worker = { paused: false, route: 'w' };
+  stopWorker(state, 'worker', '11111111-1111-1111-1111-111111111111');
+  assert.equal(decodeSupervisor(state).workers.worker.stopped, true);
+  assert.throws(() => decodeSupervisor({ ...state, workers: { worker: { ...state.workers.worker, paused: false } } }));
+  const malformed = structuredClone(state);
+  delete malformed.workers.worker.stoppedPaused;
+  assert.throws(() => decodeSupervisor(malformed));
+  returnStoppedWorker(state, 'worker');
+  assert.equal(state.workers.worker.paused, false);
+});
+
+for (const cancel of ['selection', 'confirmation']) {
+  test(`cancelled management ${cancel} has no control effect or saved intent`, async t => {
+    const f = await started(t);
+    const before = await f.state();
+    if (cancel === 'confirmation') {
+      f.worker.confirm(false);
+      await ownAction(f, 'Stop supervising this worker');
+    } else await f.worker.command('continuation', '');
+    assert.deepEqual(await f.state(), before);
+    assert.equal((await readdir(f.root)).some(name => /^management-/.test(name)), false);
+  });
+}
+
+test('duplicate labels select only the addressed worker and preserve sibling settings', async t => {
+  const f = await started(t);
+  f.agents[0].name = 'Same name';
+  const other = f.native('w:p3');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p3',
+    agent_session: { ...f.agents[0].agent_session, value: other.file } });
+  await other.emit('session_start');
+  await other.command('continuation-worker', 'start');
+  const planner = await planningSession(f);
+  planner.select((_title, choices) => {
+    const labels = choices.filter(c => /^\d+\./.test(c));
+    if (!labels.length) return 'Pause this worker';
+    assert.equal(labels.length, 2);
+    assert.equal(new Set(labels).size, 2);
+    return labels[1];
+  });
+  await planner.command('continuation', '');
+  const state = await f.state();
+  assert.equal(state.workers[f.workerId()].paused, false);
+  assert.equal(Object.values(state.workers).find(w => w.sessionId === other.id).paused, true);
+});
+
+test('replacement while the selected-worker menu is open refuses the old target', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  planner.select(async (_title, choices) => {
+    const row = choices.find(c => c.startsWith('1. '));
+    if (row) return row;
+    await f.replaceWorker();
+    return 'Pause this worker';
+  });
+  await planner.command('continuation', '');
+  assert.match(planner.notifications.at(-1)[0], /Selected session changed/);
+  assert.equal(Object.keys((await f.state()).workers).length, 1);
+});
+
+test('owner replacement during the menu cannot redirect own Return or clear its hold', async t => {
+  const f = await started(t);
+  f.worker.raw('\u001b');
+  await f.worker.emit('agent_settled', { aborted: true });
+  f.worker.select(async () => {
+    await f.supervisor.emit('session_shutdown');
+    const next = f.native('s:p2');
+    next.ctx.isIdle = () => false;
+    await next.command('continuation-supervisor', 'start');
+    return 'Return this session to supervision';
+  });
+  await f.worker.command('continuation', '');
+  assert.match(f.worker.notifications.at(-1)[0], /Supervisor or selected session changed/);
+  assert.equal((await f.observation()).hold, true);
+});
+
+test('corrupt observations stay visibly unknown without exposing raw record contents', async t => {
+  const f = await started(t);
+  await writeFile(join(f.root, `observation-${f.workerId()}.json`), 'private-sentinel-invalid-json');
+  const view = await managementSnapshot(f.root, f.socketPath, f.worker.ctx);
+  assert.equal(view.own.status.kind, 'unavailable');
+  await ownAction(f, 'Details');
+  assert.match(f.worker.notifications.at(-1)[0], /Observation unavailable/);
+  assert.equal(f.worker.notifications.some(([message]) => message.includes('private-sentinel')), false);
+});
+
+test('a consumed native management intent cannot be replayed or changed into activation', async t => {
+  const f = await started(t);
+  await ownAction(f, 'Pause this worker');
+  const name = (await readdir(f.root)).find(n => /^management-[a-f0-9-]{36}\.json$/.test(n));
+  const intent = JSON.parse(await readFile(join(f.root, name), 'utf8'));
+  const result = await sendAction(f.root, { type: 'management-control', id: intent.id,
+    ownerToken: intent.ownerToken, action: 'activate', enabled: true }, 'supervisor');
+  assert.equal(result.accepted, false);
+  assert.equal((await f.state()).workers[f.workerId()].paused, true);
+});
+
+test('a concurrent external prompt invalidates management selection and keeps the immediate worker hold', async t => {
+  const f = await started(t);
+  f.worker.select(async () => {
+    await f.worker.ctx.ui.input('Unrelated approval');
+    return 'Return this session to supervision';
+  });
+  await f.worker.command('continuation', '');
+  assert.equal(f.worker.continuation.hold, true);
+  assert.equal((await f.state()).workers[f.workerId()].paused, false);
+  assert.match(f.worker.notifications.at(-1)[0], /Session or prompt changed/);
+  assert.equal((await readdir(f.root)).some(name => /^management-/.test(name)), false);
+});
+
+for (const unresolved of ['bootstrap', 'unverifiable spawn']) {
+  test(`Stop refuses ${unresolved} without hiding retained uncertainty`, async t => {
+    const f = await started(t);
+    if (unresolved === 'bootstrap') {
+      await atomicJson(join(f.root, `observation-${f.workerId()}.json`), {
+        ...await f.observation(), outcome: 'unknown', stop: null, bootstrapPending: true, hold: true });
+    } else {
+      await atomicJson(join(f.root, 'spawn-11111111-1111-1111-1111-111111111111.json'), { status: 'held' });
+    }
+    await ownAction(f, 'Stop supervising this worker');
+    assert.equal((await f.state()).workers[f.workerId()].stopped, undefined);
+    assert.match(f.worker.notifications.at(-1)[0], /inspect before Stop/);
+  });
+}

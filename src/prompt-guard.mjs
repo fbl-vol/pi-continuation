@@ -36,6 +36,18 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
     }
   };
 
+  const owned = async (name, args) => {
+    if (!intact() || busy()) return;
+    const before = revision;
+    own++;
+    let result;
+    try {
+      result = await (name === 'confirm' && scope ? scope.confirmOwned(ui, ...args) :
+        originals.get(name).apply(ui, args));
+    } finally { own--; }
+    if (intact() && !busy() && revision === before) return result;
+  };
+
   try {
     for (const name of methods) {
       if (typeof ui[name] !== 'function') throw new Error('Unsupported prompt UI surface');
@@ -69,15 +81,8 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
       signal();
     },
     end() { lifecycleExternal = false; },
-    async confirm(...args) {
-      if (!intact() || busy()) return false;
-      const before = revision;
-      own++;
-      let accepted;
-      try { accepted = await (scope ? scope.confirmOwned(ui, ...args) : originals.get('confirm').apply(ui, args)); }
-      finally { own--; }
-      return accepted === true && intact() && !busy() && revision === before;
-    },
+    async confirm(...args) { return await owned('confirm', args) === true; },
+    select(...args) { return owned('select', args); },
     dispose: restore,
   };
 }

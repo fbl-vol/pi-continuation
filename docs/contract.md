@@ -16,6 +16,35 @@ Herdr may report blocked before any assistant stop exists. The supervisor owns a
 
 Shared-UI calls are synchronously observed before display. Registration/hold-clear confirmations pin prompt revisions. External prompts, errors and Escape create sticky holds; closing a dialog or starting a turn cannot clear them. Advanced registration retains sticky keyboard holds. Start-opted-in workers fence raw typing immediately, but ordinary interactive/RPC input releases only a provisional typing hold and invalidates the old report before any agent startup; a later input handler consuming the task cannot expose that old stop. Detected wrapper displacement stays invalid even if restored. These existing protections remain, but do not claim exhaustive native/third-party UI observation. Hidden/unreported prompts and cross-process changes between checks are baseline limitations, not reasons to silently expand scope or bypass genuine approvals.
 
+## Contextual human management (unreleased)
+
+`/continuation` uses native guarded selection and confirmation, not model-callable
+activation or synthetic input. It shows the current session, readable known worker
+labels, and details including independent pauses, hold state and spent nudges.
+Duplicate labels remain separately addressed. Cancellation, changed caller/target
+identity or owner replacement refuses the stale action. Missing/corrupt observations
+remain visibly unknown; raw record/error payloads are not displayed.
+
+Pause/Stop requests persist one-use native confirmations pinned to the requesting
+Pi/Herdr identity, exact target binding and supervisor session/owner. The existing
+owner endpoint revalidates these under the worker ownership mutex and serializes
+the durable transition. This IPC accepts only Pause and Stop, never activation or
+hold-clear. Loss/uncertainty is inspection work, not replay permission. Native own
+Return and supervisor-global controls reuse the existing confirmed start/control
+paths; another session cannot remotely clear a worker's hold.
+
+Pause stays in the active list. Retained Stop keeps the worker binding and keyed
+history but marks it stopped/paused and withdraws it from active attention/listing.
+It refuses unresolved resume/notices or related unfinished delegated startup.
+Checkpoint, observations, receipts, budgets, handled stops and notices are not
+removed or reset. Ordinary activation and model dispositions cannot rejoin it.
+Only a fresh confirmed own-session Start carrying the current per-Stop token can
+return; a Start confirmed before a concurrent Stop is stale. Return preserves any
+worker pause predating Stop, independent global/route pauses and all no-replay and
+budget guards. Existing resolved-hold confirmation remains required. Permanent
+replacement retirement is a distinct operation and is not reused for Stop.
+Do not downgrade a stopped retained registration to binaries lacking this contract.
+
 ## Registration and effects
 
 Registration pins an existing canonical checkpoint and rejects duplicate paths or worker/control-role collisions. Ordinary plain enrollment captures an already-idle report after session-entry/ready publication, using the current leaf; error/missing-reply reports stay held. A working enrollment requires a fresh assistant report, not a prior idle reply. Capture sends no task and activates no scope; handoff still marks its inherited stop handled/no-resend. The optional JSON `--start` envelope separates checkpoint from explicit initial user text. Setup is provisional until its synchronous ready marker; prompt/input/turn/session interruption prevents publication/message dispatch. No await separates final live checks, ready commit and initial message dispatch. A void send API is not acceptance: a matching `before_agent_start` then `agent_start` confirms the initial run. No matching run in 30 seconds creates a hold without blind resend. Restart while pending remains held.
@@ -38,8 +67,9 @@ Two nudges without evidenced checkpoint progress exhaust only that worker's budg
 
 ## Persistence and module boundaries
 
-- `ordinary.mjs` composes native roles and the scoped delegation binder; `delegation.mjs` owns parent grants, one-shot spawn intents, bootstrap handshake and inherited-scope validation; `session.mjs` reads Pi identity. Historical SDK launcher/runtime/editor/trust sources are excluded from the ordinary npm payload and preserved on the labelled experimental branch.
+- `ordinary.mjs` composes native roles, contextual human management and the scoped delegation binder; `delegation.mjs` owns parent grants, one-shot spawn intents, bootstrap handshake and inherited-scope validation; `session.mjs` reads Pi identity. Historical SDK launcher/runtime/editor/trust sources are excluded from the ordinary npm payload and preserved on the labelled experimental branch.
 - `observation.mjs` owns worker lifecycle, registration and durable holds; `checkpoint.mjs` renders native projected task/result evidence; `prompt-guard.mjs` owns observed shared-UI revisions/confirmations/integrity. Optional historical scope stamps remain readable and cannot silently downgrade an eligible stop.
+- `management.mjs` owns the contextual menu and native Pause/Stop requests; `status.mjs` derives display-only labels, never eligibility or authority. `annotations.mjs` projects these labels through the existing supervisor lifetime and subscribed native snapshots into namespaced, sequenced, expiring Herdr pane/workspace tokens. It checks exact owner/native bindings and handoff, clears its own source on loss/removal/shutdown, and never owns eligibility or changes permissions. Metadata cleanup does not delay withdrawal of the authority subscription/endpoint. See [sidebar setup and freshness limits](herdr-annotations.md).
 - `supervisor.mjs` owns confirmations, Herdr attention, resources and effect ordering; `policy.mjs` owns deterministic disposition/budget/recovery transitions, never I/O or activation. `attention.mjs` labels untrusted evidence without interpreting it.
 - `bindings.mjs` joins native identities and enforces pinned checkpoints; `herdr.mjs`/`subscription.mjs` own discovery; `ipc.mjs` owns local framing/lifetime. Worker and coordinator receivers own final acceptance.
 - `contracts.mjs` decodes supervisor/observation `schemaVersion: 1`, independently of stop-generation `version`. Original unversioned records stay readable: old handled stops retain conservative no-resend guards; missing hold is held. The advisory `blocked` map is additive and defaults empty only when absent. Malformed fields/unsupported formats fail closed, not into empty authority.
