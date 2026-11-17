@@ -97,7 +97,8 @@ async function fixture(t, { coordinatorInput = false, ordinary = false, priorHan
     registerCommand: (name, definition) => {
       if (name === 'continuation-supervisor') command = definition.handler;
     },
-    registerTool: definition => { tool = definition.execute; }, sendMessage: message => wakes.push(message) };
+    registerTool: definition => { if (definition.name === 'continuation_disposition') tool = definition.execute; },
+    sendMessage: message => wakes.push(message) };
   if (ordinary) bindContinuation(supervisorPi, { root, socketPath });
   else bindSupervisor(supervisorPi, { root, socketPath, allowExperimentalActivation: true });
   t.after(async () => {

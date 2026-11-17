@@ -9,7 +9,7 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Pins a worker's current saved Pi session, checkpoint, terminal, pane, cwd and workspace. A replacement/fork never silently inherits registration.
 - Uses Pi lifecycle/persistence/messaging and Herdr's existing identity/status reporting. The dedicated supervisor interprets the final reply and checkpoint against the **whole assignment**, including follow-ups. A favorable review alone is not completion; interpretation never grants new authority.
 - Gives blocked workers attention even mid-turn, before an assistant stop exists. Herdr status evidence is explicitly labeled, not a fabricated worker reply or resumable native stop. Blocked/held workers cannot be resumed or declared complete. Genuine approval requests require a decision/pause, not invented approval.
-- Keeps human-confirmed global, route and worker control. Model tools cannot activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
+- Keeps human-confirmed global, route and worker control. Only the unreleased scoped delegation path can enroll its newly created worker without per-worker confirmation; model tools cannot otherwise activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
 - Delivers through a worker-owned local receiver, not `agent.prompt`. A final Herdr identity/status/sequence check precedes addressed delivery; the receiver rechecks exact native stop, session, owner, hold and pauses. One-use receipts prevent replay. Uncertain delivery pauses for inspection, not retry.
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
@@ -53,6 +53,47 @@ Then send ordinary tasks normally. Fresh registrations get an automatically main
 
 Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
 
+## Supervised delegation (unreleased source)
+
+For an already installed ordinary extension and an **already-running intended
+supervisor**, the planning session need not enroll in continuation:
+
+1. In the planning session, authorize the assignment once with
+   `/continuation-delegate writer <bounded assignment scope>` (or `read-only`) and confirm that scope.
+2. The agent calls `continuation_spawn` with a stable `key`, `task`, and `role`
+   (`writer` or `read-only`). It creates a new unfocused Herdr pane, starts normal
+   Pi, verifies native identity, enrolls with that exact supervisor, and only then
+   sends the task. No worker enrollment command or per-worker confirmation.
+3. New workers inherit the same scoped delegation authority. Read-only children
+   cannot create writers. A writer may delegate read-only work, not a second writer
+   against the same checkout. The planning parent must stop editing before handing
+   implementation to a writer.
+
+The grant pins the displayed supervisor session, cwd, scope and role ceiling.
+Writer grants require Git on PATH and pin the checkout's Git common directory;
+subdirectories cannot acquire separate writer claims for that same checkout.
+The native scope grant is deliberate authorization, not automatic interpretation
+of brainstorming or a model-controlled activation flag. Normal startup must load
+this extension in the child profile/project; no installation/settings/SDK launcher
+is performed. Missing loading or changed supervisor identity holds the attempt.
+Global, route and parent-worker pauses/holds remain independent and are not lifted.
+`/continuation-delegate revoke` in the originating planning session stops further
+delegation for the tree; existing worker supervision is unchanged. Revoke the
+current tree before authorizing a different scope in that same planning session.
+
+Keep the same key for an assignment. Duplicate keys/exact tasks are refused;
+uncertain effects and writer claims remain retained for inspection, never retried
+or automatically released. Do not change keys or delete private claims to force
+another spawn. Scope membership and read-only behavior still require cooperating
+agents; this is not a filesystem sandbox. Delegation grants no new secrets,
+deployment/publication authority or acceptance. Awaiting **user selection of review
+findings** is a decision pause, not permission to resume and apply fixes.
+
+Only isolated fake Pi/Herdr and temporary-state tests have exercised this path.
+No live delegated-worker or native Windows/macOS runtime acceptance is claimed.
+The [approved amendment and P1–P7 scenarios](docs/extension-parity.md) define its
+bounded protections and recovery limits.
+
 ## Development and disposable use
 
 Run `npm ci --legacy-peer-deps`, `npm test`, and `npm run check:package`. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.
@@ -84,6 +125,6 @@ State lives in the private per-user `~/.pi-continuation` directory, not the sour
 
 The partial SDK/native-UI detour is preserved on [`experiment/sdk-host-native-ui-deferred`](https://github.com/fbl-vol/pi-continuation/tree/experiment/sdk-host-native-ui-deferred), explicitly **not accepted or part of ordinary package delivery**. Historical experimental source/tests remain in Git; the normal package ships neither its executable nor runtime/editor/trust resources. Their tests are historical regression evidence, not new parity requirements or a reason to expand native-UI work.
 
-For an authorized disposable installation, `pi remove /absolute/path/to/pi-continuation` removes the package. This extension never autonomously installs packages, starts workers, migrates supervisors, changes timers or publishes npm.
+For an authorized disposable installation, `pi remove /absolute/path/to/pi-continuation` removes the package. This extension never autonomously installs packages, creates/replaces supervisors, migrates supervision, changes timers or publishes npm. Worker creation is limited to the explicitly scoped delegated path described above.
 
 MIT licensed. Package name: `@fbl-vol/pi-continuation`. This alpha is available from GitHub, not npm.

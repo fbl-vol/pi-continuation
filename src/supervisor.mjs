@@ -9,6 +9,7 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
+import { spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
@@ -124,10 +125,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       else {
         try {
           await checkpointPath(id);
-          const persisted = await checkWorkerHandoff(root, id, binding);
-          if (persisted && binding.pendingSession) {
-            delete binding.pendingSession;
-            changed = true;
+          if (binding.delegationId) {
+            const spawn = await readJson(spawnPath(root, binding.delegationId));
+            if (spawn.status === 'held' || (spawn.status !== 'dispatched' && (await readObservation(root, id)).stop))
+              reason = 'Delegated startup/task delivery requires inspection';
+          }
+          if (!reason) {
+            const persisted = await checkWorkerHandoff(root, id, binding);
+            if (persisted && binding.pendingSession) {
+              delete binding.pendingSession;
+              changed = true;
+            }
           }
         } catch (error) {
           reason = error.code === 'OWNERSHIP_FENCE' ? 'Worker ownership unavailable' : 'Worker checkpoint unavailable';
@@ -330,6 +338,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               throw Object.assign(new Error('Replacement changed'), { code: 'WORKER_CONFLICT' });
           }
           if (!active() || !subscriptionLive || promptActive || version !== inputVersion ||
+              (binding.delegationId === request.nonce && (state.paused || state.routes[route]?.paused)) ||
               (state.workers[request.workerId] && state.workers[request.workerId] !== binding))
             throw new Error('Supervisor changed during worker start');
           if (replacement && !request.replaceWorkerId)
@@ -442,7 +451,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           await subscribe(ctx);
           watcher = watch(root, (_event, filename) => {
             // Own state/receipt writes must not retry a deferred notice in a hot loop.
-            if (filename && /^observation-.*\.json$/.test(filename.toString()))
+            if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
               void queue(() => wake(ctx));
           });
           notify(ctx, verb === 'start' ?

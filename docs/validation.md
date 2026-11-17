@@ -32,6 +32,32 @@ Five selected blocked/final-recheck regressions failed against isolated pre-chan
 source, then passed on the ordinary implementation. No production source was
 modified for that red comparison. Deterministic policy tests are not model judgment.
 
+## Unreleased scoped delegation (P1–P7)
+
+`test/delegation.test.mjs` composes the ordinary extension with fake native Pi
+sessions, fake protocol-22 Herdr creation/start responses, actual local bootstrap /
+owner / receiver IPC, and private temporary records. It checks an unsupervised
+planning parent, exact-child enrollment before task injection, supervised read-only
+subdelegation, scoped native grant/cancellation/revocation, writer exclusion,
+unchanged owner identity, independent pauses, replacement identity refusal,
+concurrent/duplicate keys and exact tasks, lost creation/start/enrollment/task
+responses, accepted-but-unobserved native run, cancellation, and the user
+finding-selection decision pause. Guidance checks are not proof of model judgment.
+
+A first-task race reproduced during validation: native journal creation between an
+ownership observer's `realpath` and `lstat` falsely paused the new worker. A
+controlled real-filesystem regression reproduced the failure before the correction;
+it now accepts only the same canonical regular file while existing symlink,
+missing-established-journal and ownership fences remain tested.
+
+Native startup/tool/messaging shapes were checked against installed Pi 1.5.2
+extension documentation/source and the installed Herdr 0.9.5 protocol-22 schema.
+This is source/isolated transport evidence, **not a live delegated spawn trial**,
+installation, settings change, real-model acceptance or native Windows/macOS
+runtime verification. The reported main-branch Windows failure at
+`test/supervisor.test.mjs:133` remains unconfirmed and is not claimed cleared by
+Linux tests. Existing release-version and model/platform evidence gaps remain.
+
 ## Unreleased blank-session correction (P1/P2/P7)
 
 A real alpha.2 blank-worker start exposed a fixture gap: Pi allocates a journal

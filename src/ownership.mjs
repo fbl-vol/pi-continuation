@@ -144,12 +144,19 @@ async function workerFence(root, workerId, binding, { effect = false } = {}) {
   try { sessionFile = await realpath(binding.sessionFile); }
   catch (error) {
     if (error.code !== 'ENOENT' || !binding.pendingSession || reference !== undefined || effect) throw error;
-    // Only an absent leaf in the pinned canonical directory is provisional.
-    // A dangling symlink, missing parent, handoff or effect still fails closed.
-    try { await lstat(binding.sessionFile); fail('pending journal is not an absent file'); }
+    // Native Pi may persist the first task between realpath and lstat. Accept
+    // that regular file only after resolving/checking the same canonical pin;
+    // a symlink, missing parent, handoff or effect still fails closed.
+    let leaf;
+    try { leaf = await lstat(binding.sessionFile); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    sessionFile = join(await realpath(dirname(binding.sessionFile)), basename(binding.sessionFile));
-    pending = true;
+    if (leaf) {
+      if (!leaf.isFile()) fail('pending journal is not an absent file');
+      sessionFile = await realpath(binding.sessionFile);
+    } else {
+      sessionFile = join(await realpath(dirname(binding.sessionFile)), basename(binding.sessionFile));
+      pending = true;
+    }
   }
   if (binding.pendingSession) {
     if (sessionFile !== binding.pendingSession) fail('pending journal identity changed');

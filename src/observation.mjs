@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { access, lstat, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { atomicJson, atomicText, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { atomicJson, atomicText, claim, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { delegatedStart, delegationAuthority, requireDelegationParent, spawnPath } from './delegation.mjs';
+import { sameOccupant, isSettled, snapshot } from './herdr.mjs';
 import { ownerAlive, sendAction } from './ipc.mjs';
 import { managedCheckpointPath, managedCheckpointText } from './checkpoint.mjs';
 import { receive } from './receiver.mjs';
@@ -263,7 +265,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     },
   });
 
-  const registerWorker = async (argument, ctx, managed = false) => {
+  const registerWorker = async (argument, ctx, managed = false, delegated, stillEligible = () => true) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
       }
@@ -303,10 +305,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         ctx.ui.notify('Existing checkpoint path required', 'error'); return;
       }
       const session = currentSession(ctx);
-      if (guard.blocked || guard.revision !== registrationRevision || stopVersion !== registrationVersion) {
+      if (!stillEligible() || guard.blocked || guard.revision !== registrationRevision || stopVersion !== registrationVersion) {
         ctx.ui.notify('Registration interrupted by another interaction; inspect before retrying.', 'warning'); return;
       }
-      if (!await guard.confirm(managed ? 'Start worker supervision?' : 'Register continuation worker?', managed ?
+      if (!delegated && !await guard.confirm(managed ? 'Start worker supervision?' : 'Register continuation worker?', managed ?
         'Join the running supervisor and enable this exact session. Ordinary task messages remain supervised; Escape, prompts and errors stop it. Confirm no other continuation owner supervises this worker.' :
         `Bind this session and checkpoint for observation?\n${checkpoint}${initialMessage ?
           '\nStart the explicitly supplied initial user message after registration?' : ''}`)) return;
@@ -315,7 +317,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       }
       const record = { workerId, sessionId: session.id, sessionFile: session.file,
         paneId, checkpoint, cwd: ctx.cwd, socketPath, stateRoot: root, paused: true, requiresReady: true,
-        ...(managed ? { managedInput: true, managedCheckpoint: true } : {}) };
+        ...(managed ? { managedInput: true, managedCheckpoint: true } : {}),
+        ...(delegated ? { delegationId: delegated.id } : {}) };
       const candidate = { interrupted: false, version: stopVersion };
       preparing = candidate;
       let receiver;
@@ -352,7 +355,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         receiver = await connectReceiver(ctx, record);
         const ready = (checkLeaf = true) => {
           const now = currentSession(ctx);
-          return !candidate.interrupted && candidate.version === stopVersion && !hold && !guard.blocked &&
+          return stillEligible() && !candidate.interrupted && candidate.version === stopVersion && !hold && !guard.blocked &&
             guard.revision === registrationRevision &&
             now.id === session.id && now.file === session.file && (!checkLeaf || now.leaf === session.leaf) &&
             (!initialMessage || ctx.isIdle());
@@ -426,7 +429,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       }
   };
 
-  const startWorker = async ctx => {
+  const startWorker = async (ctx, delegated, stillEligible) => {
     if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
       ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
     }
@@ -464,7 +467,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           ctx.ui.notify('This session has an inactive registration; inspect and reload before start', 'warning'); return;
         } catch (error) { if (error.code !== 'ENOENT') { report('inspect registration', error, ctx); return; } }
       }
-      await registerWorker('', ctx, true);
+      await registerWorker('', ctx, true, delegated, stillEligible);
       if (!worker) return;
     } else {
       const guard = promptsFor(ctx);
@@ -499,7 +502,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     const record = worker;
     if (!record) return;
     record.stateRoot = root;
-    record.start = { nonce: randomUUID(), ownerToken: supervisor.ownerToken };
+    record.start = { nonce: delegated?.id ?? randomUUID(), ownerToken: supervisor.ownerToken };
     try {
       await atomicJson(`${root}/worker-${record.workerId}.json`, record);
       const sendJoin = () => sendAction(root, { type: 'worker-start', workerId: record.workerId,
@@ -552,10 +555,12 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         stopVersion === initialPending.version && event.messageType === 'user' &&
         event.prompt === initialPending.message) initialPending.matched = true;
   });
-  pi.on('agent_start', (_event, ctx) => {
+  pi.on('agent_start', async (_event, ctx) => {
+    let delegatedReceipt;
     if (initialPending && worker === initialPending.worker && initialPending.matched &&
         stopVersion === initialPending.version && !hold) {
       clearTimeout(initialPending.timer);
+      delegatedReceipt = initialPending.delegatedReceipt;
       initialPending = undefined;
       ctx.ui.notify('Initial user turn started', 'info');
     }
@@ -564,7 +569,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     previousAssistantId = lastAssistantId(ctx);
     // Every new turn invalidates the previous stop, including a human prompt.
     parkedReport = undefined;
-    return observe({ session: currentSession(ctx), outcome: 'working', stop: null }, ctx);
+    const observed = await observe({ session: currentSession(ctx), outcome: 'working', stop: null }, ctx);
+    if (observed && delegatedReceipt) await atomicJson(delegatedReceipt.path,
+      { id: delegatedReceipt.id, status: 'sent' });
   });
   pi.on('agent_settled', async (event, ctx) => {
     if (!worker || ctx.mode !== 'tui') return;
@@ -635,5 +642,68 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   // UI prompts and tool errors hold subsequent stops until explicitly inspected.
   // Prose-only approval requests have no host signal; the pinned reply is
   // supervisor review evidence, never permission by itself.
-  return { get registered() { return !!worker; }, get hold() { return hold; } };
+  return {
+    get registered() { return !!worker; }, get hold() { return hold; },
+    get confirming() { return prompts?.confirming === true; },
+    get promptBlocked() { return !prompts?.intact || prompts.blocked; },
+    confirmDelegation(ctx, title, message) { return promptsFor(ctx).confirm(title, message); },
+    async enrollDelegated(ctx, ticket, stillEligible) {
+      if (worker || preparing || starting || !ctx.isIdle() || promptsFor(ctx).blocked || hold)
+        throw new Error('Delegated enrollment requires a new idle unheld worker');
+      const saved = await readJson(spawnPath(root, ticket.id));
+      const session = currentSession(ctx);
+      const record = { sessionId: session.id, sessionFile: session.file, paneId, cwd: ctx.cwd,
+        start: { nonce: saved.id }, delegationId: saved.id };
+      await delegatedStart(root, saved.id, record, await readSupervisor(root), await snapshot(socketPath));
+      starting = true;
+      try { await startWorker(ctx, saved, stillEligible); }
+      finally { starting = false; }
+    },
+    async dispatchDelegated(ctx, ticket, message) {
+      const record = worker;
+      const session = currentSession(ctx);
+      if (!record || record.delegationId !== ticket.id || record.workerId !== ticket.workerId ||
+          record.sessionId !== ticket.child.sessionId || record.sessionFile !== ticket.child.sessionFile ||
+          session.id !== record.sessionId || session.file !== record.sessionFile || hold ||
+          promptsFor(ctx).blocked || !ctx.isIdle() || initialPending)
+        throw new Error('Delegated assignment is not eligible');
+      const version = stopVersion;
+      const path = join(root, `spawn-receipt-${ticket.id}.json`);
+      await claim(path, { id: ticket.id, status: 'accepted' });
+      if (worker !== record || stopVersion !== version || hold || promptsFor(ctx).blocked ||
+          !ctx.isIdle() || currentSession(ctx).leaf !== session.leaf)
+        throw new Error('Delegated assignment changed before dispatch; inspect accepted receipt');
+      const pending = { worker: record, message, version, matched: false,
+        delegatedReceipt: { path, id: ticket.id } };
+      initialPending = pending;
+      // Retain bootstrap uncertainty across a crash/reload, before native dispatch.
+      if (!await observe({ session, outcome: 'unknown', stop: null, bootstrapPending: true }, ctx))
+        throw new Error('Could not persist delegated dispatch fence');
+      const live = await snapshot(socketPath);
+      requireDelegationParent(live, ticket.parent);
+      const savedTicket = await readJson(spawnPath(root, ticket.id));
+      const { state } = await delegationAuthority(root, ticket.authority, ticket.parent);
+      const binding = state.workers[record.workerId];
+      const agent = live.agents.find(a => a.pane_id === paneId);
+      if (savedTicket.status !== 'dispatching' || state.ownerToken !== ticket.ownerToken ||
+          !await ownerAlive(root, ticket.ownerToken) || state.paused || !binding || binding.paused ||
+          state.routes[binding.route]?.paused || !sameOccupant(agent, binding) || !isSettled(agent) ||
+          worker !== record || stopVersion !== version || hold || promptsFor(ctx).blocked || !ctx.isIdle() ||
+          currentSession(ctx).id !== session.id || currentSession(ctx).file !== session.file)
+        throw new Error('Delegated assignment interrupted before dispatch');
+      pending.timer = setTimeout(() => {
+        if (initialPending !== pending || worker !== record) return;
+        initialPending = undefined; hold = true; holdReason = 'restored'; stopVersion++;
+        void observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+      }, 10000);
+      pending.timer.unref?.();
+      try { pi.sendUserMessage(message); }
+      catch (error) {
+        clearTimeout(pending.timer); initialPending = undefined;
+        hold = true; holdReason = 'restored'; stopVersion++;
+        await observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
+        throw error;
+      }
+    },
+  };
 }

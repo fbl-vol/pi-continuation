@@ -93,8 +93,8 @@ export function listenJson(root, id, handle, onError) {
     JSON.stringify(await handle(JSON.parse(line))), '{"accepted":false}', onError);
 }
 
-export async function sendAction(root, action, targetId = action.workerId) {
-  return JSON.parse(await requestLine(workerEndpoint(root, targetId), JSON.stringify(action), 8192, 2500));
+export async function sendAction(root, action, targetId = action.workerId, { timeoutMs = 2500 } = {}) {
+  return JSON.parse(await requestLine(workerEndpoint(root, targetId), JSON.stringify(action), 8192, timeoutMs));
 }
 
 export function ownerServer(root, token, handleStart) {
