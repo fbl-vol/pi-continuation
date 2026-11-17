@@ -14,16 +14,21 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const sockets = new Set();
   const agents = [];
+  let handleRequest;
+  const natives = [];
   const herdr = net.createServer(socket => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.once('data', data => {
+    socket.once('data', async data => {
       const request = JSON.parse(data.toString());
-      socket.write(JSON.stringify({ id: request.id, result: request.method === 'events.subscribe' ?
-        { type: 'subscription_started' } : { type: 'session_snapshot', snapshot: { protocol: 22, agents } } }) + '\n');
+      try {
+        const result = await handleRequest?.(request) ?? (request.method === 'events.subscribe' ?
+          { type: 'subscription_started' } : { type: 'session_snapshot', snapshot: { protocol: 22, agents } });
+        socket.write(JSON.stringify({ id: request.id, result }) + '\n');
+      } catch { socket.destroy(); }
     });
   });
-  function native(paneId) {
+  function native(paneId, options = {}) {
     const manager = sessionManagerFactory?.(root);
     const id = manager?.getSessionId() ?? randomUUID();
     const file = manager?.getSessionFile() ?? join(root, `${id}.jsonl`);
@@ -52,9 +57,18 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
       registerTool: tool => tools.set(tool.name, tool.execute),
       appendEntry: (customType, data) => append({ type: 'custom', customType, data }),
       sendMessage: (...args) => messages.push(args),
-      sendUserMessage: () => assert.fail('Start enrollment must not send another task') };
-    bindContinuation(pi, { root, socketPath, paneId });
-    return { pi, ctx, id, file, get entries() { return manager?.getEntries() ?? entries; },
+      sendUserMessage: message => {
+        if (!options.allowTask) assert.fail('Start enrollment must not send another task');
+        options.onTask?.(message);
+        if (options.suppressRun) return;
+        append({ type: 'message', message: { role: 'user', content: message } });
+        void Promise.resolve().then(async () => {
+          for (const fn of handlers.get('before_agent_start') ?? []) await fn({ messageType: 'user', prompt: message }, ctx);
+          for (const fn of handlers.get('agent_start') ?? []) await fn({}, ctx);
+        });
+      } };
+    bindContinuation(pi, { root, socketPath, paneId, ...options });
+    const result = { pi, ctx, id, file, get entries() { return manager?.getEntries() ?? entries; },
       messages, notifications, confirmations,
       confirm: value => { confirm = value; },
       raw: data => { for (const fn of input) fn(data); },
@@ -63,7 +77,10 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
         message: { role: 'assistant', stopReason, content: [{ type: 'text', text }] } }),
       command: (name, argument) => commands.get(name)(argument, ctx),
       emit: async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn(event, ctx); },
-      dispose: args => tools.get('continuation_disposition')('call', args, undefined, undefined, ctx) };
+      dispose: args => tools.get('continuation_disposition')('call', args, undefined, undefined, ctx),
+      spawn: (args, signal) => tools.get('continuation_spawn')('spawn-call', args, signal, undefined, ctx) };
+    natives.push(result);
+    return result;
   }
   let worker = native('w:p1');
   const supervisor = native('s:p1');
@@ -73,8 +90,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   t.after(async () => {
-    await supervisor.emit('session_shutdown');
-    await worker.emit('session_shutdown');
+    for (const native of natives) await native.emit('session_shutdown');
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => herdr.close(resolve));
     if (prior === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = prior;
@@ -100,5 +116,6 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
     return worker;
   };
   return { root, agents, get worker() { return worker; }, supervisor, supervisorCommand,
-    workerStart, state, workerId, observation, replaceWorker };
+    workerStart, state, workerId, observation, replaceWorker, native, socketPath,
+    onRequest: handler => { handleRequest = handler; } };
 }

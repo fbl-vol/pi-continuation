@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -208,6 +210,33 @@ test('competing process cannot roll back during a new-owner effect', async t => 
     assert.match(output, /worker busy or abandoned lock/);
   });
   await assert.rejects(rollbackHandoff(reference, f.restore), /unused exact/);
+});
+
+test('P1 delegated first-task journal materialization between filesystem reads is not an ownership loss', async t => {
+  const f = await fixture(t);
+  await ensureRoot(f.target.root);
+  const file = join(await realpath(f.target.root), 'new-native-session.jsonl');
+  const binding = { sessionFile: file, pendingSession: file };
+  const original = fs.promises.realpath;
+  let materialized = false;
+  fs.promises.realpath = async path => {
+    if (path === file && !materialized) {
+      materialized = true;
+      // Native Pi persists its first user turn after the realpath lookup has
+      // observed absence, but before the ownership observer's lstat completes.
+      await writeFile(file, '{}\n');
+      throw Object.assign(new Error('Previously absent native journal'), { code: 'ENOENT' });
+    }
+    return original(path);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await checkWorkerHandoff(f.target.root, f.target.workerId, binding), true);
+    assert.equal(materialized, true);
+  } finally {
+    fs.promises.realpath = original;
+    syncBuiltinESMExports();
+  }
 });
 
 test('a crashed process leaves its mutex held until inspected, never age-based recovery', async t => {

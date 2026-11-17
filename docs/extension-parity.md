@@ -11,7 +11,7 @@ The baseline comparison used the available local continuation workflow and its i
 | Identity | Explicit saved Pi session, terminal, pane, cwd and workspace; never follow a replacement automatically. |
 | Attention | Herdr settled/blocked state; a blocked worker needs attention even without an assistant stop. A repeated unchanged event is deduplicated. |
 | Interpretation | Model reads final reply/checkpoint against the entire assignment. Routine unfinished approved work may continue; completion requires all follow-ups. A genuine approval request or uncertain authority is a decision/pause, not new permission. |
-| Control | Explicit registration and independent global/route/worker pauses. Model tools cannot activate scopes or clear user holds. |
+| Control | Explicit registration and independent global/route/worker pauses. The approved delegated path enrolls only its newly created exact child under a scoped user grant; model tools otherwise cannot activate scopes or clear user holds. |
 | Bounds | One delivery per stop; two nudges without evidenced progress, then pause/escalate; one corrective supervisor wake before escalation. |
 | Notices | Material blockers/decisions/completion only, exact coordinator identity, pending versus uncertain delivery retained. |
 | Ownership | One cooperating owner, selected-worker witness, paused handoff/rollback, no replay of inherited or ambiguous delivery. |
@@ -39,6 +39,52 @@ and disposition/budget history. Retired sessions cannot be re-added. The new wor
 inherits no task authority, approvals or budget; independent global/route pauses
 remain. No automatic replacement, live migration or delivery retry is introduced.
 
+### User-approved supervised delegation amendment (unreleased)
+
+An unsupervised planning session or a supervised worker may delegate within an
+explicit user-authorized assignment. `/continuation-delegate <writer|read-only> <assignment scope>`
+is the originating session's guarded native authorization, pinned to its exact
+session/cwd, role ceiling and the intended **already-running** supervisor session/owner. It is
+not worker enrollment. Brainstorming, a model-supplied approval flag or quoted tool
+text cannot create this grant. The agent-callable `continuation_spawn` uses that
+scope without per-worker confirmations; verified children inherit it for scoped
+subdelegation. `/continuation-delegate revoke` in the originating session revokes
+further delegation throughout that tree without changing existing supervision.
+
+The operation durably claims a stable assignment key and exact task, creates only
+a new unfocused Herdr pane, starts native Pi through ordinary extension loading,
+handshakes with that new extension, pins its exact native session/path and Herdr
+occupant, then joins the intended supervisor **before** native assignment dispatch.
+It never discovers/enrolls existing panes, replaces a worker or creates/replaces a
+supervisor. As with blank worker start, native Pi owns journal materialization on
+its first real task; no synthetic journal/task is fabricated to obtain identity.
+A matched native `before_agent_start`/`agent_start` pair establishes the one-use
+initial-task receipt; a void messaging call alone does not prove delivery.
+
+Global, existing route and parent-worker pauses/holds reject delegation; a pause
+arriving during startup withholds the next effect. No paused scope is silently
+activated. New workers retain ordinary identity, ownership, holds, continuation
+bounds, receipts, history and material notices. Assignment keys, exact-task claims
+and cooperating writer claims survive rejection/crash. Only one delegated writer
+per verified Git checkout (common-directory identity, including subdirectories) is
+allowed; an existing supervised worker in that checkout blocks a
+new writer, while read-only delegates cannot create writers. This coordinates
+cooperating agents, not an OS sandbox or a proof that arbitrary prose tasks are
+semantically within scope. The parent must stop writing before delegating a writer.
+
+An uncertain creation, startup, enrollment or task delivery stays held for
+inspection, including after restart. Never automatically retry the operation,
+change its key, delete claims/receipts or release a writer claim to force progress.
+No automatic cleanup kills a possibly running child. Ambiguous delegated tasks
+cannot receive continuation even if a normal-looking completed report appears.
+Read-only readiness observations are not repeated effect attempts.
+
+Delegation does not expand task scope or grant secrets, deployment, publication,
+review-fix selection or acceptance. **Awaiting user finding selection is a genuine
+decision pause**: a supervisor must not resume a worker to apply review findings
+until the user selects them. Independent review remains distinct from acceptance.
+Source/fake-runtime validation is not authority for live spawning or installation.
+
 ## Observable baseline scenarios
 
 These seven scenarios are the bounded acceptance set, not an exhaustive matrix.
@@ -48,9 +94,9 @@ separate live-use authority exists.
 
 | ID | Setup → action → expected result |
 | --- | --- |
-| P1 — registration/identity | Normal Pi loading, an unregistered TUI session (including a fresh blank start) → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation; replacement is never followed automatically; worker start may explicitly confirm retirement of a verifiably inactive old session and fresh registration, otherwise it refuses. |
-| P2 — idle continuation/interpretation | Registered active exact worker, fresh eligible settled stop, approved unfinished assignment → supervisor reads final reply and pinned checkpoint against all obligations and resumes → one native continuation of that assignment, not a new authority grant; ordinary tasks in a start-opted-in worker need no manual rearming; a positive review alone never proves whole-assignment completion. |
-| P3 — blocked/approval | Exact worker reports blocked, or final reply asks for a genuine approval → reconcile and attempt disposition → blocked attention exists even without a completed assistant stop; resume is refused while blocked/held; ordinary task text does not clear a deliberate interruption or unresolved approval; model routes a material decision or pause, never supplies approval. |
+| P1 — registration/identity | Normal Pi loading, an unregistered TUI session (including a fresh blank start) → explicitly register it, then replace its pane/session identity → installation alone does nothing; registration pins identity/checkpoint and captures a current idle report without sending a task; advanced enrollment stays paused, whereas start explicitly confirms its bounded enrollment/activation and delegated start uses only its scoped user grant for the newly created exact child; replacement is never followed automatically; worker start may explicitly confirm retirement of a verifiably inactive old session and fresh registration, otherwise it refuses. |
+| P2 — idle continuation/interpretation | Registered active exact worker, fresh eligible settled stop, approved unfinished assignment → supervisor reads final reply and pinned checkpoint against all obligations and resumes → one native continuation of that assignment, not a new authority grant; ordinary tasks in a start-opted-in worker need no manual rearming; a positive review alone never proves whole-assignment completion; delegated workers enroll before receiving their assignment and may subdelegate only within inherited scope. |
+| P3 — blocked/approval | Exact worker reports blocked, or final reply asks for a genuine approval → reconcile and attempt disposition → blocked attention exists even without a completed assistant stop; resume is refused while blocked/held; ordinary task text does not clear a deliberate interruption or unresolved approval; model routes a material decision or pause, never supplies approval; awaiting user finding selection must remain a decision pause. |
 | P4 — scoped pause | Active sibling scopes → user pauses one worker/route or global scope, then an event arrives → affected continuation stops, unrelated scopes retain their settings; a model disposition cannot lift the user pause. |
 | P5 — dedup/bounds | Repeated unchanged stop/event and no evidenced checkpoint progress → repeated reconciliation/disposition → no duplicate stop delivery; two nudges without progress exhaust the worker budget; a stalled supervisor gets one corrective wake before escalation. |
 | P6 — material notices | Exact coordinator and a material blocker/decision or whole-assignment completion → deliver, repeat, then replace/busy the coordinator → one identity-bound notice, no routine chatter; definite pre-acceptance deferral remains pending and ambiguous delivery pauses for inspection, not blind retry. |

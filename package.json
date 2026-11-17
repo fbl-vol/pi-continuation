@@ -35,6 +35,7 @@
     "src/checkpoint.mjs",
     "src/contracts.mjs",
     "src/diagnostics.mjs",
+    "src/delegation.mjs",
     "src/ipc.mjs",
     "src/policy.mjs",
     "src/prompt-guard.mjs",

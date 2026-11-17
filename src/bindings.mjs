@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { readJson } from './store.mjs';
 import { sameOccupant } from './herdr.mjs';
 import { isId } from './contracts.mjs';
+import { delegatedStart } from './delegation.mjs';
 
 // Registration joins durable Pi identity with live Herdr identity. No caller may
 // infer a replacement from a pane name or silently follow a different checkpoint.
@@ -11,7 +12,8 @@ function nativeBinding(record, agent) {
     sessionFile: record.sessionFile, cwd: record.cwd, terminalId: agent?.terminal_id,
     workspaceId: agent?.workspace_id, tabId: agent?.tab_id,
     sessionKind: 'path', sessionValue: record.sessionFile,
-    ...(record.pendingSession ? { pendingSession: record.pendingSession } : {}) };
+    ...(record.pendingSession ? { pendingSession: record.pendingSession } : {}),
+    ...(record.delegationId ? { delegationId: record.delegationId } : {}) };
 }
 
 export async function readyWorkerRegistration(root, record) {
@@ -72,6 +74,7 @@ export async function workerStartCandidate(root, request, state, live, superviso
       record.start.replaceWorkerId !== request.replaceWorkerId ||
       (request.replaceWorkerId !== undefined && !isId(request.replaceWorkerId)))
     throw new Error('Worker start has no matching confirmed opt-in');
+  if (record.delegationId === request.nonce) await delegatedStart(root, record.delegationId, record, state, live);
   const agent = live.agents.find(item => item.pane_id === record.paneId);
   const existing = state.workers[request.workerId];
   const route = agent?.workspace_id;

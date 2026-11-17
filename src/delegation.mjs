@@ -1,0 +1,332 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { realpath } from 'node:fs/promises';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { Type } from 'typebox';
+import { atomicJson, claim, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { isId, readObservation, readSupervisor } from './contracts.mjs';
+import { currentSession } from './session.mjs';
+import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
+import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
+
+const exec = promisify(execFile);
+async function checkoutIdentity(cwd) {
+  try {
+    const { stdout } = await exec('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { timeout: 2500, maxBuffer: 8192, windowsHide: true });
+    return await realpath(stdout.trim());
+  } catch { refuse('Writer delegation requires a verifiable Git checkout (and Git on PATH)'); }
+}
+
+const digest = text => createHash('sha256').update(text).digest('hex');
+const refuse = message => { throw new Error(message); };
+const recordPath = (root, kind, id) => {
+  if (!isId(id)) refuse('Invalid delegation identity');
+  return join(root, `${kind}-${id}.json`);
+};
+export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
+const grantPath = (root, id) => recordPath(root, 'delegation', id);
+const sameSession = (session, binding) => session.id === binding.sessionId && session.file === binding.sessionFile;
+
+function nativeBinding(agent, session, cwd) {
+  const binding = { paneId: agent?.pane_id, terminalId: agent?.terminal_id,
+    workspaceId: agent?.workspace_id, tabId: agent?.tab_id, cwd,
+    sessionId: session.id, sessionFile: session.file, sessionKind: 'path', sessionValue: session.file };
+  if (!session.id || !session.file || !binding.terminalId || !binding.workspaceId ||
+      !sameOccupant(agent, binding)) refuse('Exact native Pi/Herdr session identity required');
+  return binding;
+}
+
+export function requireDelegationParent(live, parent) {
+  const agent = live.agents.find(a => a.pane_id === parent?.paneId);
+  if (!sameOccupant(agent, parent) || !['idle', 'working', 'done'].includes(agent.agent_status))
+    refuse('Parent Herdr identity/status changed or blocked');
+}
+
+export async function delegationOwner(root, grant) {
+  const state = await readSupervisor(root);
+  if (!state.acceptStarts || state.ownerToken !== grant.ownerToken ||
+      state.supervisorSession !== grant.supervisorSession || !await ownerAlive(root, grant.ownerToken))
+    refuse('Intended running supervisor changed or is unavailable; no replacement will be created');
+  if (state.paused) refuse('Global continuation is paused');
+  return state;
+}
+
+export async function delegationAuthority(root, reference, binding) {
+  const grant = await readJson(grantPath(root, reference?.grantId));
+  if (grant.revoked || grant.cwd !== await realpath(binding.cwd)) refuse('Delegation scope revoked or cwd changed');
+  let role = grant.role;
+  if (!['writer', 'read-only'].includes(role)) refuse('Delegation has no explicit role boundary');
+  if (reference.spawnId) {
+    const parent = await readJson(spawnPath(root, reference.spawnId));
+    if (parent.grantId !== grant.id || !['writer', 'read-only'].includes(parent.role) || parent.status !== 'dispatched' ||
+        JSON.stringify(parent.child) !== JSON.stringify(binding)) refuse('Subdelegation parent is not the dispatched exact child');
+    role = grant.role === 'read-only' ? 'read-only' : parent.role;
+  } else if (JSON.stringify(grant.parent) !== JSON.stringify(binding)) refuse('Delegation belongs to another planning session');
+  const state = await delegationOwner(root, grant);
+  if (state.routes[binding.workspaceId]?.paused) refuse('Delegation route is paused');
+  const worker = Object.values(state.workers).find(w => w.sessionId === binding.sessionId || w.paneId === binding.paneId);
+  if (worker) {
+    const observation = await readObservation(root, worker.workerId);
+    if (['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
+      .some(key => binding[key] !== worker[key])) refuse('Parent worker identity changed');
+    if (worker.paused || observation.hold || observation.session.id !== binding.sessionId ||
+        observation.session.file !== binding.sessionFile) refuse('Parent worker is paused or held');
+  }
+  return { grant, state, role };
+}
+
+/** Independent owner-side validation. A worker's request is not a blanket opt-in. */
+export async function delegatedStart(root, id, record, state, live) {
+  const spawn = await readJson(spawnPath(root, id));
+  const grant = await readJson(grantPath(root, spawn.grantId));
+  if (spawn.id !== id || spawn.grantId !== grant.id || !['writer', 'read-only'].includes(spawn.role) ||
+      spawn.status !== 'enrolling' || grant.revoked || spawn.ownerToken !== state.ownerToken ||
+      grant.ownerToken !== state.ownerToken || grant.supervisorSession !== state.supervisorSession ||
+      record.sessionId !== spawn.child?.sessionId || record.sessionFile !== spawn.child?.sessionFile ||
+      record.paneId !== spawn.child?.paneId || record.cwd !== grant.cwd ||
+      record.start?.nonce !== spawn.id || record.delegationId !== spawn.id || state.paused ||
+      state.routes[spawn.child.workspaceId]?.paused || !sameOccupant(live.agents.find(a => a.pane_id === record.paneId), spawn.child))
+    refuse('Delegated enrollment is not the newly created exact child under its active owner/scope');
+  requireDelegationParent(live, spawn.parent);
+  const authority = await delegationAuthority(root, spawn.authority, spawn.parent);
+  if (authority.grant.id !== spawn.grantId || (spawn.role === 'writer' && authority.role === 'read-only'))
+    refuse('Delegated enrollment exceeds inherited scope');
+  if (Object.values(state.workers).some(w => w.paneId === record.paneId || w.sessionId === record.sessionId))
+    refuse('Delegated enrollment cannot replace or reactivate an existing worker');
+  return spawn;
+}
+
+export const delegationInstructions = 'Stay within the approved delegation scope. Delegation grants no secrets, deployment, publication or expanded task authority. ' +
+  'Keep one implementation writer per checkout; read-only delegates must not edit source or delegate writers. ' +
+  'Independent review is not acceptance. Awaiting user finding selection is a genuine decision pause: do not apply review findings or resume through that gate until the user selects them.';
+
+/** One durable attempt, never resumed after a crash or a lost response. Read-only
+ * readiness checks may repeat; pane creation, agent start, enrollment and task send may not. */
+export async function spawnDelegated({ root, socketPath, paneId, ctx, reference, task, role, key,
+  signal, allowed = () => true, transport = request, readSnapshot = snapshot, send = sendAction }) {
+  if (!['writer', 'read-only'].includes(role) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
+      !key?.trim() || key.length > 120) refuse('A stable assignment key, bounded task and writer/read-only role are required');
+  const session = currentSession(ctx);
+  const live = await readSnapshot(socketPath);
+  const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
+  const authority = await delegationAuthority(root, reference, parent);
+  if (role === 'writer' && authority.role === 'read-only') refuse('Read-only delegates cannot create writers');
+  const checkLocal = () => {
+    signal?.throwIfAborted();
+    if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Parent interaction/identity changed; inspect delegation');
+  };
+  const check = async () => {
+    checkLocal();
+    const state = (await delegationAuthority(root, reference, parent)).state;
+    const fresh = await readSnapshot(socketPath);
+    requireDelegationParent(fresh, parent);
+    return { state, fresh };
+  };
+  await check();
+  const attemptKey = digest(`${authority.grant.id}\n${key}`);
+  const assignmentKey = digest(`${authority.grant.id}\n${task}`);
+  const id = randomUUID();
+  // Claims survive failures. Changing a key must not escape an identical task's claim.
+  await claim(join(root, `spawn-key-${attemptKey}.json`), { id });
+  await claim(join(root, `spawn-assignment-${assignmentKey}.json`), { id });
+  const spawn = { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
+    parent, role, key, task, status: 'prepared', at: new Date().toISOString() };
+  await claim(spawnPath(root, id), spawn);
+  const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
+  try {
+    if (role === 'writer') {
+      // A conservative cooperating-writer fence. Never automatically release it
+      // on model completion, a crash, rejection, or an uncertain creation.
+      if (!authority.grant.checkout || await checkoutIdentity(authority.grant.cwd) !== authority.grant.checkout)
+        refuse('Delegation checkout identity changed');
+      for (const worker of Object.values(authority.state.workers)) {
+        let checkout;
+        try { checkout = await checkoutIdentity(worker.cwd); }
+        catch { if (worker.cwd === authority.grant.cwd) throw new Error('Existing worker checkout cannot be verified'); }
+        if (checkout === authority.grant.checkout)
+          refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
+      }
+      await claim(join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`), { id, grantId: spawn.grantId });
+    }
+    await check();
+    await save('creating');
+    checkLocal();
+    const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
+      cwd: authority.grant.cwd, focus: false,
+      env: { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root } });
+    if (split.type !== 'pane_created' || !split.pane?.pane_id || split.pane.pane_id === paneId ||
+        live.agents.some(a => a.pane_id === split.pane.pane_id) || split.pane.workspace_id !== parent.workspaceId)
+      refuse('Pane creation identity uncertain');
+    spawn.paneId = split.pane.pane_id;
+    spawn.terminalId = split.pane.terminal_id;
+    await check();
+    await save('starting');
+    checkLocal();
+    const started = await transport(socketPath, 'agent.start', { name: `delegate-${id}`, kind: 'pi',
+      pane_id: spawn.paneId, args: [], timeout_ms: 30000 }, { timeoutMs: 35000 });
+    if (started.type !== 'agent_started' || started.agent?.terminal_id !== spawn.terminalId ||
+        started.agent?.pane_id !== spawn.paneId || !isSettled(started.agent) || !started.agent.interactive_ready)
+      refuse('New Pi startup identity/readiness uncertain');
+    const hello = await send(root, { type: 'hello', id }, id);
+    spawn.child = nativeBinding(started.agent, hello.session ?? {}, authority.grant.cwd);
+    if (!hello.accepted || hello.id !== id) refuse('Ordinary continuation extension did not bind in the new Pi session');
+    const { fresh } = await check();
+    if (!sameOccupant(fresh.agents.find(a => a.pane_id === spawn.paneId), spawn.child)) refuse('New worker identity changed');
+    await save('enrolling');
+    checkLocal();
+    const joined = await send(root, { type: 'enroll', id }, id, { timeoutMs: 15000 });
+    if (!joined.accepted || joined.id !== id || !isId(joined.workerId)) refuse('New worker enrollment rejected or uncertain');
+    spawn.workerId = joined.workerId;
+    const { state } = await check();
+    const binding = state.workers[spawn.workerId];
+    if (!binding || binding.paused || !sameOccupant(started.agent, binding) ||
+        binding.sessionId !== spawn.child.sessionId || state.routes[binding.route]?.paused)
+      refuse('Exact owner enrollment is not active; assignment withheld');
+    await save('dispatching');
+    checkLocal();
+    const result = await send(root, { type: 'assignment', id }, id);
+    if (!result.accepted || result.id !== id) refuse('Assignment acceptance rejected or uncertain');
+    // A void sendUserMessage is not observed delivery. Only the exact matching
+    // native before_agent_start + agent_start pair makes this receipt sent.
+    let receipt;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      receipt = await readJson(join(root, `spawn-receipt-${id}.json`));
+      if (receipt.status === 'sent') break;
+      signal?.throwIfAborted();
+      await delay(50);
+    }
+    if (receipt.status !== 'sent') refuse('Assignment run was not observed; inspect, never resend');
+    await save('dispatched');
+    return { id, workerId: spawn.workerId, paneId: spawn.paneId, sessionId: spawn.child.sessionId,
+      sessionFile: spawn.child.sessionFile, status: spawn.status };
+  } catch (error) {
+    spawn.failure = error.message;
+    await save('held');
+    throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
+  }
+}
+
+export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
+  paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN } = {}) {
+  let closeBootstrap;
+  let stopInput;
+  let generation = 0;
+  const reference = ctx => ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
+    e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
+  pi.registerCommand('continuation-delegate', {
+    description: 'Authorize one scoped delegation tree: <writer|read-only> <assignment scope> | revoke',
+    handler: async (argument, ctx) => {
+      if (ctx.mode !== 'tui' || !socketPath || !paneId || !ctx.isIdle()) refuse('Idle Herdr Pi TUI required');
+      await ensureRoot(root);
+      if (argument.trim() === 'revoke') {
+        const ref = reference(ctx);
+        if (!ref || ref.spawnId) refuse('Revoke in the originating planning session');
+        const grant = await readJson(grantPath(root, ref.grantId));
+        if (!sameSession(currentSession(ctx), grant.parent)) refuse('Delegation session changed');
+        grant.revoked = true;
+        await atomicJson(grantPath(root, grant.id), grant);
+        ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
+        return;
+      }
+      const existing = reference(ctx);
+      if (existing && !existing.spawnId && !(await readJson(grantPath(root, existing.grantId))).revoked)
+        refuse('Revoke the current delegation tree before authorizing another scope in this planning session');
+      const [role, ...words] = argument.trim().split(/\s+/);
+      const scope = words.join(' ');
+      if (!['writer', 'read-only'].includes(role) || !scope || Buffer.byteLength(scope) > 8000)
+        refuse('Explicit writer/read-only role and bounded assignment scope required');
+      const checkout = role === 'writer' ? await checkoutIdentity(ctx.cwd) : undefined;
+      const state = await readSupervisor(root);
+      await delegationOwner(root, { ownerToken: state.ownerToken, supervisorSession: state.supervisorSession });
+      const live = await snapshot(socketPath);
+      const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
+      if (state.routes[parent.workspaceId]?.paused) refuse('Route is paused');
+      const version = generation;
+      if (!await worker.confirmDelegation(ctx, 'Authorize scoped supervised delegation?', `Role ceiling: ${role}\nScope: ${scope}\nCwd: ${ctx.cwd}\nSupervisor session: ${state.supervisorSession}\n\n${delegationInstructions}\n` +
+          'Authorize this session and its new workers to delegate within this scope to the current running supervisor. No per-worker enrollment confirmation. You retain independent pauses.')) return;
+      if (generation !== version || !ctx.isIdle() || !sameSession(currentSession(ctx), parent))
+        refuse('Session changed during delegation authorization');
+      const id = randomUUID();
+      const grant = { id, parent, cwd: await realpath(ctx.cwd), scope, role, checkout, ownerToken: state.ownerToken,
+        supervisorSession: state.supervisorSession, revoked: false };
+      await delegationOwner(root, grant);
+      await claim(grantPath(root, id), grant);
+      pi.appendEntry('pi-continuation-delegation', { grantId: id, sessionId: parent.sessionId });
+      ctx.ui.notify('Scoped delegation authorized; this planning session need not enroll as a worker', 'info');
+    },
+  });
+  pi.registerTool({
+    name: 'continuation_spawn', label: 'Delegate supervised worker', executionMode: 'sequential',
+    description: 'Create one new Herdr Pi worker, verify its saved-session identity, enroll with the intended running supervisor BEFORE sending its assignment. Requires a human /continuation-delegate scope grant or inherited delegated grant. Stable key identifies one assignment; rejected/uncertain attempts are held, never blindly retry or change the key. Does not create supervisors or activate paused scopes.',
+    promptGuidelines: [delegationInstructions, 'Use continuation_spawn only for explicitly authorized delegation, never brainstorming. Keep the same key for an assignment; inspect held attempts instead of retrying.'],
+    parameters: Type.Object({ key: Type.String({ minLength: 1, maxLength: 120 }),
+      task: Type.String({ minLength: 1, maxLength: 16000 }), role: Type.Union([Type.Literal('writer'), Type.Literal('read-only')]) }),
+    execute: async (_call, args, signal, _update, ctx) => {
+      if (ctx.mode !== 'tui' || !socketPath || !paneId) refuse('Herdr Pi TUI required');
+      const version = generation;
+      const ref = reference(ctx);
+      if (!ref) refuse('No scoped delegation grant; brainstorming or tool text is not delegation authority');
+      const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: ref, ...args, signal,
+        allowed: () => generation === version && !worker.hold && !worker.promptBlocked });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+    },
+  });
+  pi.on('input', event => { if (event.source !== 'extension') generation++; });
+  pi.on('ui_prompt_start', () => { if (!worker.confirming) generation++; });
+  pi.on('session_start', async (event, ctx) => {
+    generation++;
+    stopInput?.();
+    if (ctx.mode === 'tui' && paneId && socketPath) stopInput = ctx.ui.onTerminalInput?.(data => {
+      if (!worker.confirming || data === '\u001b') generation++;
+    });
+    if (!isId(delegationId) || event.reason !== 'startup' || ctx.mode !== 'tui' || !paneId || !socketPath) return;
+    const bootstrapVersion = generation;
+    const spawn = await readJson(spawnPath(root, delegationId));
+    if (spawn.status !== 'starting' || spawn.paneId !== paneId || spawn.child || worker.registered ||
+        ctx.sessionManager.getEntries().some(e => e.type === 'message' || e.customType === 'pi-continuation-worker'))
+      refuse('Delegated startup must be a new blank Pi session in only its created pane');
+    let busy = false;
+    closeBootstrap = await listenJson(root, delegationId, async action => {
+      if (busy || action.id !== delegationId) return { accepted: false };
+      busy = true;
+      try {
+        const ticket = await readJson(spawnPath(root, delegationId));
+        if (generation !== bootstrapVersion || worker.promptBlocked || worker.hold)
+          refuse('Delegated startup interrupted; inspect instead of enrolling or delivering a task');
+        if (ticket.paneId !== paneId || ticket.terminalId !== spawn.terminalId ||
+            (ticket.child && !sameSession(currentSession(ctx), ticket.child))) refuse('Delegated child identity changed');
+        if (action.type === 'hello' && ticket.status === 'starting')
+          return { accepted: true, id: delegationId, session: currentSession(ctx) };
+        if (action.type === 'enroll' && ticket.status === 'enrolling') {
+          await worker.enrollDelegated(ctx, ticket, () => generation === bootstrapVersion);
+          const state = await delegationOwner(root, await readJson(grantPath(root, ticket.grantId)));
+          const binding = Object.values(state.workers).find(w => w.sessionId === ticket.child.sessionId);
+          if (!binding || binding.lastStartNonce !== ticket.id || binding.paused) refuse('Delegated worker did not join');
+          pi.appendEntry('pi-continuation-delegation', { grantId: ticket.grantId, spawnId: ticket.id,
+            sessionId: ticket.child.sessionId });
+          return { accepted: true, id: ticket.id, workerId: binding.workerId };
+        }
+        if (action.type === 'assignment' && ticket.status === 'dispatching') {
+          const grant = await readJson(grantPath(root, ticket.grantId));
+          const state = await delegationOwner(root, grant);
+          const binding = state.workers[ticket.workerId];
+          const fresh = await snapshot(socketPath);
+          requireDelegationParent(fresh, ticket.parent);
+          if (!binding || binding.paused || state.routes[binding.route]?.paused ||
+              !sameOccupant(fresh.agents.find(a => a.pane_id === paneId), binding)) refuse('Assignment scope/identity changed');
+          await delegationAuthority(root, ticket.authority, ticket.parent);
+          await worker.dispatchDelegated(ctx, ticket, `Approved delegation scope:\n${grant.scope}\n\nRole: ${ticket.role}.\n${delegationInstructions}\n\nAssignment:\n${ticket.task}`);
+          return { accepted: true, id: ticket.id };
+        }
+        return { accepted: false };
+      } finally { busy = false; }
+    }, () => {});
+  });
+  pi.on('session_shutdown', async () => {
+    generation++; stopInput?.(); stopInput = undefined;
+    await closeBootstrap?.(); closeBootstrap = undefined;
+  });
+}

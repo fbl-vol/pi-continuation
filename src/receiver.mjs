@@ -5,6 +5,7 @@ import { listenJson, ownerAlive } from './ipc.mjs';
 import { readSupervisor, readObservation, isId } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { withWorkerHandoff } from './ownership.mjs';
+import { spawnPath } from './delegation.mjs';
 
 // Never start this listener without an explicitly registered native worker session.
 export function receive(root, worker, pi, context, stopVersion, isHeld) {
@@ -38,6 +39,8 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
   const intent = await readJson(join(root, `intent-${action.id}.json`));
   const session = currentSession(ctx);
   const version = stopVersion();
+  if (worker.delegationId && (await readJson(spawnPath(root, worker.delegationId))).status !== 'dispatched')
+    return { accepted: false, reason: 'delegated assignment requires inspection' };
   if (JSON.stringify(binding?.handoff) !== JSON.stringify(handoff) ||
       observation.version !== version || observation.hold || isHeld() ||
       !await ownerAlive(root, owner.token))
@@ -66,7 +69,9 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
   }
   const latest = await readSupervisor(root);
   const latestObservation = await readObservation(root, worker.workerId);
-  if (JSON.stringify(latest.workers?.[worker.workerId]?.handoff) !== JSON.stringify(handoff) ||
+  const delegatedReady = !worker.delegationId ||
+    (await readJson(spawnPath(root, worker.delegationId))).status === 'dispatched';
+  if (!delegatedReady || JSON.stringify(latest.workers?.[worker.workerId]?.handoff) !== JSON.stringify(handoff) ||
       latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
       latestObservation.hold || latestObservation.version !== version ||
