@@ -21,6 +21,14 @@ Shared-UI calls are synchronously observed before display. Registration/hold-cle
 `/continuation` uses native guarded selection and confirmation, not model-callable
 activation or synthetic input. It shows the current session, readable known worker
 labels, and details including independent pauses, hold state and spent nudges.
+Current source prefers Herdr pane labels, then agent names/terminal titles. Exact
+current native bindings appear in Current workers; retained closed/replaced bindings
+are accessible through Previous / unavailable registrations with Pane closed or
+Session changed reasons and read-only Details. Missing observations do not make an
+otherwise current binding historical. This is presentation only: no registrations,
+scopes, history or ownership are changed by grouping or browsing. Stopped bindings
+remain withdrawn from both lists, with own-session Details/Return still available.
+This menu refinement follows v0.3.0's original flat list.
 Duplicate labels remain separately addressed. Cancellation, changed caller/target
 identity or owner replacement refuses the stale action. Missing/corrupt observations
 remain visibly unknown; raw record/error payloads are not displayed.

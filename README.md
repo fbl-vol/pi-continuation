@@ -61,6 +61,14 @@ and checkpoint paths are available in Details rather than needed for normal use.
 An unsupervised planning session can inspect or pause a selected exact worker.
 Existing advanced commands remain available.
 
+**Next-release menu refinement:** current source prefers your Herdr pane labels
+and shows exact current bindings under **Current workers**. Closed/replaced
+registrations are kept behind **Previous / unavailable registrations (N)** with
+`Pane closed` or `Session changed` explanations and read-only Details. Missing
+observations stay visibly unknown in Current workers, not hidden as old history.
+Browsing never deletes registrations, resets history or activates scopes. Published
+v0.3.0 still uses the earlier flat list.
+
 - **Pause** changes only the selected worker and leaves it listed. Global controls
   are available in the actual supervisor; their confirmations remain explicit.
 - **Stop supervising** withdraws the exact worker from the active list but retains

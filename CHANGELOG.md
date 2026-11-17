@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Prefer Herdr pane labels in `/continuation`. Show exact current worker bindings separately from retained previous/unavailable registrations, distinguish Pane closed from Session changed, and keep previous entries inspectable without control actions or history deletion. Unknown observations remain visible among current workers.
+
 ## [0.3.0] - 2026-11-17
 
 GitHub feature release; npm publication remains disabled. Existing installations

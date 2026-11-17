@@ -25,6 +25,11 @@ async function planningSession(f) {
   return planner;
 }
 
+function snapshotPanes(f, panes) {
+  f.onRequest(request => request.method === 'session.snapshot' ?
+    { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents, panes } } : undefined);
+}
+
 async function ownAction(f, action) {
   let step = 0;
   f.worker.select((_title, choices) => {
@@ -183,20 +188,110 @@ for (const cancel of ['selection', 'confirmation']) {
   });
 }
 
-test('duplicate labels select only the addressed worker and preserve sibling settings', async t => {
+test('current pane labels are separate from retained closed and changed registrations', async t => {
   const f = await started(t);
-  f.agents[0].name = 'Same name';
+  for (const pane of ['w:p3', 'w:p4']) {
+    const past = f.native(pane);
+    f.agents.push({ ...f.agents[0], pane_id: pane,
+      agent_session: { ...f.agents[0].agent_session, value: past.file } });
+    await past.emit('session_start');
+    await past.command('continuation-worker', 'start');
+  }
+  const planner = await planningSession(f);
+  f.agents.splice(f.agents.findIndex(a => a.pane_id === 'w:p3'), 1);
+  f.agents.find(a => a.pane_id === 'w:p4').agent_session = {
+    source: 'herdr:pi', agent: 'pi', kind: 'path', value: join(f.root, 'replacement.jsonl') };
+  f.agents[0].name = 'Generic agent name';
+  f.agents[0].terminal_title_stripped = 'π - generic terminal title';
+  snapshotPanes(f, [{ pane_id: 'w:p1', label: 'worker' }, { pane_id: 'w:p4', label: 'reused pane' }]);
+  const before = await f.state();
+  const menus = [];
+  const answers = ['Previous / unavailable registrations (2)', '2. reused pane — Session changed', 'Details'];
+  planner.select((title, choices) => { menus.push({ title, choices }); return answers[menus.length - 1]; });
+  await planner.command('continuation', '');
+  assert.deepEqual(menus[0].choices, ['Join this session to supervision', '1. worker — Supervised',
+    'Previous / unavailable registrations (2)', 'Close']);
+  assert.match(menus[0].title, /Current workers \(1\)/);
+  assert.equal(menus.length, 3);
+  assert.equal(menus[1].title, 'Previous / unavailable registrations');
+  assert.deepEqual(menus[1].choices, ['1. Worker — Pane closed', '2. reused pane — Session changed', 'Close']);
+  assert.match(menus[2].title, /reused pane · Session changed/);
+  assert.deepEqual(menus[2].choices, ['Details', 'Close']);
+  assert.match(planner.notifications.at(-1)[0], /Session changed/);
+  assert.deepEqual(await f.state(), before, 'browsing retained rows must not mutate supervision');
+  assert.equal((await readdir(f.root)).some(name => /^management-/.test(name)), false);
+});
+
+test('a live pane without an agent is Session changed, not Pane closed; cancelling history has no effect', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  f.agents.splice(f.agents.findIndex(a => a.pane_id === 'w:p1'), 1);
+  snapshotPanes(f, [{ pane_id: 'w:p1', label: 'shell now' }]);
+  const before = await f.state();
+  const menus = [];
+  planner.select((title, choices) => {
+    menus.push({ title, choices });
+    return menus.length === 1 ? 'Previous / unavailable registrations (1)' : undefined;
+  });
+  await planner.command('continuation', '');
+  assert.match(menus[0].title, /Current workers \(0\)/);
+  assert.ok(!menus[0].choices.some(c => /^\d+\./.test(c)));
+  assert.equal(menus.length, 2);
+  assert.deepEqual(menus[1].choices, ['1. shell now — Session changed', 'Close']);
+  assert.deepEqual(await f.state(), before);
+  assert.equal((await readdir(f.root)).some(name => /^management-/.test(name)), false);
+});
+
+test('previous-registration browsing stays read-only if the original session reappears', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  const agent = f.agents.splice(f.agents.findIndex(a => a.pane_id === 'w:p1'), 1)[0];
+  const before = await f.state();
+  const menus = [];
+  planner.select((title, choices) => {
+    menus.push({ title, choices });
+    if (menus.length === 1) return 'Previous / unavailable registrations (1)';
+    if (menus.length === 2) { f.agents.push(agent); return choices[0]; }
+    return 'Close';
+  });
+  await planner.command('continuation', '');
+  assert.equal(menus.length, 3);
+  assert.deepEqual(menus[2].choices, ['Details', 'Close']);
+  assert.deepEqual(await f.state(), before);
+});
+
+test('missing observations stay in current workers and unnamed panes fall back to agent names', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  f.agents[0].name = 'Named agent';
+  snapshotPanes(f, [{ pane_id: 'w:p1', label: '  ' }]);
+  await writeFile(join(f.root, `observation-${f.workerId()}.json`), 'invalid-json');
+  const menus = [];
+  planner.select((title, choices) => { menus.push({ title, choices }); return 'Close'; });
+  await planner.command('continuation', '');
+  assert.equal(menus.length, 1);
+  assert.match(menus[0].title, /Current workers \(1\)/);
+  assert.ok(menus[0].choices.includes('1. Named agent — Status unknown'));
+  assert.ok(!menus[0].choices.some(c => c.startsWith('Previous / unavailable')));
+  assert.deepEqual(planner.notifications, []);
+});
+
+test('duplicate pane labels select only the addressed worker and preserve sibling settings', async t => {
+  const f = await started(t);
+  f.agents[0].name = 'Agent fallback';
   const other = f.native('w:p3');
   f.agents.push({ ...f.agents[0], pane_id: 'w:p3',
     agent_session: { ...f.agents[0].agent_session, value: other.file } });
   await other.emit('session_start');
   await other.command('continuation-worker', 'start');
   const planner = await planningSession(f);
+  snapshotPanes(f, [{ pane_id: 'w:p1', label: 'Same pane name' }, { pane_id: 'w:p3', label: 'Same pane name' }]);
   planner.select((_title, choices) => {
     const labels = choices.filter(c => /^\d+\./.test(c));
     if (!labels.length) return 'Pause this worker';
     assert.equal(labels.length, 2);
     assert.equal(new Set(labels).size, 2);
+    assert.deepEqual(labels, ['1. Same pane name — Supervised', '2. Same pane name — Supervised']);
     return labels[1];
   });
   await planner.command('continuation', '');

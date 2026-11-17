@@ -87,12 +87,18 @@ export async function managementSnapshot(root, socketPath, ctx) {
   const workers = [];
   for (const binding of Object.values(state?.workers ?? {})) {
     const agent = live.agents.find(a => a.pane_id === binding.paneId);
+    const pane = live.panes?.find(p => p.pane_id === binding.paneId);
+    const current = sameOccupant(agent, binding);
     let observation, observationError;
     try { observation = await readObservation(root, binding.workerId); }
     catch (error) { observationError = error.code ?? 'UNEXPECTED'; }
-    workers.push({ binding, agent, observation, observationError,
-      name: displayName(agent, 'Worker'), status: !running && !binding.stopped ?
-        { label: 'Supervisor unavailable', kind: 'unavailable' } : workerStatus(state, binding, agent, observation) });
+    let status = workerStatus(state, binding, agent, observation);
+    if (!binding.stopped && !current)
+      status = { label: pane || agent ? 'Session changed' : 'Pane closed', kind: 'unavailable' };
+    else if (!binding.stopped && !running)
+      status = { label: 'Supervisor unavailable', kind: 'unavailable' };
+    workers.push({ binding, agent, observation, observationError, current,
+      name: displayName(current ? agent : undefined, 'Worker', pane?.label), status });
   }
   return { state, live, running, workers,
     own: workers.find(w => w.binding.sessionId === session.id && w.binding.sessionFile === session.file) };
@@ -160,25 +166,37 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
         };
         const here = view.own ? view.own.status.label : supervisor.active ?
           (view.state?.paused ? 'Supervisor — paused' : 'Supervisor') : 'Not supervised';
-        const rows = view.workers.filter(row => !row.binding.stopped);
-        const labels = rows.map((row, index) => `${index + 1}. ${row.name} [${row.binding.workspaceId}] — ${row.status.label}`);
+        const rows = view.workers.filter(row => !row.binding.stopped && row.current);
+        const previous = view.workers.filter(row => !row.binding.stopped && !row.current);
+        const labels = rows.map((row, index) => `${index + 1}. ${row.name} — ${row.status.label}`);
+        const previousChoice = `Previous / unavailable registrations (${previous.length})`;
         const choices = [...(view.own ? ['This session: details'] : []),
           ...(supervisor.active ? ['Pause global supervision', 'Start global supervision'] :
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
-          ...labels, 'Close'];
-        const choice = await select(`Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`, choices);
+          ...labels, ...(previous.length ? [previousChoice] : []), 'Close'];
+        const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
+        const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
         await freshView();
         if (choice === 'Pause global supervision') return supervisor.command('pause global', ctx);
         if (choice === 'Start global supervision' || choice === 'Start supervisor here') return supervisor.command('start', ctx);
         if (choice === 'Return this session to supervision' || choice === 'Join this session to supervision') return worker.start(ctx);
-        const row = choice === 'This session: details' ? view.own : rows[labels.indexOf(choice)];
+        let row = choice === 'This session: details' ? view.own : rows[labels.indexOf(choice)];
+        const inspectingPrevious = choice === previousChoice;
+        if (inspectingPrevious) {
+          const previousLabels = previous.map((item, index) => `${index + 1}. ${item.name} — ${item.status.label}`);
+          const selected = await select('Previous / unavailable registrations', [...previousLabels, 'Close']);
+          if (!selected || selected === 'Close') return;
+          row = previous[previousLabels.indexOf(selected)];
+        }
         if (!row) return;
         const fresh = await freshView(row);
         const selected = fresh.workers.find(w => w.binding.workerId === row.binding.workerId);
+        const canControl = !inspectingPrevious && view.running && !row.binding.stopped && sameOccupant(selected.agent, row.binding);
+        const canReturn = !inspectingPrevious && row === view.own && view.running;
         const action = await select(`${selected.name} · ${selected.status.label}`, ['Details',
-          ...(view.running && !row.binding.stopped && sameOccupant(selected.agent, row.binding) ? ['Pause this worker', 'Stop supervising this worker'] : []),
-          ...(row === view.own && view.running ? ['Return this session to supervision'] : []), 'Close']);
+          ...(canControl ? ['Pause this worker', 'Stop supervising this worker'] : []),
+          ...(canReturn ? ['Return this session to supervision'] : []), 'Close']);
         if (!action || action === 'Close') return;
         const latest = await freshView(row);
         if (action === 'Details') {
