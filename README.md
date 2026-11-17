@@ -2,7 +2,7 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Current release: `v0.3.0`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.3.0); npm publication remains disabled (`private: true`). The start workflow has no real-model acceptance yet; earlier focused Linux Pi 1.5.2/Herdr 0.9.5 trials exercised the advanced workflow. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Current release: `v0.3.1`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.3.1); npm publication remains disabled (`private: true`). The start workflow has no real-model acceptance yet; earlier focused Linux Pi 1.5.2/Herdr 0.9.5 trials exercised the advanced workflow. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,12 +14,12 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install v0.3.0
+## Install v0.3.1
 
 Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
 
 ```sh
-pi install git:github.com/fbl-vol/pi-continuation@v0.3.0
+pi install git:github.com/fbl-vol/pi-continuation@v0.3.1
 ```
 
 Installation changes that profile's Pi settings; restart or reload the intended Pi session afterward. To upgrade an existing pinned installation, run the same install command with the new tag; `pi update --extensions` alone does not advance a pinned tag. Other running sessions keep their loaded code until individually restarted or reloaded. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
@@ -27,7 +27,7 @@ Installation changes that profile's Pi settings; restart or reload the intended 
 To remove this package from the same profile:
 
 ```sh
-pi remove git:github.com/fbl-vol/pi-continuation@v0.3.0
+pi remove git:github.com/fbl-vol/pi-continuation@v0.3.1
 ```
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
@@ -61,13 +61,13 @@ and checkpoint paths are available in Details rather than needed for normal use.
 An unsupervised planning session can inspect or pause a selected exact worker.
 Existing advanced commands remain available.
 
-**Next-release menu refinement:** current source prefers your Herdr pane labels
+**Since v0.3.1:** the menu prefers your Herdr pane labels
 and shows exact current bindings under **Current workers**. Closed/replaced
 registrations are kept behind **Previous / unavailable registrations (N)** with
 `Pane closed` or `Session changed` explanations and read-only Details. Missing
 observations stay visibly unknown in Current workers, not hidden as old history.
 Browsing never deletes registrations, resets history or activates scopes. Published
-v0.3.0 still uses the earlier flat list.
+v0.3.0 uses the earlier flat list.
 
 - **Pause** changes only the selected worker and leaves it listed. Global controls
   are available in the actual supervisor; their confirmations remain explicit.
