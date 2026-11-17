@@ -145,7 +145,10 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       for (const worker of Object.values(authority.state.workers)) {
         let checkout;
         try { checkout = await checkoutIdentity(worker.cwd); }
-        catch { if (worker.cwd === authority.grant.cwd) throw new Error('Existing worker checkout cannot be verified'); }
+        catch {
+          // An unavailable cwd is not evidence that this worker is unrelated.
+          refuse('Existing worker checkout cannot be verified; inspect writer ownership before delegation');
+        }
         if (checkout === authority.grant.checkout)
           refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
       }

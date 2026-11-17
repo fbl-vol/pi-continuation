@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -156,6 +156,37 @@ test('P7 writer claims follow verified Git checkout identity, not a parent cwd s
   assert.deepEqual(f.effects, ['split'], 'ambiguous original writer retains checkout ownership');
   assert.equal((await readdir(f.root)).filter(p => p.startsWith('delegation-writer-')).length, 1);
 });
+
+for (const unavailable of [true, false]) {
+  test(`P7 writer exclusion ${unavailable ? 'holds an unverifiable existing checkout' : 'permits a verified unrelated checkout'}`, async t => {
+    const f = await fixture(t);
+    const existing = f.native('w:p2');
+    existing.ctx.cwd = join(f.root, unavailable ? 'removed-subdirectory' : 'unrelated-checkout');
+    await mkdir(existing.ctx.cwd);
+    if (!unavailable) execFileSync('git', ['init', '--quiet', existing.ctx.cwd]);
+    f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal', cwd: existing.ctx.cwd,
+      agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+    await existing.emit('session_start', { reason: 'startup' });
+    await existing.command('continuation-worker', 'start');
+    const [binding] = Object.values((await f.state()).workers);
+    assert.equal(binding.sessionId, existing.id);
+    assert.equal(binding.paused, false);
+    if (unavailable) await rm(existing.ctx.cwd, { recursive: true });
+    await f.authorize();
+
+    if (unavailable) {
+      await assert.rejects(f.worker.spawn(task), /Existing worker checkout cannot be verified/);
+      assert.deepEqual(f.effects, [], 'unknown checkout must reject before pane creation');
+      assert.equal((await f.attempt()).status, 'held');
+      assert.equal(Object.keys((await f.state()).workers).length, 1);
+      assert.equal((await readdir(f.root)).some(p => p.startsWith('delegation-writer-')), false);
+    } else {
+      assert.equal((await f.worker.spawn(task)).details.status, 'dispatched');
+      assert.deepEqual(f.effects, ['split', 'start', 'task']);
+      assert.equal(Object.keys((await f.state()).workers).length, 2);
+    }
+  });
+}
 
 test('P4 owner restart retains route pause and refuses stale grant retargeting', async t => {
   const f = await fixture(t);
