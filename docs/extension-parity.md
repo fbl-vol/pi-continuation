@@ -24,7 +24,7 @@ The approved `start-v1` workflow adds two explicit opt-ins, not automatic worker
 
 For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and errors remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
 
-### User-approved confirmed replacement amendment (unreleased)
+### User-approved confirmed replacement amendment (since v0.3.0)
 
 When a pane now hosts a different saved Pi session, worker `start` may offer an
 additional explicit retirement confirmation. The supervisor rechecks the exact
@@ -39,7 +39,7 @@ and disposition/budget history. Retired sessions cannot be re-added. The new wor
 inherits no task authority, approvals or budget; independent global/route pauses
 remain. No automatic replacement, live migration or delivery retry is introduced.
 
-### User-approved supervised delegation amendment (unreleased)
+### User-approved supervised delegation amendment (since v0.3.0)
 
 An unsupervised planning session or a supervised worker may delegate within an
 explicit user-authorized assignment. `/continuation-delegate <writer|read-only> <assignment scope>`
@@ -85,7 +85,7 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
-### User-approved contextual management amendment (unreleased)
+### User-approved contextual management amendment (since v0.3.0)
 
 The ordinary extension adds `/continuation`, a native menu for the current session
 and readable known worker labels, with exact identity available in Details. It
