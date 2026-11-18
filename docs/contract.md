@@ -47,11 +47,15 @@ cannot clear a user wait. A current completed owner stop is acknowledged while
 waiting so it cannot be nudged again when the wait ends; this is not assignment
 completion. A matching material notice consumes a child wait only after the
 existing receipt confirms delivery. A user wait defers all notices to that owner
-and rejects further delegation. Only the confirmed own-session
-`/continuation-owner resume` releases that wait after the user has supplied the
-decision; subsequent instructions arrive as ordinary user input. This command
-does not grant approval, select findings, clear a worker hold or activate scopes.
-Waits live in the retained supervisor snapshot and survive reload. There is no
+and rejects further delegation, including inherited already-dispatched children.
+Direct owner continuation is refused at the disposition and effect boundary. The
+confirmed own-session `/continuation-owner resume` records a durable release
+fence after the user has supplied the decision; it does not flush pending notices.
+Only a subsequent ordinary interactive/RPC user turn that completes without a
+hold clears that fence, after which pending notices may deliver. Aborted/held
+turns, synthetic messages and reload do not clear it. Neither command grants
+approval, selects findings, clears a worker hold or activates scopes. Waits and
+release fences live in the retained supervisor snapshot and survive reload. There is no
 second scheduler, polling service or automatic user-selection wake. This source
 path has isolated tests, not live adoption or package-release evidence.
 

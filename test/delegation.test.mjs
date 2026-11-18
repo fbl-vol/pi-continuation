@@ -151,9 +151,48 @@ test('P3 owner child wait persists; user selection gate blocks child notices and
     /waiting for a user decision/);
   await f.worker.command('continuation-owner', 'resume');
   const afterRelease = await f.state();
-  assert.equal(afterRelease.ownerWaits[f.workerId()], undefined);
+  assert.equal(afterRelease.ownerWaits[f.workerId()]?.kind, 'released');
   assert.equal(afterRelease.handled[f.workerId()], waitingStop,
     'releasing a user wait cannot turn an old settled stop into a fresh nudge');
+});
+
+test('P3 an already-dispatched child cannot delegate across its owner user wait; stale direct owner resume is fenced', async t => {
+  const f = await fixture(t);
+  await f.worker.command('continuation-coordinator', 'owner');
+  await f.workerStart();
+  await f.authorize();
+  const writer = (await f.worker.spawn(task)).details;
+  const child = f.children[0].native;
+  f.worker.assistant('Waiting for user selection before further review.');
+  await f.worker.emit('agent_settled');
+  const observed = await f.observation();
+  await f.worker.wait({ kind: 'user' });
+
+  const before = [...f.effects];
+  await assert.rejects(child.spawn({ key: 'late-review', task: 'Review after selection.', role: 'read-only' }),
+    /waiting for a user decision/);
+  assert.deepEqual(f.effects, before, 'the inherited child cannot create even a read-only grandchild');
+  assert.equal((await f.attempts()).length, 1, 'no new delegated attempt was claimed');
+  const direct = await f.supervisor.dispose({ workerId: f.workerId(), stop: observed.stop,
+    action: 'resume', evidence: 'Waiting for user selection before further review.' });
+  assert.match(direct.content[0].text, /waiting for a user decision/i);
+  assert.equal((await f.state()).inflight[f.workerId()], undefined);
+  assert.equal((await f.state()).resumed[f.workerId()], undefined);
+  assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'user');
+
+  await f.worker.command('continuation-owner', 'resume');
+  const released = await f.state();
+  assert.equal(released.ownerWaits[f.workerId()].kind, 'released');
+  assert.equal(released.workers[writer.workerId].recipient.id, released.workers[f.workerId()].coordinatorId);
+  const stillGated = await f.supervisor.dispose({ workerId: f.workerId(), stop: observed.stop,
+    action: 'resume', evidence: 'Waiting for user selection before further review.' });
+  assert.match(stillGated.content[0].text, /waiting for a user decision/i);
+  await assert.rejects(child.spawn({ key: 'release-before-turn', task: 'Review too early.', role: 'read-only' }),
+    /waiting for a user decision/);
+  await f.worker.emit('session_shutdown');
+  await f.worker.emit('session_start');
+  assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released',
+    'a restart cannot drop the release fence or synthesize a decision turn');
 });
 
 test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {
@@ -212,6 +251,31 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
   assert.equal(f.worker.messages.length, 0);
   assert.equal(other.messages.length, 1);
   assert.equal((await f.state()).routes.w.paused, false);
+
+  await f.worker.command('continuation-owner', 'resume');
+  assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released');
+  assert.equal(f.worker.messages.length, 0, 'explicit release does not preempt selected ordinary user input');
+  assert.equal((await f.observation()).hold, false, 'owner confirmation is guarded, not an external approval hold');
+  const pendingNotice = Object.values((await f.state()).notices).find(n => n.workerId === first.workerId);
+  assert.equal(pendingNotice.status, 'pending');
+  assert.equal((await readdir(f.root)).includes(`receipt-${pendingNotice.id}.json`), false,
+    'no notice receipt may be claimed while a user selection is still pending');
+  const staleRelease = await sendAction(f.root, { type: 'owner-wait', kind: 'settled-user',
+    workerId: f.workerId(), coordinatorId: (await f.state()).workers[f.workerId()].coordinatorId,
+    sessionId: f.worker.id, sessionFile: f.worker.file }, 'supervisor');
+  assert.equal(staleRelease.accepted, false, 'without a fresh native owner stop, no direct release is accepted');
+  assert.equal(f.worker.messages.length, 0);
+  await f.worker.emit('input', { source: 'interactive', text: 'Fix all three selected findings.' });
+  await f.worker.emit('before_agent_start', { messageType: 'user', prompt: 'Fix all three selected findings.' });
+  await f.worker.emit('agent_start');
+  f.worker.user('Fix all three selected findings.');
+  assert.equal(f.worker.messages.length, 0, 'selection run must finish before material notice');
+  f.worker.assistant('Selection recorded; will coordinate the bounded fixes.');
+  await f.worker.emit('agent_settled');
+  assert.equal(f.worker.messages.length, 1, 'the deferred notice delivers after the ordinary user turn');
+  assert.equal((await f.state()).ownerWaits[f.workerId()], undefined);
+  assert.equal(Object.values((await f.state()).notices).find(n => n.workerId === first.workerId)?.status, 'sent');
+  assert.equal((await readJson(join(f.root, `receipt-${pendingNotice.id}.json`))).status, 'sent');
 });
 
 test('P5 read-only exact-task claims prevent duplicate dispatch under another key without relying on writer exclusion', async t => {

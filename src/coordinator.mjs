@@ -12,24 +12,46 @@ import { pinnedCheckpoint, coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash } from './policy.mjs';
 
 export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
-  socketPath = process.env.HERDR_SOCKET_PATH } = {}) {
+  socketPath = process.env.HERDR_SOCKET_PATH, confirmOwner } = {}) {
   let close;
   let coordinator;
   let generation = 0;
   let humanPending = false;
   let uiPromptActive = false;
+  let releaseInput = false;
+  let selectionTurn = false;
   const report = diagnostics('coordinator');
   const listen = (record, ctx) => listenJson(root, record.id,
     notice => acceptNotice(record, ctx, notice), error => report('accept notice', error, ctx));
 
-  pi.on('input', event => {
+  pi.on('input', async event => {
     if (event.source === 'interactive' || event.source === 'rpc') {
       generation++;
       humanPending = true;
+      if (coordinator?.role === 'owner') {
+        try {
+          const state = await readSupervisor(root);
+          const owner = Object.entries(state.workers).find(([, w]) => w.role === 'owner' &&
+            w.coordinatorId === coordinator.id && w.sessionId === coordinator.sessionId);
+          releaseInput = state.ownerWaits[owner?.[0]]?.kind === 'released';
+        } catch (error) { releaseInput = false; report('inspect owner release', error); }
+      }
     }
   });
+  pi.on('before_agent_start', event => {
+    // Pi skips input for extension commands. A confirmed release alone is not a user turn.
+    selectionTurn = event.messageType === 'user' && releaseInput;
+    releaseInput = false;
+  });
   pi.on('agent_start', () => { generation++; });
-  pi.on('agent_settled', () => { humanPending = false; });
+  pi.on('agent_settled', async (event, ctx) => {
+    humanPending = false;
+    if (selectionTurn && !event.aborted) {
+      selectionTurn = false;
+      try { await ownerRequest(ctx, 'settled-user'); }
+      catch (error) { report('settle owner release', error, ctx); }
+    } else selectionTurn = false;
+  });
   pi.on('ui_prompt_start', () => { uiPromptActive = true; });
   pi.on('ui_prompt_end', () => { uiPromptActive = false; });
   pi.on('session_start', async (_event, ctx) => {
@@ -85,7 +107,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     if ((recipientWorker && (recipientWorker.paused || recipientWorker.stopped ||
         state.routes[recipientWorker.route]?.paused ||
         (await readObservation(root, recipientWorker.workerId)).hold)) ||
-        waiting?.kind === 'user' || (waiting?.kind === 'child' &&
+        ['user', 'released'].includes(waiting?.kind) || (waiting?.kind === 'child' &&
         !waiting.children.includes(notice.workerId))) {
       return { accepted: false, deferred: true, id: notice.id };
     }
@@ -109,7 +131,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
         (latestWorker && (latestWorker.paused || latestWorker.stopped ||
           latest.routes[latestWorker.route]?.paused ||
           (await readObservation(root, latestWorker.workerId)).hold)) ||
-        latestWait?.kind === 'user' || (latestWait?.kind === 'child' &&
+        ['user', 'released'].includes(latestWait?.kind) || (latestWait?.kind === 'child' &&
           !latestWait.children.includes(notice.workerId)) ||
         humanPending || uiPromptActive || !ctx.isIdle() || generation !== version || currentSession(ctx).leaf !== now.leaf) {
       return { accepted: false };
@@ -190,11 +212,15 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     handler: async (args, ctx) => {
       if (args.trim() !== 'resume' || coordinator?.role !== 'owner' || !ctx.isIdle())
         throw new Error('Usage: /continuation-owner resume in the idle exact owner session');
-      if (!await ctx.ui.confirm('Release user-decision wait?',
+      if (!confirmOwner) throw new Error('Owner release requires the worker-owned guarded confirmation');
+      if (!await confirmOwner(ctx, 'Release user-decision wait?',
         'Confirm the user has actually provided the decision or selected findings in this owner pane. This command grants no approval, applies no fixes and does not release worker holds.')) return;
       await ownerRequest(ctx, 'resume-user');
-      ctx.ui.notify('User-decision wait released; send the selected instruction as ordinary user input', 'info');
+      ctx.ui.notify('User-decision wait awaits an ordinary user turn; send the selected instruction as user input', 'info');
     },
   });
-  pi.on('session_shutdown', async () => { generation++; coordinator = undefined; await close?.(); close = undefined; });
+  pi.on('session_shutdown', async () => {
+    generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
+    await close?.(); close = undefined;
+  });
 }

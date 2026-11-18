@@ -163,8 +163,9 @@ supervised non-writer and an exact recipient for its delegated children, not ano
 supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
 user-decision wait. A child material notice wakes only its owner; user selection
 requires explicit `/continuation-owner resume` in that owner session after the actual
-user decision, then ordinary user input. No command assumes approval or repairs
-an uncertain effect. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
+user decision, then a successful ordinary user-input turn before pending notices
+can deliver. Neither release nor a child can bypass the decision fence. No command
+assumes approval or repairs an uncertain effect. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
 for the bounded safeguards. No live owner bootstrap or unattended delivery is claimed.
 
 ## Development and disposable use

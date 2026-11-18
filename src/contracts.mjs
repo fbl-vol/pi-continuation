@@ -33,7 +33,7 @@ import { readJson } from './store.mjs';
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
  *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>,
- *   ownerWaits: Object<string, {kind: 'child'|'user', children?: string[]}>}} SupervisorState
+ *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>}} SupervisorState
  */
 
 export const SCHEMA_VERSION = 1;
@@ -85,9 +85,11 @@ export function decodeSupervisor(record) {
   if (!object(state.ownerWaits)) invalid();
   for (const [id, wait] of Object.entries(state.ownerWaits)) {
     if (!isId(id) || state.workers[id]?.role !== 'owner' || !object(wait) ||
-        !['child', 'user'].includes(wait.kind) ||
+        !['child', 'user', 'released'].includes(wait.kind) ||
         (wait.kind === 'child' ? !Array.isArray(wait.children) || !wait.children.length ||
-          wait.children.some(child => !isId(child)) : wait.children !== undefined)) invalid();
+          wait.children.some(child => !isId(child)) : wait.children !== undefined) ||
+        (wait.kind === 'released' ? !(wait.stop === null || typeof wait.stop === 'string') :
+          wait.stop !== undefined)) invalid();
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};

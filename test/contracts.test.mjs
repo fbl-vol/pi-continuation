@@ -66,7 +66,10 @@ test('P3 owner decision waits remain durable and malformed child waits cannot be
   assert.deepEqual(decodeSupervisor(state).ownerWaits[ownerId], { kind: 'user' });
   state.ownerWaits[ownerId] = { kind: 'child', children: [childId] };
   assert.deepEqual(decodeSupervisor(state).ownerWaits[ownerId].children, [childId]);
+  state.ownerWaits[ownerId] = { kind: 'released', stop: null };
+  assert.deepEqual(decodeSupervisor(state).ownerWaits[ownerId], { kind: 'released', stop: null });
   for (const wait of [{ kind: 'child', children: [] }, { kind: 'user', children: [childId] },
+    { kind: 'released' }, { kind: 'released', stop: 3 }, { kind: 'released', stop: null, children: [childId] },
     { kind: 'child', children: ['unverified'] }]) {
     state.ownerWaits[ownerId] = wait;
     assert.throws(() => decodeSupervisor(state), /Invalid continuation record/);

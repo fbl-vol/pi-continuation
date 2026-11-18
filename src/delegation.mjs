@@ -59,16 +59,28 @@ export async function delegationAuthority(root, reference, binding) {
   if (grant.revoked || grant.cwd !== await realpath(binding.cwd)) refuse('Delegation scope revoked or cwd changed');
   let role = grant.role;
   if (!['writer', 'read-only'].includes(role)) refuse('Delegation has no explicit role boundary');
+  let inheritedRecipient;
   if (reference.spawnId) {
     const parent = await readJson(spawnPath(root, reference.spawnId));
     if (parent.grantId !== grant.id || !['writer', 'read-only'].includes(parent.role) || parent.status !== 'dispatched' ||
         JSON.stringify(parent.child) !== JSON.stringify(binding)) refuse('Subdelegation parent is not the dispatched exact child');
     role = grant.role === 'read-only' ? 'read-only' : parent.role;
+    inheritedRecipient = parent.recipient;
   } else if (JSON.stringify(grant.parent) !== JSON.stringify(binding)) refuse('Delegation belongs to another planning session');
   const state = await delegationOwner(root, grant);
   if (state.routes[binding.workspaceId]?.paused) refuse('Delegation route is paused');
   const worker = Object.values(state.workers).find(w => w.sessionId === binding.sessionId || w.paneId === binding.paneId);
-  if (worker && state.ownerWaits?.[worker.workerId]?.kind === 'user')
+  const recipient = inheritedRecipient ?? worker?.recipient;
+  if (inheritedRecipient && (!worker || worker.recipient?.id !== inheritedRecipient.id))
+    refuse('Inherited owner recipient changed; no delegation through this tree');
+  if (recipient) {
+    const owner = Object.values(state.workers).find(w => w.role === 'owner' &&
+      w.coordinatorId === recipient.id && w.sessionId === (worker?.recipient?.sessionId));
+    if (!owner) refuse('Assignment owner unavailable; no delegation through this tree');
+    if (['user', 'released'].includes(state.ownerWaits?.[owner.workerId]?.kind))
+      refuse('Owner is waiting for a user decision; no delegation through this gate');
+  }
+  if (worker?.role === 'owner' && ['user', 'released'].includes(state.ownerWaits?.[worker.workerId]?.kind))
     refuse('Owner is waiting for a user decision; no delegation through this gate');
   if (worker) {
     const observation = await readObservation(root, worker.workerId);
