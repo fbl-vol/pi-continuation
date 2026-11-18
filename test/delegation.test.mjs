@@ -265,6 +265,21 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
     sessionId: f.worker.id, sessionFile: f.worker.file }, 'supervisor');
   assert.equal(staleRelease.accepted, false, 'without a fresh native owner stop, no direct release is accepted');
   assert.equal(f.worker.messages.length, 0);
+
+  // Pi 1.5.2 stops after a later input handler returns handled, without a run.
+  // sendUserMessage then emits extension input followed by messageType=user.
+  await f.worker.emit('input', { source: 'interactive', text: 'Handled by another extension.' });
+  await f.worker.emit('input', { source: 'extension', text: 'Synthetic housekeeping.' });
+  await f.worker.emit('before_agent_start', { messageType: 'user', prompt: 'Synthetic housekeeping.' });
+  await f.worker.emit('agent_start');
+  f.worker.user('Synthetic housekeeping.');
+  f.worker.assistant('Synthetic run finished; no selection was supplied.');
+  await f.worker.emit('agent_settled');
+  assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released');
+  assert.equal((await f.state()).notices[pendingNotice.id].status, 'pending');
+  assert.equal(f.worker.messages.length, 0, 'extension-origin turn cannot release a user-decision wait');
+  assert.equal((await readdir(f.root)).includes(`receipt-${pendingNotice.id}.json`), false);
+
   await f.worker.emit('input', { source: 'interactive', text: 'Fix all three selected findings.' });
   await f.worker.emit('before_agent_start', { messageType: 'user', prompt: 'Fix all three selected findings.' });
   await f.worker.emit('agent_start');

@@ -36,6 +36,10 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
           releaseInput = state.ownerWaits[owner?.[0]]?.kind === 'released';
         } catch (error) { releaseInput = false; report('inspect owner release', error); }
       }
+    } else {
+      // sendUserMessage emits extension input before messageType=user; a handled
+      // or failed earlier user preflight cannot authorize that synthetic run.
+      releaseInput = false;
     }
   });
   pi.on('before_agent_start', event => {
