@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## [0.3.2] - 2026-11-18
+
+GitHub patch release for controlled trials; npm publication remains disabled.
+Update the pinned Git tag and reload intended sessions to use the corrected commands.
+Installation does not repair existing invalid registrations or migrate supervision.
 
 - Make bare `/continuation-worker` an alias for the existing human-confirmed `start` workflow; retain explicit checkpoint and `--start` advanced registration.
 - Reject directory/non-file checkpoints before advanced registration can persist an invalid worker. Existing registrations and live supervision are not migrated or rewritten.
 - Treat Herdr's explicit missing-pane/workspace response as benign only when clearing display tokens after a target disappears. Preserve structured Herdr error codes, keep publication and other cleanup failures visible, and leave supervision authority unchanged.
+- Validate with 294 isolated tests and the unchanged explicit 32-file package payload. Independent source review found no material findings; source CI passes Linux, Windows and macOS. No new real-worker, real-model or native platform runtime acceptance is claimed.
 
 ## [0.3.1] - 2026-11-17
 

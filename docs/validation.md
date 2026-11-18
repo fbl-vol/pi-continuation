@@ -15,6 +15,23 @@ native cross-platform runtime, live adapter, delegated-spawn or real-model accep
 the model/platform evidence limits below remain. Historical section counts describe
 their original revisions, not the current integrated suite.
 
+## Worker start and annotation cleanup release (v0.3.2)
+
+The integrated source suite passes **294 isolated tests**, with the unchanged
+**32-file package payload**. New regressions exercise bare/whitespace worker
+commands through confirmation and blank-session enrollment, directory rejection
+before either advanced registration form persists state, structured Herdr error
+codes, benign missing-target cleanup and continued reporting of publication/other
+cleanup failures. Six focused cases failed against the previous implementation;
+all 41 focused checks pass with the correction. Existing valid-file registration,
+hold, pause, history and ownership checks remain exercised.
+
+Independent review of the source fix found no material findings; its PR CI passed
+Linux, Windows and macOS. A read-only Herdr 0.9.5 missing-pane lookup verified error
+code propagation, not live metadata writes or worker recovery. These checks do not
+repair existing registrations or establish real-worker, real-model or native
+cross-platform runtime acceptance.
+
 ## Readable worker menu release (v0.3.1)
 
 Focused management scenarios cover the native `snapshot.panes` label separately

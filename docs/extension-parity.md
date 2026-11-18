@@ -22,7 +22,7 @@ The old workflow rechecked Herdr identity/state near delivery and refused blocke
 
 The approved `start-v1` workflow adds two explicit opt-ins, not automatic worker discovery: `/continuation-supervisor start` enables the one owner in the current private state scope; `/continuation-worker start` confirms enrollment/activation of that exact worker, derives its route and creates a private checkpoint from native projected task/result text. No user-maintained checkpoint declaration or copied ID is required for a fresh worker. Missing/conflicting ownership is refused, never guessed. Existing explicit controls remain available; an existing manually pinned checkpoint is not replaced or overwritten by start.
 
-Since the next source release, bare `/continuation-worker` (also whitespace-only
+Since v0.3.2, bare `/continuation-worker` (also whitespace-only
 arguments) selects the same confirmed `start` path. Explicit checkpoint paths and
 `--start` remain advanced forms; their checkpoints must be existing files before
 registration. This user-approved command default changes no confirmation, hold,
