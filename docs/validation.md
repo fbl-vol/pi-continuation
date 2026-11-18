@@ -15,6 +15,25 @@ native cross-platform runtime, live adapter, delegated-spawn or real-model accep
 the model/platform evidence limits below remain. Historical section counts describe
 their original revisions, not the current integrated suite.
 
+## Settled-turn error holds release (v0.3.3)
+
+The integrated source suite passes **306 isolated tests**, with the unchanged
+**32-file package payload**. A failed intermediate tool followed by a normal fresh
+report remains eligible for existing assessment and one-use delivery. Actual
+failed turns, observed approvals, checkpoint failures and legacy holds remain
+held. Later failed turns preserve an already-latched hold's original reason/time
+through Details and reload. Four provenance cases failed before the selected
+correction and pass afterward; resume remains refused.
+
+Independent source review and selected-fix re-review are complete, with no
+outstanding material findings. Source-fix CI passes Linux, Windows and macOS.
+Eight disposable Linux Herdr 0.9.5 display states checked labels/colors at 42/24
+sidebar columns using synthetic session/source attribution. Eighteen native Pi
+1.5.2 selector/notification component frames checked readable menus/Details at
+80/40 columns and read-only keyboard browsing. These are isolated rendering and
+component checks, not real-worker identity, whole live TUI, real-model or native
+Windows/macOS acceptance. Existing holds and live supervision were not repaired.
+
 ## Worker start and annotation cleanup release (v0.3.2)
 
 The integrated source suite passes **294 isolated tests**, with the unchanged

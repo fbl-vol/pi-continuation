@@ -30,7 +30,7 @@ pause, ownership or return semantics and does not repair existing registrations.
 
 For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and failed settled runs remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
 
-### User-approved intermediate-error amendment (unreleased)
+### User-approved intermediate-error amendment (since v0.3.3)
 
 A failed intermediate tool invocation during an ordinary run does not itself latch
 an error hold. Pi may recover; the fresh settled outcome and existing final-reply /

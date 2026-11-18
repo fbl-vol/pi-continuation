@@ -47,12 +47,12 @@ not show all details; use Pi's `/continuation` menu for the explanation.
   next turn is eligible or an approval has been granted.
 - `Paused`, `Paused: global` and `Paused: workspace` preserve separate scopes.
   `Held: prompt`, `Held: decision`, `Held: error` and `Held: delivery` describe
-  existing deterministic state. In unreleased source, newly recorded failed Pi
+  existing deterministic state. Since v0.3.3, newly recorded failed Pi
   turns show `Held: run failed`; checkpoint-write failures show `Held: checkpoint`.
   Details explains the cause, hold-recorded time and confirmed recovery control.
   Old unclassified error holds remain `Held: error`, with cause/time unavailable;
   they are not silently cleared or guessed to be run failures. Intermediate tool
-  failures no longer create a hold by themselves in this source version, but real
+  failures no longer create a hold by themselves in this version, but real
   failed turns, prompts and existing holds remain protected. Published v0.3.2
   retains the earlier tool-error behavior. No prose classifier invents authority.
 - A verified supervisor has `Supervisor` or `Supervisor: paused`. Without an

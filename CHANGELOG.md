@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.3.3] - 2026-11-18
+
+GitHub patch release for controlled trials; npm publication remains disabled.
+Update the pinned Git tag and restart intended sessions to load the new behavior.
+Installation does not clear existing holds or migrate supervision.
 
 - Intermediate tool failures no longer latch permanent continuation holds during
   ordinary runs. Failed settled turns, observed approval/interruption guards,
@@ -8,6 +12,10 @@
 - New run/checkpoint error holds have cause-specific labels and Details with the
   hold-recorded time and confirmed recovery path. Existing unclassified error
   holds stay held; no raw tool/provider payloads or automatic recovery are added.
+- Validate with 306 isolated tests and the unchanged explicit 32-file payload.
+  Independent source review and selected-fix re-review are complete; source CI
+  passes Linux, Windows and macOS. Synthetic native Linux rendering/component
+  checks are not real-worker, real-model or native cross-platform acceptance.
 
 ## [0.3.2] - 2026-11-18
 
