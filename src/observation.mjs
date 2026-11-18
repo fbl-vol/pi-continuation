@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { access, lstat, realpath, rm } from 'node:fs/promises';
+import { access, lstat, realpath, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { atomicJson, atomicText, claim, defaultRoot, ensureRoot, readJson } from './store.mjs';
 import { delegatedStart, delegationAuthority, requireDelegationParent, spawnPath } from './delegation.mjs';
@@ -261,8 +261,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     finally { starting = false; }
   };
   pi.registerCommand('continuation-worker', {
-    description: 'Start or return to supervision: start | advanced registration: <checkpoint> or --start {"checkpoint":"/path","message":"task"}',
-    handler: (argument, ctx) => argument.trim() === 'start' ? requestStart(ctx) : registerWorker(argument, ctx),
+    description: 'Start or return to supervision (default): [start] | advanced registration: <checkpoint> or --start {"checkpoint":"/path","message":"task"}',
+    handler: (argument, ctx) => {
+      const input = argument.trim();
+      return !input || input === 'start' ? requestStart(ctx) : registerWorker(argument, ctx);
+    },
   });
 
   const registerWorker = async (argument, ctx, managed = false, delegated, stillEligible = () => true) => {
@@ -301,8 +304,14 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       }
       const workerId = randomUUID();
       const checkpoint = managed ? managedCheckpointPath(root, workerId) : resolve(ctx.cwd, checkpointPath);
-      if (!managed) try { await access(checkpoint); } catch {
-        ctx.ui.notify('Existing checkpoint path required', 'error'); return;
+      if (!managed) {
+        try {
+          if (!(await stat(checkpoint)).isFile()) {
+            ctx.ui.notify('Checkpoint must be an existing file, not a directory or other resource', 'error'); return;
+          }
+        } catch {
+          ctx.ui.notify('Existing checkpoint file required', 'error'); return;
+        }
       }
       const session = currentSession(ctx);
       if (!stillEligible() || guard.blocked || guard.revision !== registrationRevision || stopVersion !== registrationVersion) {
