@@ -68,6 +68,8 @@ export async function delegationAuthority(root, reference, binding) {
   const state = await delegationOwner(root, grant);
   if (state.routes[binding.workspaceId]?.paused) refuse('Delegation route is paused');
   const worker = Object.values(state.workers).find(w => w.sessionId === binding.sessionId || w.paneId === binding.paneId);
+  if (worker && state.ownerWaits?.[worker.workerId]?.kind === 'user')
+    refuse('Owner is waiting for a user decision; no delegation through this gate');
   if (worker) {
     const observation = await readObservation(root, worker.workerId);
     if (['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
@@ -96,6 +98,10 @@ export async function delegatedStart(root, id, record, state, live) {
     refuse('Delegated enrollment exceeds inherited scope');
   if (Object.values(state.workers).some(w => w.paneId === record.paneId || w.sessionId === record.sessionId))
     refuse('Delegated enrollment cannot replace or reactivate an existing worker');
+  if (spawn.recipient && (!state.workers[spawn.parentWorkerId] ||
+      state.workers[spawn.parentWorkerId].recipient?.id !== spawn.recipient.id &&
+      state.workers[spawn.parentWorkerId].coordinatorId !== spawn.recipient.id))
+    refuse('Delegated owner recipient changed');
   return spawn;
 }
 
@@ -132,8 +138,13 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   // Claims survive failures. Changing a key must not escape an identical task's claim.
   await claim(join(root, `spawn-key-${attemptKey}.json`), { id });
   await claim(join(root, `spawn-assignment-${assignmentKey}.json`), { id });
+  const parentWorker = Object.values(authority.state.workers).find(w => w.sessionId === parent.sessionId &&
+    w.paneId === parent.paneId);
+  const recipient = parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
+    { id: parentWorker.coordinatorId } : undefined);
   const spawn = { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
-    parent, role, key, task, status: 'prepared', at: new Date().toISOString() };
+    parent, role, key, task, status: 'prepared', at: new Date().toISOString(),
+    ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
   await claim(spawnPath(root, id), spawn);
   const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
   try {
@@ -149,8 +160,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
           // An unavailable cwd is not evidence that this worker is unrelated.
           refuse('Existing worker checkout cannot be verified; inspect writer ownership before delegation');
         }
-        if (checkout === authority.grant.checkout)
-          refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
+        if (checkout === authority.grant.checkout) {
+          const owner = worker.role === 'owner' && worker.coordinatorId &&
+            worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
+            worker.paneId === parent.paneId && recipient?.id === worker.coordinatorId;
+          if (!owner) refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
+        }
       }
       await claim(join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`), { id, grantId: spawn.grantId });
     }

@@ -9,6 +9,7 @@ import { atomicJson, readJson } from '../src/store.mjs';
 import { sendAction } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
 import { delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
+import { checkpointHash } from '../src/policy.mjs';
 
 async function fixture(t, options = {}) {
   const f = await startFixture(t, { blank: true });
@@ -100,6 +101,117 @@ test('P1/P2/P7 unsupervised planner creates only a new identity, enrolls before 
   await assert.rejects(f.worker.spawn({ ...task, key: 'renamed' }), /EEXIST/);
   await assert.rejects(f.worker.spawn({ ...task, key: 'changed-role', role: 'read-only' }), /EEXIST/);
   assert.equal(f.effects.filter(e => e === 'task').length, 2, 'one initial task per new worker');
+});
+
+test('P1/P6 supervised non-writing owner delegates the sole writer and pins exact child recipient', async t => {
+  const f = await fixture(t);
+  await f.worker.command('continuation-coordinator', 'owner');
+  await f.workerStart();
+  const ownerId = f.workerId();
+  const owner = (await f.state()).workers[ownerId];
+  assert.equal(owner.role, 'owner');
+  await f.authorize();
+  const result = (await f.worker.spawn(task)).details;
+  const child = (await f.state()).workers[result.workerId];
+  assert.equal(child.recipient.id, owner.coordinatorId);
+  assert.equal(child.recipient.sessionId, owner.sessionId);
+  assert.equal(child.recipient.role, 'owner');
+  assert.equal(f.effects.filter(effect => effect === 'task').length, 1);
+  await f.workerStart();
+  assert.equal((await f.state()).workers[ownerId].role, 'owner',
+    'confirmed own-session return must not collide with child recipient');
+  await assert.rejects(f.worker.spawn({ ...task, key: 'second', task: 'A second writer' }),
+    /Checkout already has a supervised worker|EEXIST/);
+  assert.equal(f.effects.filter(effect => effect === 'task').length, 1);
+});
+
+test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
+  const f = await fixture(t);
+  await f.workerStart();
+  await assert.rejects(f.worker.command('continuation-coordinator', 'owner'),
+    /register owner before worker enrollment/);
+  assert.equal((await f.state()).workers[f.workerId()].role, undefined);
+});
+
+test('P3 owner child wait persists; user selection gate blocks child notices and delegation', async t => {
+  const f = await fixture(t);
+  await f.worker.command('continuation-coordinator', 'owner');
+  await f.workerStart();
+  await f.authorize();
+  const child = (await f.worker.spawn(task)).details;
+  await f.worker.wait({ kind: 'child', children: [child.workerId] });
+  assert.deepEqual((await f.state()).ownerWaits[f.workerId()], { kind: 'child', children: [child.workerId] });
+  await f.worker.wait({ kind: 'user' });
+  assert.deepEqual((await f.state()).ownerWaits[f.workerId()], { kind: 'user' });
+  f.worker.assistant('Waiting for the actual user selection.');
+  await f.worker.emit('agent_settled');
+  const waitingStop = (await readJson(join(f.root, `observation-${f.workerId()}.json`))).stop;
+  await assert.rejects(f.worker.wait({ kind: 'child', children: [child.workerId] }), /rejected/i);
+  await assert.rejects(f.worker.spawn({ key: 'review', task: 'Review after user selection.', role: 'read-only' }),
+    /waiting for a user decision/);
+  await f.worker.command('continuation-owner', 'resume');
+  const afterRelease = await f.state();
+  assert.equal(afterRelease.ownerWaits[f.workerId()], undefined);
+  assert.equal(afterRelease.handled[f.workerId()], waitingStop,
+    'releasing a user wait cannot turn an old settled stop into a fresh nudge');
+});
+
+test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {
+  const f = await fixture(t);
+  await f.worker.command('continuation-coordinator', 'owner');
+  await f.workerStart();
+  await f.authorize();
+  const first = (await f.worker.spawn(task)).details;
+  const other = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'other-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: other.file } });
+  await other.emit('session_start');
+  await other.command('continuation-coordinator', 'owner');
+  await other.command('continuation-worker', 'start');
+  await other.command('continuation-delegate', 'read-only Review only the approved result.');
+  const second = (await other.spawn({ key: 'review', task: 'Review stage one without edits.', role: 'read-only' })).details;
+  const state = await f.state();
+  assert.notEqual(state.workers[first.workerId].recipient.id, state.workers[second.workerId].recipient.id);
+  assert.equal(state.workers[first.workerId].route, state.workers[second.workerId].route);
+  await f.worker.wait({ kind: 'user' });
+  await other.wait({ kind: 'child', children: [second.workerId] });
+  other.assistant('Waiting for the reviewer before coordinating fixes.');
+  await other.emit('agent_settled');
+  const ownerStop = (await readJson(join(f.root, `observation-${Object.values(state.workers).find(w =>
+    w.coordinatorId === state.workers[second.workerId].recipient.id).workerId}.json`))).stop;
+
+  const reviewer = f.children[1].native;
+  reviewer.assistant('Review complete with evidence.');
+  await reviewer.emit('agent_settled');
+  const observed = await readJson(join(f.root, `observation-${second.workerId}.json`));
+  const checkpoint = await readFile(state.workers[second.workerId].checkpoint, 'utf8');
+  const result = await f.supervisor.dispose({ workerId: second.workerId, stop: observed.stop,
+    action: 'notify', kind: 'completion', evidence: 'Review complete with evidence.',
+    reportHash: checkpointHash(checkpoint) });
+  assert.match(result.content[0].text, /Material notice sent/);
+  assert.equal(f.worker.messages.length, 0, 'other owner receives no reviewer notice, especially during user wait');
+  assert.equal(other.messages.length, 1);
+  const final = await f.state();
+  assert.equal(final.ownerWaits[f.workerId()].kind, 'user');
+  assert.equal(final.ownerWaits[Object.values(final.workers).find(w => w.coordinatorId ===
+    final.workers[second.workerId].recipient.id).workerId], undefined);
+  assert.equal(final.routes.w.paused, false);
+  const otherOwnerId = Object.values(final.workers).find(w => w.coordinatorId ===
+    final.workers[second.workerId].recipient.id).workerId;
+  assert.equal(final.handled[otherOwnerId], ownerStop, 'delivered child notice cannot rearm the old owner stop');
+
+  const writer = f.children[0].native;
+  writer.assistant('Implementation complete with evidence.');
+  await writer.emit('agent_settled');
+  const writerStop = await readJson(join(f.root, `observation-${first.workerId}.json`));
+  const writerCheckpoint = await readFile(final.workers[first.workerId].checkpoint, 'utf8');
+  const deferred = await f.supervisor.dispose({ workerId: first.workerId, stop: writerStop.stop,
+    action: 'notify', kind: 'completion', evidence: 'Implementation complete with evidence.',
+    reportHash: checkpointHash(writerCheckpoint) });
+  assert.match(deferred.content[0].text, /Material notice pending/);
+  assert.equal(f.worker.messages.length, 0);
+  assert.equal(other.messages.length, 1);
+  assert.equal((await f.state()).routes.w.paused, false);
 });
 
 test('P5 read-only exact-task claims prevent duplicate dispatch under another key without relying on writer exclusion', async t => {

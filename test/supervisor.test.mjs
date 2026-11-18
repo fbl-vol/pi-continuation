@@ -93,6 +93,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     const coordinatorHandlers = new Map();
     const coordinatorPi = { on: (event, fn) => coordinatorHandlers.set(event, fn),
       registerCommand: (_name, definition) => { coordinatorPi.command = definition.handler; },
+      registerTool: () => {},
       appendEntry: () => {}, sendMessage: (...args) => coordinatorMessages.push(args) };
     const coordinatorCtx = { mode: 'tui', cwd: '/project', isIdle: () => true,
       sessionManager: { getSessionId: () => coordinatorRecord.sessionId,

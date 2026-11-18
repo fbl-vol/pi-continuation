@@ -104,6 +104,37 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
+### Approved coordinating-owner amendment (source only; not in v0.3.3)
+
+A coordinating owner is an exact Pi session that explicitly registers as a non-writing
+material-notice recipient (`/continuation-coordinator owner`) and then separately
+starts supervision (`/continuation-worker start`) under the existing global supervisor.
+The two confirmations are independent. A normal coordinator remains distinct from a
+worker; a supervised owner is neither an implementation writer nor the global
+supervisor. The owner can obtain a scoped `writer` delegation grant for its assignment.
+The existing checkout writer fence excludes only that exact verified non-writing
+parent owner; another supervised worker or retained writer claim still blocks a
+second writer. An unsupervised planner need not enroll and is never a default inbox.
+
+A delegated child pins the parent's exact owner recipient (also inherited by its
+read-only descendants). Material notices for that assignment address this recipient,
+not the Herdr workspace's single legacy route coordinator. Workspace route pauses
+remain independent, but loss or uncertain delivery of an owner-bound notice isolates
+its child rather than pausing unrelated same-workspace assignments. Legacy route
+bindings and notices retain their existing semantics. No pane label or workspace
+layout confers authority.
+
+An owner may durably declare `continuation_owner_wait` with named exact child IDs or
+a user-decision wait. Child wait suppresses repetitive owner-stop attention and only
+a matching child material notice wakes the owner; receipt and native stop checks
+remain intact. A user wait suppresses automatic wake and delegation until an explicit
+human `/continuation-owner resume` confirmation after the actual decision, followed
+by ordinary user input. That command is not a decision, hold clear, scope activation,
+review finding selection or permission to apply unselected fixes. The wait survives
+reload; no timer, synthetic completion or automatic selection inference is added.
+Only isolated fake-session tests cover this amendment; installation, live enrollment,
+release and cross-platform runtime acceptance are separate.
+
 ### User-approved contextual management amendment (since v0.3.0)
 
 The ordinary extension adds `/continuation`, a native menu for the current session
@@ -137,7 +168,7 @@ separate live-use authority exists.
 | P3 — blocked/approval | Exact worker reports blocked, or final reply asks for a genuine approval → reconcile and attempt disposition → blocked attention exists even without a completed assistant stop; resume is refused while blocked/held; ordinary task text does not clear a deliberate interruption or unresolved approval; model routes a material decision or pause, never supplies approval; awaiting user finding selection must remain a decision pause. |
 | P4 — scoped pause | Active sibling scopes → user pauses one worker/route or global scope, then an event arrives → affected continuation stops, unrelated scopes retain their settings; a model disposition cannot lift the user pause. |
 | P5 — dedup/bounds | Repeated unchanged stop/event and no evidenced checkpoint progress → repeated reconciliation/disposition → no duplicate stop delivery; two nudges without progress exhaust the worker budget; a stalled supervisor gets one corrective wake before escalation. |
-| P6 — material notices | Exact coordinator and a material blocker/decision or whole-assignment completion → deliver, repeat, then replace/busy the coordinator → one identity-bound notice, no routine chatter; definite pre-acceptance deferral remains pending and ambiguous delivery pauses for inspection, not blind retry. |
+| P6 — material notices | Exact coordinator or assignment owner and a material blocker/decision or whole-assignment completion → deliver, repeat, then replace/busy the recipient → one identity-bound notice, no routine chatter or same-workspace cross-routing; definite pre-acceptance deferral remains pending and ambiguous delivery pauses the affected scope for inspection, not blind retry. |
 | P7 — bounded recovery/ownership | Selected-worker witness and preserved history → hand off paused, attempt inherited-stop replay, or lose owner during delivery → one continuation owner, no inherited/ambiguous replay; explicit inspection/resolution and safe inactive rollback preserve sibling state/history. |
 
 Source tests and independent review must check alignment with these scenarios.

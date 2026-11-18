@@ -54,6 +54,25 @@ test('retirement records round-trip and cannot also be active or lose their paus
     { code: 'INVALID_RECORD' });
 });
 
+test('P3 owner decision waits remain durable and malformed child waits cannot become authority', () => {
+  const state = newSupervisor();
+  const ownerId = 'a'.repeat(36);
+  const recipientId = 'b'.repeat(36);
+  const childId = 'c'.repeat(36);
+  state.workers[ownerId] = { workerId: ownerId, role: 'owner', coordinatorId: recipientId,
+    paused: false, route: 'r' };
+  state.routes.r = { paused: false };
+  state.ownerWaits[ownerId] = { kind: 'user' };
+  assert.deepEqual(decodeSupervisor(state).ownerWaits[ownerId], { kind: 'user' });
+  state.ownerWaits[ownerId] = { kind: 'child', children: [childId] };
+  assert.deepEqual(decodeSupervisor(state).ownerWaits[ownerId].children, [childId]);
+  for (const wait of [{ kind: 'child', children: [] }, { kind: 'user', children: [childId] },
+    { kind: 'child', children: ['unverified'] }]) {
+    state.ownerWaits[ownerId] = wait;
+    assert.throws(() => decodeSupervisor(state), /Invalid continuation record/);
+  }
+});
+
 test('old completion notices remain readable, but malformed report hashes cannot be persisted', () => {
   const state = newSupervisor();
   state.routes.r = { paused: false };

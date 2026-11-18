@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { Type } from 'typebox';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
-import { listenJson, ownerAlive } from './ipc.mjs';
+import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 import { currentSession } from './session.mjs';
 import { readSupervisor, readObservation } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { snapshot, sameOccupant, isSettled } from './herdr.mjs';
-import { pinnedCheckpoint } from './bindings.mjs';
+import { pinnedCheckpoint, coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash } from './policy.mjs';
 
 export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
@@ -68,12 +69,25 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const route = state.routes?.[notice.route];
     const now = currentSession(ctx);
     const version = generation;
+    try { await coordinatorCandidate(root, record.id, state, await snapshot(socketPath)); }
+    catch { return { accepted: false }; }
     if (!await ownerAlive(root, owner.token) ||
-        state.paused || route?.paused || route?.coordinator?.id !== record.id ||
+        state.paused || route?.paused || (notice.recipient ?
+          state.workers[notice.workerId]?.recipient?.id !== record.id : route?.coordinator?.id !== record.id) ||
         notice.ownerToken !== owner.token || owner.token !== state.ownerToken ||
         now.id !== record.sessionId || now.file !== record.sessionFile ||
         notice.id !== state.notices?.[notice.id]?.id || state.notices[notice.id].status !== 'sending') {
       return { accepted: false };
+    }
+    const recipientWorker = Object.values(state.workers).find(w => w.role === 'owner' &&
+      w.sessionId === record.sessionId && w.coordinatorId === record.id);
+    const waiting = recipientWorker && state.ownerWaits?.[recipientWorker.workerId];
+    if ((recipientWorker && (recipientWorker.paused || recipientWorker.stopped ||
+        state.routes[recipientWorker.route]?.paused ||
+        (await readObservation(root, recipientWorker.workerId)).hold)) ||
+        waiting?.kind === 'user' || (waiting?.kind === 'child' &&
+        !waiting.children.includes(notice.workerId))) {
+      return { accepted: false, deferred: true, id: notice.id };
     }
     if (humanPending || uiPromptActive || !ctx.isIdle()) {
       // No receipt claimed or effect attempted: retryable, unlike post-acceptance rejection.
@@ -84,8 +98,19 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     await claim(join(root, `receipt-${notice.id}.json`), { id: notice.id, status: 'accepted' });
     const completionStillCurrent = await completionCurrent(state, notice);
     const latest = await readSupervisor(root);
+    try { await coordinatorCandidate(root, record.id, latest, await snapshot(socketPath)); }
+    catch { return { accepted: false }; }
+    const latestWorker = Object.values(latest.workers).find(w => w.role === 'owner' &&
+      w.sessionId === record.sessionId && w.coordinatorId === record.id);
+    const latestWait = latestWorker && latest.ownerWaits?.[latestWorker.workerId];
     if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
-        latest.routes?.[notice.route]?.coordinator?.id !== record.id ||
+        (notice.recipient ? latest.workers[notice.workerId]?.recipient?.id !== record.id :
+          latest.routes?.[notice.route]?.coordinator?.id !== record.id) ||
+        (latestWorker && (latestWorker.paused || latestWorker.stopped ||
+          latest.routes[latestWorker.route]?.paused ||
+          (await readObservation(root, latestWorker.workerId)).hold)) ||
+        latestWait?.kind === 'user' || (latestWait?.kind === 'child' &&
+          !latestWait.children.includes(notice.workerId)) ||
         humanPending || uiPromptActive || !ctx.isIdle() || generation !== version || currentSession(ctx).leaf !== now.leaf) {
       return { accepted: false };
     }
@@ -98,22 +123,77 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
 
   pi.registerCommand('continuation-coordinator', {
     description: 'Register this exact Pi session as a material-notice recipient; does not grant approval',
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
       if (ctx.mode !== 'tui' || !paneId || process.env.HERDR_ENV !== '1')
         throw new Error('Requires a Herdr-managed Pi TUI');
       if (coordinator) { ctx.ui.notify(`Coordinator already registered: ${coordinator.id}`); return; }
-      if (!await ctx.ui.confirm('Register coordinator?', 'Receive material notices in this exact session; no continuation or approval authority.')) return;
+      const owner = args.trim() === 'owner';
+      if (args.trim() && !owner) throw new Error('Usage: /continuation-coordinator [owner]');
+      const before = currentSession(ctx);
+      if (owner) {
+        const state = await readSupervisor(root);
+        if (!state.acceptStarts || !await ownerAlive(root, state.ownerToken) ||
+            Object.values(state.workers).some(w => w.sessionId === before.id || w.paneId === paneId))
+          throw new Error('Start the intended global supervisor first; register owner before worker enrollment');
+        const live = (await snapshot(socketPath)).agents.find(a => a.pane_id === paneId);
+        if (live?.agent !== 'pi' || live.agent_session?.source !== 'herdr:pi' ||
+            live.agent_session.kind !== 'path' || live.agent_session.value !== before.file ||
+            (live.foreground_cwd || live.cwd) !== ctx.cwd)
+          throw new Error('Owner requires an exact saved Herdr Pi session');
+      }
+      if (!await ctx.ui.confirm(owner ? 'Register non-writing owner?' : 'Register coordinator?',
+        owner ? 'Receive only exact child material notices. To supervise this coordinating session, run /continuation-worker start afterward. This is not a writer or global supervisor.' :
+          'Receive material notices in this exact session; no continuation or approval authority.')) return;
       try {
         await ensureRoot(root);
         const session = currentSession(ctx);
+        if (owner && (session.id !== before.id || session.file !== before.file ||
+            session.leaf !== before.leaf || !ctx.isIdle()))
+          throw new Error('Owner session changed during confirmation');
         const record = { id: randomUUID(), sessionId: session.id, sessionFile: session.file,
-          cwd: ctx.cwd, paneId };
+          cwd: ctx.cwd, paneId, ...(owner ? { role: 'owner' } : {}) };
         await atomicJson(join(root, `coordinator-${record.id}.json`), record);
-        pi.appendEntry('pi-continuation-coordinator', { id: record.id, sessionId: session.id, paneId });
+        pi.appendEntry('pi-continuation-coordinator', { id: record.id, sessionId: session.id, paneId,
+          ...(owner ? { role: 'owner' } : {}) });
         close = await listen(record, ctx);
         coordinator = record;
         ctx.ui.notify(`Coordinator ${record.id} registered`);
       } catch (error) { throw report('register', error); }
+    },
+  });
+  const ownerRequest = async (ctx, kind, children) => {
+    if (!coordinator || coordinator.role !== 'owner')
+      throw new Error('Exact registered coordinating owner required');
+    const state = await readSupervisor(root);
+    const worker = Object.values(state.workers).find(w => w.role === 'owner' &&
+      w.coordinatorId === coordinator.id && w.sessionId === currentSession(ctx).id &&
+      w.sessionFile === currentSession(ctx).file && w.paneId === paneId);
+    if (!worker) throw new Error('Start supervision for this owner before setting its wait state');
+    const result = await sendAction(root, { type: 'owner-wait', kind, children,
+      workerId: worker.workerId, coordinatorId: coordinator.id,
+      sessionId: worker.sessionId, sessionFile: worker.sessionFile }, 'supervisor');
+    if (!result.accepted) throw new Error('Owner wait rejected; inspect exact supervision and decision state');
+    return result;
+  };
+  pi.registerTool({
+    name: 'continuation_owner_wait', label: 'Wait as coordinating owner',
+    description: 'Record a supervised owner wait for named child worker IDs or a real user decision. Child notices wake only a child wait. A user wait requires explicit human release; this tool cannot release it.',
+    parameters: Type.Object({ kind: Type.Union([Type.Literal('child'), Type.Literal('user')]),
+      children: Type.Optional(Type.Array(Type.String())) }),
+    async execute(_call, args, _signal, _update, ctx) {
+      await ownerRequest(ctx, args.kind, args.children);
+      return { content: [{ type: 'text', text: `Owner waiting for ${args.kind}; no automatic user decision is inferred.` }], details: {} };
+    },
+  });
+  pi.registerCommand('continuation-owner', {
+    description: 'Release a user-decision wait after the user has actually selected the next action: resume',
+    handler: async (args, ctx) => {
+      if (args.trim() !== 'resume' || coordinator?.role !== 'owner' || !ctx.isIdle())
+        throw new Error('Usage: /continuation-owner resume in the idle exact owner session');
+      if (!await ctx.ui.confirm('Release user-decision wait?',
+        'Confirm the user has actually provided the decision or selected findings in this owner pane. This command grants no approval, applies no fixes and does not release worker holds.')) return;
+      await ownerRequest(ctx, 'resume-user');
+      ctx.ui.notify('User-decision wait released; send the selected instruction as ordinary user input', 'info');
     },
   });
   pi.on('session_shutdown', async () => { generation++; coordinator = undefined; await close?.(); close = undefined; });

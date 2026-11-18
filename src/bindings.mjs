@@ -46,13 +46,26 @@ export async function workerCandidate(root, workerId, route, state, live, superv
     throw Object.assign(new Error('Retired worker session cannot be registered again'), { code: 'WORKER_RETIRED' });
   const checkpoint = record.checkpoint;
   const agent = live.agents.find(a => a.pane_id === record.paneId);
-  const binding = { ...nativeBinding(record, agent), workerId, route, checkpoint, paused: true };
+  const binding = { ...nativeBinding(record, agent), workerId, route, checkpoint, paused: true,
+    ...(record.role === 'owner' ? { role: 'owner', coordinatorId: record.coordinatorId } : {}) };
   if (!sameOccupant(agent, binding) || agent.workspace_id !== route ||
       binding.sessionId === state.supervisorSession || agent.pane_id === supervisorPane)
     throw new Error('Worker identity mismatch or self-supervision');
   if (Object.values(state.routes).some(r => r.coordinator &&
       (r.coordinator.paneId === binding.paneId || r.coordinator.sessionId === binding.sessionId)))
     throw new Error('A coordinator cannot become a worker');
+  if (Object.values(state.workers).some(w => w.recipient &&
+      (w.recipient.paneId === binding.paneId || w.recipient.sessionId === binding.sessionId) &&
+      (binding.role !== 'owner' || w.recipient.id !== binding.coordinatorId ||
+        w.recipient.sessionId !== binding.sessionId)))
+    throw new Error('A material-notice recipient cannot become a worker');
+  if (binding.role === 'owner') {
+    if (!isId(binding.coordinatorId)) throw new Error('Owner requires an exact coordinator registration');
+    const recipient = await coordinatorCandidate(root, binding.coordinatorId, state, live, supervisorPane);
+    if (recipient.role !== 'owner' || recipient.sessionId !== binding.sessionId ||
+        recipient.sessionFile !== binding.sessionFile || recipient.paneId !== binding.paneId)
+      throw new Error('Owner coordinator identity mismatch');
+  }
   for (const existing of Object.values(state.workers)) {
     if (existing.paneId === binding.paneId || existing.sessionId === binding.sessionId ||
         (await readWorkerRegistration(root, existing.workerId)).checkpoint === checkpoint)
@@ -75,7 +88,8 @@ export async function workerStartCandidate(root, request, state, live, superviso
       record.start.replaceWorkerId !== request.replaceWorkerId ||
       (request.replaceWorkerId !== undefined && !isId(request.replaceWorkerId)))
     throw new Error('Worker start has no matching confirmed opt-in');
-  if (record.delegationId === request.nonce) await delegatedStart(root, record.delegationId, record, state, live);
+  const delegated = record.delegationId === request.nonce ?
+    await delegatedStart(root, record.delegationId, record, state, live) : undefined;
   const agent = live.agents.find(item => item.pane_id === record.paneId);
   const existing = state.workers[request.workerId];
   // A start confirmed before Stop cannot become an automatic post-Stop return.
@@ -101,6 +115,8 @@ export async function workerStartCandidate(root, request, state, live, superviso
   if (request.replaceWorkerId && !repeated && replacement?.workerId !== request.replaceWorkerId)
     throw Object.assign(new Error('Replacement binding changed'), { code: 'WORKER_CONFLICT' });
   const candidate = await workerCandidate(root, request.workerId, route, others, live, supervisorPane);
+  if (delegated?.recipient) candidate.recipient = await coordinatorCandidate(root,
+    delegated.recipient.id, others, live, supervisorPane);
   return { binding: existing ?? candidate, route, repeated, replacement };
 }
 
@@ -120,7 +136,10 @@ export async function coordinatorCandidate(root, id, state, live, supervisorPane
   const binding = { ...nativeBinding(record, agent), id };
   if (!sameOccupant(agent, binding) || binding.sessionId === state.supervisorSession ||
       agent.pane_id === supervisorPane) throw new Error('Coordinator identity mismatch');
-  if (Object.values(state.workers).some(w => w.paneId === binding.paneId || w.sessionId === binding.sessionId))
+  const worker = Object.values(state.workers).find(w => w.paneId === binding.paneId || w.sessionId === binding.sessionId);
+  if (worker && (record.role !== 'owner' || worker.role !== 'owner' ||
+      worker.paneId !== binding.paneId || worker.sessionId !== binding.sessionId ||
+      worker.sessionFile !== binding.sessionFile))
     throw new Error('A worker cannot become a coordinator');
-  return binding;
+  return { ...binding, ...(record.role === 'owner' ? { role: 'owner' } : {}) };
 }
