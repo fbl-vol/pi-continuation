@@ -9,7 +9,7 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Pins a worker's current saved Pi session, checkpoint, terminal, pane, cwd and workspace. A replacement/fork never silently inherits registration.
 - Uses Pi lifecycle/persistence/messaging and Herdr's existing identity/status reporting. The dedicated supervisor interprets the final reply and checkpoint against the **whole assignment**, including follow-ups. A favorable review alone is not completion; interpretation never grants new authority.
 - Gives blocked workers attention even mid-turn, before an assistant stop exists. Herdr status evidence is explicitly labeled, not a fabricated worker reply or resumable native stop. Blocked/held workers cannot be resumed or declared complete. Genuine approval requests require a decision/pause, not invented approval.
-- Keeps human-confirmed global, route and worker control. Only the scoped delegation path can enroll its newly created worker without per-worker confirmation; model tools cannot otherwise activate scopes or clear user holds. Escape, tool errors and observed shared-UI prompts create sticky holds. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
+- Keeps human-confirmed global, route and worker control. Only the scoped delegation path can enroll its newly created worker without per-worker confirmation; model tools cannot otherwise activate scopes or clear user holds. Escape, failed settled turns and observed shared-UI prompts create sticky holds. Unreleased source no longer latches a hold for each intermediate tool failure; published v0.3.2 still does. In the start workflow, ordinary submitted tasks release only their provisional typing fence; alpha.1/advanced registration retains its existing sticky keyboard hold.
 - Delivers through a worker-owned local receiver, not `agent.prompt`. A final Herdr identity/status/sequence check precedes addressed delivery; the receiver rechecks exact native stop, session, owner, hold and pauses. One-use receipts prevent replay. Uncertain delivery pauses for inspection, not retry.
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
@@ -59,7 +59,7 @@ paused. Published alpha.2 lacks this workflow.
 
 Then send ordinary tasks normally. Fresh registrations get an automatically maintained private checkpoint from native projected user/assistant text and compaction summaries—not system prompts, tool payloads, thinking or image bytes. No copied IDs, checkpoint declarations or separate scope activation are needed. Visible workers are never auto-enrolled; missing/conflicting ownership is refused. Existing manually pinned checkpoints remain manual and are not replaced.
 
-Escape/interruption, observed external prompts and errors still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
+Escape/interruption, observed external prompts and failed settled turns still stop continuation. After resolving the reason, repeat worker `start` to return control. Start never answers an unresolved approval or resets budgets/receipts. It enables that worker and a new route only; independently paused existing global/route scopes stay paused. Supervisor `start` explicitly enables its global scope while preserving worker/route pauses. Advanced scoped controls below remain available. This source workflow has isolated contract/native-API tests, not a new real-model or platform acceptance claim.
 
 ## Session management (since v0.3.0)
 
@@ -98,6 +98,18 @@ Current source also reports compact, expiring supervision labels in Herdr's
 existing Agents/Spaces views. Native activity stays separate; badges never grant
 permission. See the [one-time optional sidebar setup](docs/herdr-annotations.md).
 No live configuration is rewritten and no extra plugin is required.
+
+### Next release: fewer noisy error holds
+
+In current unreleased source, an intermediate failed command/lookup can recover
+within the running agent turn without permanently holding continuation. The fresh
+settled outcome and existing final-reply/checkpoint assessment still govern;
+a successful tool alone never clears a hold. Newly recorded failed turns display
+`Held: run failed`, and checkpoint-write failures display `Held: checkpoint`.
+Details shows the cause, when the hold was recorded and the confirmed recovery
+control. Existing unclassified holds remain `Held: error` until explicitly resolved;
+no automatic migration, hold clearing or live-worker upgrade is included.
+Published v0.3.2 retains its earlier tool-error holds.
 
 ## Supervised delegation (since v0.3.0)
 

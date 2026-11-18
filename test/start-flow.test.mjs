@@ -262,7 +262,11 @@ for (const reason of ['prompt', 'error', 'abort']) test(`${reason} holds are not
     const f = await startFixture(t);
     await start(f);
     if (reason === 'prompt') await f.worker.ctx.ui.confirm('Actual unrelated user approval?', 'Choose explicitly.');
-    if (reason === 'error') await f.worker.emit('tool_execution_end', { isError: true });
+    if (reason === 'error') {
+      await f.worker.emit('agent_start');
+      f.worker.assistant('Provider request failed.', 'error');
+      await f.worker.emit('agent_settled', { aborted: false });
+    }
     if (reason === 'abort') await f.worker.emit('agent_settled', { aborted: true });
     await turn(f, 'Additional context, not a return-to-supervision command.', 'This task still has pending work.');
     assert.equal((await f.observation()).hold, true);

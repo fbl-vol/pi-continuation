@@ -61,6 +61,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   const report = diagnostics('worker');
   let hold = false;
   let holdReason;
+  let holdError;
   let parkedReport;
   let lastObserved;
   let stopVersion = 0;
@@ -87,6 +88,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (worker.managedInput && holdReason === 'typing') {
       hold = false;
       holdReason = undefined;
+      holdError = undefined;
     }
     parkedReport = undefined;
     return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
@@ -96,6 +98,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     // Hold is independent of activity: a new turn must not erase an unresolved stop.
     const saved = { ...value, schemaVersion: SCHEMA_VERSION, hold, version: stopVersion,
       holdReason: owner.managedInput && hold ? holdReason ?? 'restored' : undefined,
+      holdError: hold ? holdError : undefined,
       parkedReport: owner.managedInput ? parkedReport : undefined,
       ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
     let checkpoint;
@@ -110,8 +113,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       } catch (error) {
         hold = true;
         holdReason = 'error';
+        holdError = { kind: 'checkpoint', at: new Date().toISOString() };
         await atomicJson(`${root}/observation-${owner.workerId}.json`, {
-          ...saved, outcome: 'error', stop: null, hold: true, holdReason: 'error', parkedReport: undefined });
+          ...saved, outcome: 'error', stop: null, hold: true, holdReason: 'error', holdError, parkedReport: undefined });
         throw error;
       }
       await atomicJson(`${root}/observation-${owner.workerId}.json`, saved);
@@ -141,6 +145,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
     }
     hold ||= existing.outcome !== 'completed';
+    if (existing.outcome === 'error') {
+      holdReason = 'error';
+      holdError = { kind: 'run', at: new Date().toISOString() };
+    }
     return observe(existing, ctx);
   };
   const watchTerminalInput = ctx => {
@@ -155,6 +163,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       if (worker.managedInput && !hold) parkedReport = lastObserved?.stop ? lastObserved : undefined;
       hold = true;
       holdReason = isInterrupt(data) ? 'interruption' : 'typing';
+      holdError = undefined;
       stopVersion++;
       if (parkedReport) parkedReport = { ...parkedReport, outcome: 'approval', hold: true,
         parkedReport: undefined, version: stopVersion };
@@ -166,6 +175,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (!worker) return;
     hold = true;
     holdReason = 'prompt';
+    holdError = undefined;
     parkedReport = undefined;
     stopVersion++;
     void observe({ session: currentSession(ctx), outcome: 'approval', stop: null }, ctx);
@@ -183,14 +193,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     else externalPrompt(ctx);
   });
   pi.on('ui_prompt_end', () => prompts?.end());
-  pi.on('tool_execution_end', (event, ctx) => {
+  pi.on('tool_execution_end', event => {
+    // Setup remains provisional. During a normal run, Pi may recover a failed
+    // tool; only the settled outcome and existing prompt/input guards latch holds.
     if (event.isError && preparing) { preparing.interrupted = true; stopVersion++; }
-    if (!event.isError || !worker) return;
-    hold = true;
-    holdReason = 'error';
-    parkedReport = undefined;
-    stopVersion++;
-    return observe({ session: currentSession(ctx), outcome: 'error', stop: null }, ctx);
   });
 
   pi.on('session_start', async (_event, ctx) => {
@@ -199,7 +205,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopTerminalInput?.();
     stopTerminalInput = undefined;
     worker = undefined;
-    holdReason = undefined; parkedReport = undefined; lastObserved = undefined;
+    holdReason = undefined; holdError = undefined; parkedReport = undefined; lastObserved = undefined;
     prompts?.dispose(); prompts = undefined; promptUI = undefined;
     if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') return;
     try { promptsFor(ctx); }
@@ -230,6 +236,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           promptInterrupted = prompts.blocked || prompts.revision !== restoreRevision || !!scopeChanged;
           hold = prior.hold || prior.bootstrapPending === true || promptInterrupted;
           holdReason = hold ? promptInterrupted ? 'prompt' : prior.holdReason ?? 'restored' : undefined;
+          holdError = hold && !promptInterrupted ? prior.holdError : undefined;
           parkedReport = promptInterrupted ? undefined : prior.parkedReport;
           lastObserved = prior;
           if (Number.isSafeInteger(prior.version) && prior.version >= 0)
@@ -505,7 +512,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       const unchanged = !prior.hold && prior.version === version &&
         prior.session.id === now.id && prior.session.file === now.file && prior.session.leaf === now.leaf;
       worker.managedInput = true;
-      hold = false; holdReason = undefined; parkedReport = undefined;
+      hold = false; holdReason = undefined; holdError = undefined; parkedReport = undefined;
       stopVersion++;
       if (!await observe(currentReport ?? (unchanged ? prior :
         { session: now, outcome: ctx.isIdle() ? 'unknown' : 'working', stop: null }), ctx)) return;
@@ -596,8 +603,13 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopVersion++;
     if (event.aborted || [...ctx.sessionManager.getBranch()].reverse().find(e =>
       e.type === 'message' && e.message?.role === 'assistant')?.message?.stopReason === 'error') {
-      hold = true;
-      holdReason = event.aborted ? 'interruption' : 'error';
+      // The latest failed outcome is separate from the origin of an unresolved
+      // hold. Do not relabel an approval or replace its recorded failure time.
+      if (!hold) {
+        hold = true;
+        holdReason = event.aborted ? 'interruption' : 'error';
+        holdError = event.aborted ? undefined : { kind: 'run', at: new Date().toISOString() };
+      }
       parkedReport = undefined;
     }
     try {
@@ -635,6 +647,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         (worker.managedInput && prior.parkedReport ? currentHeldReport(prior.parkedReport, ctx, version, now) : null) : null;
       hold = false;
       holdReason = undefined;
+      holdError = undefined;
       parkedReport = undefined;
       stopVersion++;
       await observe(currentReport ?? { session: now, outcome: 'unknown', stop: null }, ctx);
@@ -652,7 +665,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     closeReceiver = undefined;
     prompts?.dispose(); prompts = undefined; promptUI = undefined;
   });
-  // UI prompts and tool errors hold subsequent stops until explicitly inspected.
+  // UI prompts, failed runs and interruptions hold until explicitly inspected.
   // Prose-only approval requests have no host signal; the pinned reply is
   // supervisor review evidence, never permission by itself.
   return {

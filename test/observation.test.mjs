@@ -713,7 +713,8 @@ test('an initial message handled without a run is not restored as an eligible wo
   }
 });
 
-test('a prompt hold acquired during provisional setup aborts without sending or publishing', async () => {
+for (const interruption of ['prompt', 'tool error'])
+  test(`a ${interruption} during provisional setup aborts without sending or publishing`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const checkpoint = join(root, 'checkpoint.md');
   await writeFile(checkpoint, 'Approved task');
@@ -722,7 +723,8 @@ test('a prompt hold acquired during provisional setup aborts without sending or 
   worker.pi.sendUserMessage = text => messages.push(text);
   let leafReads = 0;
   worker.ctx.sessionManager.getLeafId = () => {
-    if (++leafReads === 3) void worker.emit('ui_prompt_start');
+    if (++leafReads === 3) void worker.emit(interruption === 'prompt' ? 'ui_prompt_start' : 'tool_execution_end',
+      { isError: true });
     return 'leaf';
   };
   const prior = process.env.HERDR_ENV;
@@ -737,7 +739,7 @@ test('a prompt hold acquired during provisional setup aborts without sending or 
     assert.deepEqual(worker.entries, []);
     assert.deepEqual((await readdir(root)).filter(name => /^(worker|observation)-/.test(name)), []);
     worker.ctx.sessionManager.getLeafId = () => 'leaf';
-    await worker.emit('ui_prompt_end'); // Resolve the pending interaction before retrying.
+    if (interruption === 'prompt') await worker.emit('ui_prompt_end'); // Resolve before retrying.
     await worker.pi.command(start, worker.ctx);
     assert.equal(observer.registered, true);
     assert.deepEqual(messages, ['Begin approved task.']);

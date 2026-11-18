@@ -110,6 +110,14 @@ function details(view, row) {
     `Supervisor: ${view.running ? 'running' : 'unavailable'}`,
     `Global pause: ${view.state.paused}; workspace pause: ${view.state.routes[binding.route]?.paused}; worker pause: ${binding.paused}`,
     `Hold: ${observation?.hold === true ? observation.holdReason ?? 'held' : observation ? 'none reported' : 'unknown'}`,
+    ...(observation?.hold && observation.holdError ? [
+      observation.holdError.kind === 'run' ? 'Cause: a Pi turn ended in error; later success does not clear this hold.' :
+        'Cause: the continuation checkpoint could not be updated.',
+      `Hold recorded: ${new Date(observation.holdError.at).toISOString()}`,
+      'Resolve the cause, then use the confirmed Start/Return or Clear hold control in that worker.',
+    ] : observation?.hold && observation.holdReason === 'error' ? [
+      'Cause/time unavailable for this retained error hold; inspect the worker session before clearing it.',
+    ] : []),
     ...(row.observationError ? ['Observation unavailable; inspect the retained report'] : []),
     `Nudges spent: ${view.state.budgets[binding.workerId]?.count ?? 0}`,
     `Session: ${binding.sessionId}`, `Worker: ${binding.workerId}`,
