@@ -34,7 +34,11 @@ export function createAnnotations({ root, socketPath, ownerToken, ownerBinding, 
   };
   const clear = async (key, entry) => {
     try { await send({ ...entry, tokens: Object.fromEntries(Object.keys(entry.tokens).map(k => [k, null])) }); }
-    catch (error) { report(error); } // TTL is the fallback for a closed/unreachable target.
+    catch (error) {
+      // A deleted target has no tokens left to clear. Other failures stay visible;
+      // TTL remains the fallback for an unreachable target that may still exist.
+      if (error.code !== `${entry.kind}_not_found`) report(error);
+    }
     sent.delete(key);
   };
   const clearAll = () => Promise.all([...sent].map(([key, entry]) => clear(key, entry)));

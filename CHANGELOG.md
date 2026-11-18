@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Make bare `/continuation-worker` an alias for the existing human-confirmed `start` workflow; retain explicit checkpoint and `--start` advanced registration.
+- Reject directory/non-file checkpoints before advanced registration can persist an invalid worker. Existing registrations and live supervision are not migrated or rewritten.
+- Treat Herdr's explicit missing-pane/workspace response as benign only when clearing display tokens after a target disappears. Preserve structured Herdr error codes, keep publication and other cleanup failures visible, and leave supervision authority unchanged.
+
 ## [0.3.1] - 2026-11-17
 
 GitHub patch release for controlled trials; npm publication remains disabled.

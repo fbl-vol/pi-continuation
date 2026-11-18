@@ -34,6 +34,27 @@ test('socket response identity, protocol and disconnect fail closed', async () =
   }
 });
 
+test('Herdr errors retain their structured code without exposing the server message', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(directory, 'server.sock');
+  const server = net.createServer(socket => socket.once('data', chunk => {
+    const { id } = JSON.parse(chunk.toString());
+    socket.end(JSON.stringify({ id, error: { code: 'pane_not_found', message: 'private server detail' } }) + '\n');
+  }));
+  try {
+    await new Promise(resolve => server.listen(endpoint(socketPath), resolve));
+    await assert.rejects(request(socketPath, 'pane.report_metadata', {}), error => {
+      assert.equal(error.code, 'pane_not_found');
+      assert.equal(error.message, 'Herdr: pane_not_found');
+      assert.equal(error.message.includes('private server detail'), false);
+      return true;
+    });
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('fragmented Herdr response preserves multibyte session identity', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'continuation-'));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(directory, 'server.sock');

@@ -32,7 +32,8 @@ export function request(socketPath, method, params, { timeoutMs = 2500 } = {}) {
       try {
         const response = JSON.parse(buffer.slice(0, end));
         if (response.id !== id) throw new Error('Herdr response id mismatch');
-        if (response.error) throw new Error(`Herdr: ${response.error.code ?? 'unknown'}`);
+        if (response.error) throw Object.assign(new Error(`Herdr: ${response.error.code ?? 'unknown'}`),
+          { code: response.error.code });
         if (!response.result) throw new Error('Herdr response missing result');
         finish(null, response.result);
       } catch (error) { finish(error); }

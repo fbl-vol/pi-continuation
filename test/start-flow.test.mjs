@@ -73,6 +73,42 @@ test('blank start sends no task and the first ordinary task persists its journal
   assert.equal(f.worker.messages.length, 1);
 });
 
+for (const argument of ['', '  \t ']) test('bare worker command uses confirmed start: ' + JSON.stringify(argument),
+  { timeout: 10000 }, async t => {
+    const f = await startFixture(t, { blank: true });
+    await f.supervisorCommand('start');
+    f.worker.confirm(false);
+    await f.worker.command('continuation-worker', argument);
+    assert.equal(f.worker.confirmations[0][0], 'Start worker supervision?');
+    assert.equal(f.workerId(), undefined);
+    assert.deepEqual((await f.state()).workers, {});
+    assert.equal((await readdir(f.root)).some(name => /^worker-.*\.json$/.test(name)), false);
+
+    f.worker.confirm(true);
+    await f.worker.command('continuation-worker', argument);
+    const binding = (await f.state()).workers[f.workerId()];
+    assert.ok(binding, JSON.stringify(f.worker.notifications));
+    assert.equal(binding.sessionId, f.worker.id);
+    assert.equal(binding.paused, false);
+    const record = await readJson(join(f.root, `worker-${f.workerId()}.json`));
+    assert.equal(record.managedCheckpoint, true);
+    assert.notEqual(binding.checkpoint, f.root);
+    assert.equal(f.worker.messages.length, 0);
+    await assert.rejects(access(f.worker.file), { code: 'ENOENT' });
+  });
+
+for (const initialTask of [false, true]) test(`advanced registration rejects directory checkpoints before confirmation (initial task: ${initialTask})`,
+  { timeout: 10000 }, async t => {
+    const f = await startFixture(t);
+    const argument = initialTask ? `--start ${JSON.stringify({ checkpoint: f.root, message: 'Approved task' })}` : f.root;
+    await f.worker.command('continuation-worker', argument);
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.equal(f.workerId(), undefined);
+    assert.equal((await readdir(f.root)).some(name => /^(worker|ready|observation)-/.test(name)), false);
+    assert.ok(f.worker.notifications.some(([text]) => /checkpoint.*file/i.test(text)));
+    assert.equal(f.worker.messages.length, 0);
+  });
+
 test('an existing conversation whose journal disappears during registration is not enrolled as blank', { timeout: 10000 }, async t => {
   const f = await startFixture(t);
   const append = f.worker.pi.appendEntry;

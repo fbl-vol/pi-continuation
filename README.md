@@ -39,6 +39,14 @@ After a separately authorized installation:
 1. In the intended supervisor, `/continuation-supervisor start` and confirm.
 2. In each selected worker, `/continuation-worker start` and confirm that it has no other continuation owner.
 
+**Next release:** `/continuation-worker` without arguments (including whitespace-only
+arguments) is an alias for `start`, with the same confirmation and safeguards.
+Explicit checkpoint paths and `--start` remain advanced registration forms and
+require an existing file, not a directory. Published v0.3.1 and earlier require the
+explicit `start`: bare input can incorrectly register the working directory as a
+checkpoint. This correction prevents new invalid registrations; it does not rewrite
+existing registrations or migrate live supervision.
+
 **Blank-session start:** current source permits a fresh blank worker to join before Pi creates its journal. It sends no task and leaves journal creation to native Pi; continuation still requires a persisted session. Published alpha.2 lacks this fix: for that version, send a harmless ordinary message and let it finish before worker start.
 
 **Pane-reuse recovery:** if this pane previously hosted another registered

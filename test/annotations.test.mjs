@@ -161,6 +161,44 @@ test('metadata transport failures are visible, bounded and never pause or mutate
   assert.deepEqual(f.state, before);
 });
 
+test('closed pane and workspace cleanup is benign while surviving targets are still cleared', async t => {
+  const f = await fixture(t, ({ calls }) => ({ transport: async (_socket, method, params) => {
+    calls.push({ method, params: structuredClone(params) });
+    if (Object.values(params.tokens).every(value => value === null)) {
+      if (params.pane_id === 'w:p1') throw Object.assign(new Error('synthetic closed pane'), { code: 'pane_not_found' });
+      if (method === 'workspace.report_metadata') throw Object.assign(new Error('synthetic closed workspace'), { code: 'workspace_not_found' });
+    }
+    return { type: 'ok' };
+  } }));
+  await f.reporter.refresh();
+  const before = structuredClone(f.state);
+  f.live.agents = f.live.agents.filter(agent => agent.pane_id !== 'w:p1');
+  f.live.workspaces = [];
+  await f.reporter.refresh();
+  await f.reporter.close();
+  assert.deepEqual(f.errors, []);
+  assert.ok(ownerCalls(f).some(call => Object.values(call.params.tokens).every(value => value === null)));
+  assert.deepEqual(f.state, before);
+});
+
+test('missing-target publication and unrelated cleanup failures remain visible', async t => {
+  let failure;
+  const f = await fixture(t, { transport: async () => {
+    if (failure) throw failure;
+    return { type: 'ok' };
+  } });
+  failure = Object.assign(new Error('synthetic publication target disappeared'), { code: 'pane_not_found' });
+  await f.reporter.refresh();
+  assert.equal(f.errors.length, 1, 'Only cleanup may ignore a missing target');
+  failure = undefined;
+  await f.reporter.refresh();
+  failure = Object.assign(new Error('synthetic cleanup failure'), { code: 'invalid_metadata_source' });
+  await f.reporter.close();
+  assert.equal(f.errors.length, 2);
+  assert.equal(f.errors[1], failure);
+  assert.equal(f.binding.paused, false);
+});
+
 test('missing observations publish unknown rather than an eligible-looking active badge', async t => {
   const f = await fixture(t);
   await rm(join(f.root, `observation-${f.binding.workerId}.json`));
