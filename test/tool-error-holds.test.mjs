@@ -100,6 +100,64 @@ test('P3 failed checkpoint persistence remains held and has a separate cause', a
   assert.equal(f.worker.messages.length, 0);
 });
 
+for (const originalCause of ['prompt', 'run', 'checkpoint', 'legacy']) {
+  test(`P3/P7 a later failed turn preserves the original ${originalCause} hold in Details and reload`, async t => {
+    const f = await start(t);
+    if (originalCause === 'legacy') {
+      const legacy = { ...await f.observation(), hold: true, holdReason: 'error', outcome: 'approval' };
+      await writeFile(join(f.root, `observation-${f.workerId()}.json`), JSON.stringify(legacy));
+    } else if (originalCause === 'checkpoint') {
+      const checkpoint = (await f.state()).workers[f.workerId()].checkpoint;
+      await rm(checkpoint);
+      await mkdir(checkpoint);
+      await f.worker.emit('agent_start');
+      assert.equal(f.worker.continuation.registered, false);
+      // Restore only this fixture's writable checkpoint, not its retained hold.
+      await rm(checkpoint, { recursive: true });
+      await writeFile(checkpoint, 'The approved assignment remains unfinished.');
+    } else {
+      await f.worker.emit('agent_start');
+      if (originalCause === 'prompt')
+        await f.worker.ctx.ui.confirm('Approval required?', 'An explicit decision is still needed.');
+      f.worker.assistant('Original turn result.', originalCause === 'run' ? 'error' : 'stop');
+      await f.worker.emit('agent_settled', { aborted: false });
+    }
+    await f.worker.emit('session_shutdown');
+    const original = await f.observation();
+    // A fixed retained timestamp makes overwrite detection independent of clock resolution.
+    if (original.holdError) original.holdError.at = '2026-01-01T12:00:00.000Z';
+    await writeFile(join(f.root, `observation-${f.workerId()}.json`), JSON.stringify(original));
+    await f.worker.emit('session_start', { reason: 'reload' });
+    await f.worker.emit('agent_start');
+    f.worker.assistant('A later provider request failed.', 'error');
+    await f.worker.emit('agent_settled', { aborted: false });
+    await f.worker.emit('session_shutdown');
+    await f.worker.emit('session_start', { reason: 'reload' });
+
+    const held = await f.observation();
+    assert.equal(held.outcome, 'error', 'The latest report still records the failed run');
+    assert.equal(held.hold, true);
+    assert.equal(held.holdReason, original.holdReason);
+    assert.deepEqual(held.holdError, original.holdError);
+    const expectedLabel = { prompt: 'Held: prompt', run: 'Held: run failed',
+      checkpoint: 'Held: checkpoint', legacy: 'Held: error' }[originalCause];
+    assert.equal(await status(f), expectedLabel);
+    const inspector = f.native('planner:p1');
+    await inspector.emit('session_start');
+    inspector.select((_title, choices) => choices.find(choice => choice.startsWith('1. ')) ?? 'Details');
+    await inspector.command('continuation', '');
+    const details = inspector.notifications.at(-1)[0];
+    assert.ok(details.includes(expectedLabel));
+    if (original.holdError) assert.ok(details.includes(`Hold recorded: ${original.holdError.at}`));
+    else assert.doesNotMatch(details, /Hold recorded:/);
+    if (originalCause === 'legacy') assert.match(details, /Cause\/time unavailable/);
+    // Checkpoint failure can also pause the worker before report assessment.
+    const refusal = originalCause === 'checkpoint' ? /Report held|^Paused$/ : /Report held/;
+    assert.match((await resume(f, 'unfinished work')).content[0].text, refusal);
+    assert.equal(f.worker.messages.length, 0);
+  });
+}
+
 test('management details explain a run hold without raw tool payloads or changing its evidence', async t => {
   const f = await start(t);
   await f.worker.emit('agent_start');

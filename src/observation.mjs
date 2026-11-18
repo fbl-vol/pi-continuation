@@ -603,9 +603,13 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     stopVersion++;
     if (event.aborted || [...ctx.sessionManager.getBranch()].reverse().find(e =>
       e.type === 'message' && e.message?.role === 'assistant')?.message?.stopReason === 'error') {
-      hold = true;
-      holdReason = event.aborted ? 'interruption' : 'error';
-      holdError = event.aborted ? undefined : { kind: 'run', at: new Date().toISOString() };
+      // The latest failed outcome is separate from the origin of an unresolved
+      // hold. Do not relabel an approval or replace its recorded failure time.
+      if (!hold) {
+        hold = true;
+        holdReason = event.aborted ? 'interruption' : 'error';
+        holdError = event.aborted ? undefined : { kind: 'run', at: new Date().toISOString() };
+      }
       parkedReport = undefined;
     }
     try {
