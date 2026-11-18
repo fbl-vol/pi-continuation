@@ -28,7 +28,20 @@ arguments) selects the same confirmed `start` path. Explicit checkpoint paths an
 registration. This user-approved command default changes no confirmation, hold,
 pause, ownership or return semantics and does not repair existing registrations.
 
-For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and errors remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
+For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and failed settled runs remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
+
+### User-approved intermediate-error amendment (unreleased)
+
+A failed intermediate tool invocation during an ordinary run does not itself latch
+an error hold. Pi may recover; the fresh settled outcome and existing final-reply /
+checkpoint assessment remain the boundary. Actual failed/aborted turns, observed
+approval prompts, checkpoint-persistence failures and delivery uncertainty remain
+held. A later successful tool call is not a hold-clear signal. Tool errors still
+interrupt provisional setup, and existing persisted holds require explicit
+resolution; this change does not clear, migrate or infer recovery for them.
+Cause-specific labels/details are display-only, with unknown legacy causes left
+unclassified. This amends P2/P3/P7 within the existing seven scenarios, not a new
+acceptance set. Published v0.3.2 retains its intermediate-tool-error holds.
 
 ### User-approved confirmed replacement amendment (since v0.3.0)
 

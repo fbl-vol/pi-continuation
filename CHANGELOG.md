@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Intermediate tool failures no longer latch permanent continuation holds during
+  ordinary runs. Failed settled turns, observed approval/interruption guards,
+  checkpoint failures, provisional-setup fencing and delivery safeguards remain.
+- New run/checkpoint error holds have cause-specific labels and Details with the
+  hold-recorded time and confirmed recovery path. Existing unclassified error
+  holds stay held; no raw tool/provider payloads or automatic recovery are added.
+
 ## [0.3.2] - 2026-11-18
 
 GitHub patch release for controlled trials; npm publication remains disabled.

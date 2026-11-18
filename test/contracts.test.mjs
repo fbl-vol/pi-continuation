@@ -66,6 +66,18 @@ test('old completion notices remain readable, but malformed report hashes cannot
   assert.deepEqual(decodeSupervisor(state).notices.n, state.notices.n);
 });
 
+test('optional error-hold provenance round-trips without changing legacy holds or accepting malformed causes', () => {
+  const old = { schemaVersion: 1, outcome: 'approval', stop: 'stop', version: 1,
+    session: { id: 's', file: '/session' }, hold: true, holdReason: 'error' };
+  assert.equal(decodeObservation(old).holdError, undefined);
+  for (const kind of ['run', 'checkpoint']) {
+    const holdError = { kind, at: '2026-01-01T12:00:00.000Z' };
+    assert.deepEqual(decodeObservation({ ...old, holdError }).holdError, holdError);
+  }
+  for (const holdError of [null, { kind: 'guessed', at: '2026-01-01' }, { kind: 'run', at: 'unknown' }])
+    assert.throws(() => decodeObservation({ ...old, holdError }), { code: 'INVALID_RECORD' });
+});
+
 test('a completed stop without a bounded final reply is held for inspection', () => {
   const stop = { schemaVersion: 1, outcome: 'completed', stop: 'stop', version: 1,
     session: { id: 's', file: '/session' }, hold: false };

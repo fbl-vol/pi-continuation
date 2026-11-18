@@ -136,6 +136,11 @@ export function decodeObservation(record) {
   if (record.hold !== undefined && typeof record.hold !== 'boolean') invalid();
   if (record.holdReason !== undefined &&
       !['typing', 'interruption', 'prompt', 'error', 'restored'].includes(record.holdReason)) invalid();
+  if (record.holdError !== undefined) {
+    const error = record.holdError;
+    if (!object(error) || !['run', 'checkpoint'].includes(error.kind) ||
+        typeof error.at !== 'string' || !Number.isFinite(Date.parse(error.at))) invalid();
+  }
   if (record.parkedReport !== undefined) {
     const parked = record.parkedReport;
     if (version !== 1 || !object(parked) || parked.parkedReport !== undefined ||
