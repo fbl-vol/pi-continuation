@@ -264,13 +264,32 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     await check();
     await save('starting');
     checkLocal();
-    const started = await transport(socketPath, 'agent.start', { name: `delegate-${id}`, kind: 'pi',
+    // Herdr names are at most 32 characters; keep the full UUID in base 36.
+    const name = `pc-${BigInt(`0x${id.replaceAll('-', '')}`).toString(36)}`;
+    const started = await transport(socketPath, 'agent.start', { name, kind: 'pi',
       pane_id: spawn.paneId, args: [], timeout_ms: 30000 }, { timeoutMs: 35000 });
-    if (started.type !== 'agent_started' || started.agent?.terminal_id !== spawn.terminalId ||
-        started.agent?.pane_id !== spawn.paneId || !isSettled(started.agent) || !started.agent.interactive_ready)
-      refuse('New Pi startup identity/readiness uncertain');
+    if (started.type !== 'agent_started') refuse('New Pi start was not acknowledged');
+    let agent = started.agent;
+    const deadline = performance.now() + 30000;
+    // Raw agent.start acknowledges submission. Only read-only agent.get may
+    // repeat while Herdr is still detecting this exact launched terminal.
+    while (true) {
+      if (!spawn.terminalId || agent?.terminal_id !== spawn.terminalId || agent.pane_id !== spawn.paneId ||
+          agent.name !== name || (agent.agent && agent.agent !== 'pi'))
+        refuse('New Pi startup identity changed');
+      if (isSettled(agent) && agent.interactive_ready === true) break;
+      if (agent.agent_status === 'blocked' || agent.launch_pending !== true)
+        refuse('New Pi did not become interactive');
+      if (performance.now() >= deadline) refuse('New Pi readiness timed out');
+      await check();
+      const status = await transport(socketPath, 'agent.get', { target: spawn.paneId });
+      if (status.type !== 'agent_info') refuse('New Pi readiness unavailable');
+      agent = status.agent;
+      if (!(isSettled(agent) && agent.interactive_ready === true)) await delay(150, undefined, { signal });
+    }
+    await check();
     const hello = await send(root, { type: 'hello', id }, id);
-    spawn.child = nativeBinding(started.agent, hello.session ?? {}, authority.grant.cwd);
+    spawn.child = nativeBinding(agent, hello.session ?? {}, authority.grant.cwd);
     if (!hello.accepted || hello.id !== id) refuse('Ordinary continuation extension did not bind in the new Pi session');
     const { fresh } = await check();
     if (!sameOccupant(fresh.agents.find(a => a.pane_id === spawn.paneId), spawn.child)) refuse('New worker identity changed');
@@ -281,7 +300,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     spawn.workerId = joined.workerId;
     const { state } = await check();
     const binding = state.workers[spawn.workerId];
-    if (!binding || binding.paused || !sameOccupant(started.agent, binding) ||
+    if (!binding || binding.paused || !sameOccupant(agent, binding) ||
         binding.sessionId !== spawn.child.sessionId || state.routes[binding.route]?.paused)
       refuse('Exact owner enrollment is not active; assignment withheld');
     await save('dispatching');

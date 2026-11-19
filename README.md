@@ -190,8 +190,15 @@ Run `npm ci --legacy-peer-deps --ignore-scripts`, then `npm run check` to run th
 To enable the tracked pre-push hook in a clone without an existing hook setup,
 run `git config --local core.hooksPath .githooks`. The hook runs `npm run check`
 against a clean checkout of the commit being pushed; push other commits from
-their own clean checkout. It only tests the current operating system, so the
-Linux, macOS, and Windows CI matrix still runs independently.
+their own clean checkout. On Linux the hook also runs `npm run check:native`;
+make Python 3, Herdr 0.9.5 and Pi 1.5.2 available on `PATH`. Linux CI provisions
+those versions and runs the same native check. It uses disposable Herdr and Pi
+processes and a scripted loopback model to verify a real owner launch through
+interactive readiness, exact enrollment and one observed assignment. It uses no
+live profile or provider credentials. The regular Linux, macOS, and Windows CI
+matrix still runs; this smoke test does not cover native macOS/Windows or model
+judgment. For fixes, include evidence that the relevant check fails before the
+fix and passes after it, when reproducible, before pushing or opening a PR.
 
 Only for a **separately authorized disposable** environment, `pi install /absolute/path/to/pi-continuation` installs the normal package (and changes Pi settings). Start/reload Pi through its ordinary loading mechanism; no special launcher or first `-e` ordering is required. For the released alpha.1 or advanced explicit setup, the command sequence is:
 

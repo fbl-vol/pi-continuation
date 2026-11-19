@@ -35,6 +35,10 @@ async function fixture(t, options = {}) {
     if (method === 'agent.start') {
       effects.push('start');
       const child = children.find(c => c.pane.pane_id === params.pane_id);
+      // Native Herdr 0.9.5 validates this before sending any shell input.
+      assert.match(params.name, /^[a-z][a-z0-9_-]{0,31}$/);
+      child.name = params.name;
+      assert.equal(children.filter(c => c.name === child.name).length, 1);
       assert.deepEqual(params.args, []); // ordinary startup; no SDK/extension-order launcher
       const native = f.native(params.pane_id, { delegationId: child.env.PI_CONTINUATION_SPAWN,
         allowTask: true, suppressRun: options.suppressRun,
@@ -49,14 +53,21 @@ async function fixture(t, options = {}) {
           options.onTask?.(f, child);
         } });
       child.native = native;
-      child.agent = { ...child.pane, agent: 'pi', cwd: f.root, agent_status: 'idle',
+      child.agent = { ...child.pane, name: params.name, agent: 'pi', cwd: f.root, agent_status: 'idle',
         interactive_ready: true, completion_seq: 1, state_change_seq: 1,
         agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: native.file } };
       f.agents.push(child.agent);
       await native.emit('session_start', { reason: 'startup' });
       await options.afterStart?.(f, child);
       if (options.startLost) throw new Error('lost start response');
-      return { type: 'agent_started', agent: child.agent, argv: ['pi'] };
+      const agent = options.pendingStart ? { ...child.agent, agent_status: 'unknown',
+        launch_pending: true, interactive_ready: false, agent_session: undefined } : child.agent;
+      return { type: 'agent_started', agent, argv: ['pi'] };
+    }
+    if (method === 'agent.get') {
+      effects.push('readiness');
+      const child = children.find(c => c.pane.pane_id === params.target);
+      return { type: 'agent_info', agent: { ...child.agent, ...options.readinessPatch } };
     }
     await options.onSnapshot?.(f, children, request);
   });
@@ -104,6 +115,23 @@ test('P1/P2/P7 unsupervised planner creates only a new identity, enrolls before 
   await assert.rejects(f.worker.spawn({ ...task, key: 'changed-role', role: 'read-only' }), /EEXIST/);
   assert.equal(f.effects.filter(e => e === 'task').length, 2, 'one initial task per new worker');
 });
+
+for (const readiness of ['ready', 'replaced', 'blocked']) {
+  test(`P1/P7 native start acknowledgement is not readiness: ${readiness}`, async t => {
+    const f = await fixture(t, { pendingStart: true, readinessPatch: readiness === 'replaced' ?
+      { terminal_id: 'different-terminal' } : readiness === 'blocked' ? { agent_status: 'blocked' } : undefined });
+    if (readiness === 'ready') {
+      await f.worker.command('start-implementation', 'Implement the agreed fixture change.');
+      assert.deepEqual(f.effects, ['split', 'start', 'readiness', 'task']);
+    } else {
+      await assert.rejects(f.worker.command('start-implementation', 'Implement the agreed fixture change.'),
+        /held for inspection/);
+      assert.deepEqual(f.effects, ['split', 'start', 'readiness']);
+      assert.equal((await f.attempt()).status, 'held');
+      assert.deepEqual((await f.state()).workers, {});
+    }
+  });
+}
 
 test('P1/P6 supervised non-writing owner delegates the sole writer and pins exact child recipient', async t => {
   const f = await fixture(t);
