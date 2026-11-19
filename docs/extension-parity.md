@@ -104,7 +104,7 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
-### Approved coordinating-owner amendment (source only; not in v0.3.3)
+### Approved coordinating-owner amendment (since v0.4.0)
 
 A coordinating owner is an exact Pi session that explicitly registers as a non-writing
 material-notice recipient (`/continuation-coordinator owner`) and then separately

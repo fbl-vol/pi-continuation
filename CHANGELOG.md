@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0] - 2026-11-19
+
+GitHub minor release for controlled trials; npm publication remains disabled.
+
+- Add a supervised coordinating owner who receives material notices from its
+  own delegated workers and reviewers. Routing follows the exact assignment
+  owner, not the Herdr workspace. The brainstorming session can stay unsupervised.
+- Distinguish waiting for named children from waiting for a user decision.
+  Child notices defer during a user wait; release requires confirmation in the
+  owner session and the user supplies their decision in an ordinary message.
+- Keep one implementation writer per checkout and preserve independent review,
+  scoped pauses, exact evidence checks, and delivery history. Installation alone
+  does not enroll sessions, clear holds, or migrate existing supervision.
+- Isolated tests cover the owner flow; live end-to-end operation is not yet verified.
+
 ## [0.3.3] - 2026-11-18
 
 GitHub patch release for controlled trials; npm publication remains disabled.
