@@ -125,6 +125,42 @@ test('P1/P6 supervised non-writing owner delegates the sole writer and pins exac
   assert.equal(f.effects.filter(effect => effect === 'task').length, 1);
 });
 
+test('P1/P6 native launch needs no child confirmations and delegates only through the new owner', async t => {
+  const f = await fixture(t);
+  const scope = 'Implement the agreed fixture change and independently review it.';
+  await assert.rejects(f.worker.spawn(task), /No scoped delegation grant/);
+  await f.worker.command('start-implementation', scope);
+  const owner = f.children[0];
+  assert.equal(f.workerId(), undefined);
+  assert.equal(f.worker.confirmations.length, 0);
+  assert.equal(owner.native.confirmations.length, 0);
+  assert.match(owner.task, /supervised coordinating owner \(not the writer\)/);
+  const ownerBinding = Object.values((await f.state()).workers)[0];
+  assert.equal(ownerBinding.role, 'owner');
+  assert.equal(ownerBinding.sessionId, owner.native.id);
+  await assert.rejects(f.worker.command('start-implementation', scope), /EEXIST/);
+  await assert.rejects(f.worker.spawn(task), /No scoped delegation grant/);
+  const writer = (await owner.native.spawn(task)).details;
+  const review = { role: 'read-only', key: 'review', task: 'Independently review the writer result.' };
+  await assert.rejects(f.children[1].native.spawn(review), /exact child with delegation authority/);
+  const reviewer = (await owner.native.spawn(review)).details;
+  const state = await f.state();
+  for (const child of [writer, reviewer]) assert.equal(state.workers[child.workerId].recipient.id, ownerBinding.coordinatorId);
+  await assert.rejects(owner.native.spawn({ ...task, key: 'another', task: 'Create a second writer' }), /Checkout already has/);
+  assert.equal(f.effects.filter(e => e === 'task').length, 3);
+});
+
+test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
+  const f = await fixture(t, { splitLost: true });
+  await f.supervisorCommand('pause global');
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /Global continuation is paused/);
+  assert.deepEqual(f.effects, []);
+  await f.supervisorCommand('activate global');
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /held for inspection.*disconnected before response/);
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /EEXIST/);
+  assert.deepEqual(f.effects, ['split']);
+});
+
 test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
   const f = await fixture(t);
   await f.workerStart();

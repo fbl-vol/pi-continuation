@@ -154,8 +154,18 @@ bounded protections and recovery limits.
 
 ## Coordinating-owner workflow (since v0.4.0)
 
-This workflow ships in v0.4.0; v0.3.3 does not include it. With v0.4.0 loaded and
-an intended global supervisor running, an intended owner can register
+With a build that provides the native `/start-implementation` command and an
+intended global supervisor already running, enter `/start-implementation <agreed
+assignment>` from the unsupervised brainstorming session in the target Git checkout.
+Supply the agreed scope and checks as command text. This one invocation authorizes
+launching and enrolling a non-writing owner and giving it scoped delegation for
+one writer and read-only reviewers. Continue in the owner pane the command reports;
+there are no setup confirmations in that pane. A skill or ordinary model message
+cannot replace invocation. If launch is held or uncertain, inspect the attempt
+rather than retrying or rephrasing it. Genuine user decisions still pause the owner.
+
+For v0.4.0 or for advanced manual setup with an intended global supervisor running,
+an intended owner can register
 `/continuation-coordinator owner`, then `/continuation-worker start`, then authorize
 its bounded `writer` delegation scope with `/continuation-delegate`. The owner is a
 supervised non-writer and an exact recipient for its delegated children, not another
