@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3] - 2026-11-19
+
+- Accept Herdr 0.9.5's `pane_info` response after splitting a pane so delegated
+  startup can proceed to Pi instead of stopping at a newly opened shell.
+- Existing held attempts and checkout fences are unchanged. The fix has isolated
+  regression coverage; it has not been verified in a live owner launch.
+
 ## [0.4.2] - 2026-11-19
 
 - Run bare `/start-implementation` to hand off the agreed plan from the current
