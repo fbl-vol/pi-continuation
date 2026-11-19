@@ -221,6 +221,33 @@ for (const proposal of ['superseded', 'later', 'approved correction']) {
   });
 }
 
+test('P1 bare launch preserves earlier user constraints without reintroducing older proposals', async t => {
+  const f = await fixture(t);
+  f.worker.user('Docs only. Do not publish. Run focused tests.');
+  f.worker.assistant('Rejected proposal: rewrite the implementation.');
+  f.worker.user('No, keep this to documentation.');
+  f.worker.assistant('Update the README.');
+  f.worker.user('Yes, proceed with that plan.');
+  f.worker.ctx.model = {};
+  const selection = {
+    agreement: { turn: 4, quote: 'Yes, proceed with that plan.' },
+    plan: [{ turn: 3, quote: 'Update the README.' }],
+    earlierConstraints: [{ turn: 0, quote: 'Docs only.' }],
+  };
+  f.worker.ctx.modelRegistry = { complete: async () => ({ stopReason: 'stop', content: [{ type: 'text',
+    text: JSON.stringify(selection),
+  }] }) };
+  selection.earlierConstraints.push({ turn: 1, quote: 'Rejected proposal: rewrite the implementation.' });
+  await assert.rejects(f.worker.command('start-implementation', ''), /No single agreed assignment/);
+  assert.deepEqual(f.effects, []);
+  selection.earlierConstraints.pop();
+  await f.worker.command('start-implementation', '');
+  assert.match(f.children[0].task, /Docs only\. Do not publish\. Run focused tests\./);
+  assert.match(f.children[0].task, /Update the README\./);
+  assert.doesNotMatch(f.children[0].task, /rewrite the implementation/);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
 for (const condition of ['closed', 'pane exists', 'session moved', 'unresolved']) {
   test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
     const f = await fixture(t, { closedPanes: condition === 'pane exists' ? [] : ['w:old'] });

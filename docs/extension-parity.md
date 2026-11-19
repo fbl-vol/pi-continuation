@@ -125,8 +125,10 @@ restart clears the fence. This extends P1/P5/P6/P7 without changing advanced con
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
 configured model identifies the latest user assignment or agreement to the
 immediately preceding assistant proposal from bounded current conversation text.
-Only those complete turns can be handed off, preserving user corrections; a
-subsequent assistant proposal cannot borrow an earlier approval. No skill
+Those complete turns preserve user corrections; a subsequent assistant proposal
+cannot borrow an earlier approval. The model can also cite applicable earlier
+user constraints and checks. Only complete, verified user turns are carried as
+prior context, not as a separate assignment. No skill
 invocation or extra confirmation. Unclear or invalid selection, provider
 failure, or a changed planning session creates no owner.
 Explicit command text remains supported. Paused history is excluded from writer
