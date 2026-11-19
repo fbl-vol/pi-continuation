@@ -123,9 +123,12 @@ restart clears the fence. This extends P1/P5/P6/P7 without changing advanced con
 ### Chat-based owner launch (unreleased)
 
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
-configured model selects verbatim excerpts of the agreed plan from bounded current
-conversation text. No skill invocation or extra confirmation. Unclear or invalid
-selection, provider failure, or a changed planning session creates no owner.
+configured model identifies the latest user assignment or agreement to the
+immediately preceding assistant proposal from bounded current conversation text.
+Only those complete turns can be handed off, preserving user corrections; a
+subsequent assistant proposal cannot borrow an earlier approval. No skill
+invocation or extra confirmation. Unclear or invalid selection, provider
+failure, or a changed planning session creates no owner.
 Explicit command text remains supported. Paused history is excluded from writer
 conflicts only if Herdr confirms the original pane is gone and the exact session
 is not reported elsewhere, and no unresolved delivery remains. Existing writer

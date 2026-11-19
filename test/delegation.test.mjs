@@ -194,6 +194,33 @@ for (const reason of ['ambiguous', 'invented', 'changed']) {
   });
 }
 
+for (const proposal of ['superseded', 'later', 'approved correction']) {
+  test(`P1 bare launch binds chat scope to the latest user agreement: ${proposal}`, async t => {
+    const f = await fixture(t);
+    f.worker.assistant('Plan A: update help text only.');
+    f.worker.user('Yes, approve Plan A.');
+    f.worker.assistant('Plan B: also update the quick-start example.');
+    if (proposal !== 'later') f.worker.user('Approve Plan B, but leave the installation section unchanged.');
+    f.worker.ctx.model = {};
+    f.worker.ctx.modelRegistry = { complete: async () => ({ stopReason: 'stop', content: [{ type: 'text',
+      text: JSON.stringify({ agreement: proposal === 'later' ? { turn: 1, quote: 'Yes, approve Plan A.' } :
+        { turn: 3, quote: 'Approve Plan B' }, plan: [proposal === 'superseded' ?
+        { turn: 0, quote: 'Plan A: update help text only.' } : { turn: 2, quote: 'Plan B: also update the quick-start example.' }],
+      }),
+    }] }) };
+    if (proposal === 'approved correction') {
+      await f.worker.command('start-implementation', '');
+      assert.match(f.children[0].task, /Plan B: also update/);
+      assert.match(f.children[0].task, /leave the installation section unchanged/);
+      assert.doesNotMatch(f.children[0].task, /Plan A/);
+    } else {
+      await assert.rejects(f.worker.command('start-implementation', ''), /No single agreed assignment/);
+      assert.deepEqual(f.effects, []);
+      assert.equal((await readdir(f.root)).some(name => name.startsWith('delegation-')), false);
+    }
+  });
+}
+
 for (const condition of ['closed', 'pane exists', 'session moved', 'unresolved']) {
   test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
     const f = await fixture(t, { closedPanes: condition === 'pane exists' ? [] : ['w:old'] });
