@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5] - 2026-11-19
+
+- Wait for the delegated pane's foreground shell on Linux and macOS before
+  sending a single Pi start request. Recheck pane identity before starting Pi.
+- Exercise a delayed Bash startup in the native Linux Herdr/Pi smoke test,
+  both before pushing and in CI. Existing held attempts are unchanged.
+
 ## [0.4.4] - 2026-11-19
 
 - Generate Herdr-compatible agent names and wait for interactive Pi readiness
