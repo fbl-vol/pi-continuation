@@ -263,11 +263,22 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 capture_sidebar(herdr, work, env, resize, evidence)
                 (evidence/'presentation.json').write_text(json.dumps(seen, ensure_ascii=False, indent=2))
             if not baseline:
-                cli('pane', 'rename', owner['paneId'], 'Manual owner label')
-                # Wait past one unchanged-metadata renewal while the writer is still working.
-                time.sleep(5.2)
+                manual_label = 'Manual owner label'
+                cli('pane', 'rename', owner['paneId'], manual_label)
+                renamed_at = time.monotonic()
+                # The reporter's 15 s Herdr TTL bounds any pre-rename name.
+                # Allow one extra second so a still-visible name requires a later report.
+                ttl_seconds = 15
+                time.sleep(ttl_seconds + 1)
+                elapsed = time.monotonic() - renamed_at
+                assert elapsed > ttl_seconds, elapsed
                 info = cli('pane', 'get', owner['paneId'])['pane']
-                assert info['label'] == 'Manual owner label' and info['display_agent'] == labels[0], info
+                assert info.get('label') == manual_label and info.get('display_agent') == labels[0], info
+                renewal = dict(seconds_after_rename=round(elapsed, 3), ttl_seconds=ttl_seconds,
+                               label=info['label'], display_agent=info['display_agent'])
+                print('Post-rename metadata renewal: ' + json.dumps(renewal, ensure_ascii=False), flush=True)
+                if evidence:
+                    (evidence/'manual-rename-renewal.json').write_text(json.dumps(renewal, ensure_ascii=False, indent=2))
             print('Native launch passed: slow Bash startup, exact owner/writer enrollment, and independent activity and display')
         except Exception:
             for pane in panes:
