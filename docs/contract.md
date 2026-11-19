@@ -18,7 +18,7 @@ Shared-UI calls are synchronously observed before display. Registration/hold-cle
 
 New run/checkpoint error holds include optional `holdError: { kind: "run" | "checkpoint", at: <ISO timestamp> }` alongside the existing hold fields. `at` is when the hold was recorded, not a reconstructed failure time. This additive provenance never changes eligibility and survives subsequent observations/reload until explicit resolution. Old records remain readable and held without fabricated cause/time; no existing hold is cleared or migrated. Sidebar labels and Details use this evidence, not raw provider/tool error text.
 
-## Supervised coordinating owners (source amendment; not in v0.3.3)
+## Supervised coordinating owners (since v0.4.0)
 
 `/continuation-coordinator owner` registers an exact non-writing recipient in the
 current Pi session; `/continuation-worker start` independently confirms worker
