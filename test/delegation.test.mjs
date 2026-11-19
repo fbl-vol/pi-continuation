@@ -30,7 +30,7 @@ async function fixture(t, options = {}) {
       assert.equal(params.focus, false);
       assert.equal(params.cwd, f.root);
       if (options.splitLost) throw new Error('lost split response after creation');
-      return { type: 'pane_created', pane };
+      return { type: 'pane_info', pane }; // Herdr 0.9.5 replies with PaneInfo, not its PaneCreated event.
     }
     if (method === 'agent.start') {
       effects.push('start');

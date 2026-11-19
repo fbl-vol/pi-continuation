@@ -256,7 +256,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
       cwd: authority.grant.cwd, focus: false,
       env: { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root } });
-    if (split.type !== 'pane_created' || !split.pane?.pane_id || split.pane.pane_id === paneId ||
+    if (split.type !== 'pane_info' || !split.pane?.pane_id || split.pane.pane_id === paneId ||
         live.agents.some(a => a.pane_id === split.pane.pane_id) || split.pane.workspace_id !== parent.workspaceId)
       refuse('Pane creation identity uncertain');
     spawn.paneId = split.pane.pane_id;
