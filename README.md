@@ -179,7 +179,13 @@ for the bounded safeguards. No live owner bootstrap or unattended delivery is cl
 
 ## Development and disposable use
 
-Run `npm ci --legacy-peer-deps`, `npm test`, and `npm run check:package`. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.
+Run `npm ci --legacy-peer-deps --ignore-scripts`, then `npm run check` to run the same tests and package check as CI. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.
+
+To enable the tracked pre-push hook in a clone without an existing hook setup,
+run `git config --local core.hooksPath .githooks`. The hook runs `npm run check`
+against a clean checkout of the commit being pushed; push other commits from
+their own clean checkout. It only tests the current operating system, so the
+Linux, macOS, and Windows CI matrix still runs independently.
 
 Only for a **separately authorized disposable** environment, `pi install /absolute/path/to/pi-continuation` installs the normal package (and changes Pi settings). Start/reload Pi through its ordinary loading mechanism; no special launcher or first `-e` ordering is required. For the released alpha.1 or advanced explicit setup, the command sequence is:
 
