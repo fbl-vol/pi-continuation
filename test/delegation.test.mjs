@@ -45,8 +45,12 @@ async function fixture(t, options = {}) {
   let serial = 0;
   f.onRequest(async request => {
     const { method, params } = request;
+    if (method === 'pane.get') await options.beforePaneRead?.(f, params.pane_id);
     if (method === 'pane.get' && options.closedPanes?.includes(params.pane_id))
       throw Object.assign(new Error('Pane closed'), { code: 'pane_not_found' });
+    if (method === 'session.snapshot' && options.historicalPanes)
+      return { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents,
+        panes: [...f.agents, ...options.historicalPanes] } };
     if (method === 'pane.split') {
       effects.push('split');
       await options.beforeSplit?.(f);
@@ -66,6 +70,10 @@ async function fixture(t, options = {}) {
         foreground_process_group_id: foreground, foreground_processes: [{ pid: foreground }] } };
     }
     if (method === 'pane.get') {
+      if (['w:old', 'h:old', 'h:recipient'].includes(params.pane_id) && options.historicalPanes) {
+        const pane = [...f.agents, ...options.historicalPanes].find(p => p.pane_id === params.pane_id);
+        return { type: 'pane_info', pane: { ...pane, ...options.historicalPanePatch } };
+      }
       const child = children.find(c => c.pane.pane_id === params.pane_id);
       if (child) return { type: 'pane_info', pane: child.agent ?
         { ...child.agent, label: child.pane.label, ...options.postStartPanePatch } :
@@ -339,31 +347,156 @@ test('P1 bare launch preserves earlier user constraints without reintroducing ol
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
 });
 
-for (const condition of ['closed', 'pane exists', 'session moved', 'unresolved']) {
+for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane exists', 'session moved',
+  'live exact session', 'unresolved', 'decision', 'pending notices']) {
   test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
-    const f = await fixture(t, { closedPanes: condition === 'pane exists' ? [] : ['w:old'] });
+    const f = await fixture(t, {
+      closedPanes: ['closed', 'session moved', 'unresolved', 'decision', 'pending notices'].includes(condition) ? ['w:old'] : [],
+      historicalPanes: condition === 'pane exists' ? [{ pane_id: 'w:old' }] : [],
+      historicalPanePatch: condition === 'conflicting replacement' ? { terminal_id: 'changed-terminal' } : {},
+    });
     const state = await f.state();
     const id = '11111111-1111-4111-8111-111111111111';
+    const file = join(f.root, 'old.jsonl');
     const old = { workerId: id, route: 'w', paused: true, paneId: 'w:old', cwd: f.root,
-      sessionId: 'old-session', sessionFile: join(f.root, 'old.jsonl'), checkpoint: join(f.root, 'old.md') };
+      terminalId: 'old-terminal', workspaceId: 'w', tabId: 'w:t1', sessionKind: 'path', sessionValue: file,
+      sessionId: 'old-session', sessionFile: file, checkpoint: join(f.root, 'old.md') };
     state.workers[id] = old;
     await writeFile(old.checkpoint, 'Historical checkpoint');
     await atomicJson(join(f.root, `worker-${id}.json`), old);
     if (condition === 'unresolved') state.inflight[id] = { id, stop: id };
+    if (condition === 'decision') state.dispositions[id] = { stop: id, action: 'decision' };
+    const noticeIds = ['11111111-1111-4111-8111-111111111112', '11111111-1111-4111-8111-111111111113'];
+    if (condition === 'pending notices') {
+      state.routes.w = { paused: false, coordinator: null };
+      for (const noticeId of noticeIds) state.notices[noticeId] = {
+        id: noticeId, workerId: id, route: 'w', stop: noticeId, kind: 'blocker', status: 'pending', text: 'Synthetic blocker',
+      };
+    }
     await atomicJson(join(f.root, 'supervisor.json'), state);
     // Restart fixture supervisor so its own memory has the same retained binding.
     await f.supervisor.emit('session_shutdown');
     await f.supervisorCommand('start');
     if (condition === 'session moved') f.agents.push({ ...f.agents[0], pane_id: 'w:moved',
       agent_session: { ...f.agents[0].agent_session, value: old.sessionFile } });
-    if (condition === 'closed') {
+    if (['replaced', 'conflicting replacement', 'live exact session'].includes(condition)) {
+      f.agents.push({ ...f.agents[0], pane_id: old.paneId, terminal_id: old.terminalId,
+        agent_session: { ...f.agents[0].agent_session, value: condition === 'live exact session' ? file : join(f.root, 'replacement.jsonl') } });
+    }
+    if (condition === 'closed' || condition === 'replaced') {
       await f.worker.command('start-implementation', 'Update the docs');
+      assert.deepEqual(f.effects, ['split', 'start', 'task']);
       const writer = (await f.children[0].native.spawn(task)).details;
       assert.equal(writer.status, 'dispatched');
       assert.deepEqual((await f.state()).workers[id], old);
     } else {
-      await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), /Checkout already has a supervised worker/);
+      await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), ({ message }) =>
+        message.includes('no agent started') && message.includes(`supervised worker ${id}`) &&
+        (condition !== 'pending notices' || noticeIds.every(noticeId => message.includes(noticeId))));
       assert.deepEqual(f.effects, []);
+    }
+  });
+}
+
+for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient', 'writer claim', 'decision']) {
+  test(`P6/P7 one native command archives only proven undelivered blockers (${blocker ?? 'clear checkout'})`, async t => {
+    let recipientReads = 0, returnRecipient;
+    const f = await fixture(t, { closedPanes: blocker === 'live recipient' ? [] : ['h:recipient'], historicalPanes: [],
+      beforePaneRead: (_f, pane) => {
+        if (blocker === 'returning recipient' && pane === 'h:recipient' && ++recipientReads === 3) returnRecipient();
+      },
+    });
+    const binding = (name, id) => ({ paneId: `h:${name}`, workspaceId: 'h', tabId: 'h:t1', terminalId: name,
+      cwd: f.root, sessionId: id, sessionFile: join(f.root, `${name}.jsonl`),
+      sessionKind: 'path', sessionValue: join(f.root, `${name}.jsonl`) });
+    const workerId = '11111111-1111-4111-8111-111111111111';
+    const recipientId = '22222222-2222-4222-8222-222222222222';
+    const sender = { ...binding('old', workerId), workerId, route: 'h', paused: true, checkpoint: join(f.root, 'old.md') };
+    const recipient = { ...binding('recipient', recipientId), id: recipientId };
+    const state = await f.state();
+    state.schemaVersion = 2;
+    state.routes.h = { paused: true, coordinator: recipient };
+    state.workers[workerId] = sender;
+    if (blocker === 'decision') state.dispositions[workerId] = { action: 'decision', stop: workerId };
+    let ids = ['33333333-3333-4333-8333-333333333331', '33333333-3333-4333-8333-333333333332'];
+    if (blocker) {
+      for (const id of ids) state.notices[id] = { id, workerId, route: 'h', stop: id, kind: 'blocker',
+        status: 'pending', text: 'Preserve this blocker', unsentRecipient: recipient };
+    } else {
+      state.schemaVersion = 1;
+      state.routes.h.paused = false;
+      const agent = (ref, status) => ({ ...f.agents[0], pane_id: ref.paneId, terminal_id: ref.terminalId,
+        workspace_id: ref.workspaceId, tab_id: ref.tabId, agent_status: status,
+        completion_seq: 1, state_change_seq: 1,
+        agent_session: { ...f.agents[0].agent_session, value: ref.sessionFile } });
+      f.agents.push(agent(sender, 'idle'), agent(recipient, 'working'));
+    }
+    await writeFile(sender.checkpoint, 'Historical checkpoint');
+    await atomicJson(join(f.root, `worker-${workerId}.json`), sender);
+    await atomicJson(join(f.root, `coordinator-${recipientId}.json`), recipient);
+    await atomicJson(join(f.root, `observation-${workerId}.json`), {
+      session: { id: sender.sessionId, file: sender.sessionFile }, stop: null, outcome: 'unknown', hold: false,
+    });
+    if (blocker === 'receipt') await atomicJson(join(f.root, `receipt-${ids[0]}.json`), { status: 'sent' });
+    if (blocker === 'writer claim') {
+      const { createHash } = await import('node:crypto');
+      const pathHash = createHash('sha256').update(join(f.root, '.git')).digest('hex');
+      await atomicJson(join(f.root, `delegation-writer-${pathHash}.json`), { id: workerId });
+    }
+    await f.supervisor.emit('session_shutdown');
+    await atomicJson(join(f.root, 'supervisor.json'), state);
+    await f.supervisorCommand('start');
+    if (!blocker) {
+      await writeFile(sender.sessionFile, '');
+      for (const stop of ids) {
+        await f.supervisorCommand(`activate worker ${workerId}`);
+        await atomicJson(join(f.root, `observation-${workerId}.json`), {
+          session: { id: sender.sessionId, file: sender.sessionFile }, stop, outcome: 'completed',
+          finalReply: 'Historical checkpoint', hold: false,
+        });
+        const result = await f.supervisor.dispose({ workerId, stop, action: 'notify', kind: 'blocker',
+          evidence: 'Historical checkpoint' });
+        assert.match(result.content[0].text, /Material notice pending/);
+      }
+      const produced = await f.state();
+      assert.equal(produced.schemaVersion, 2);
+      ids = Object.keys(produced.notices);
+      assert.equal(ids.length, 2);
+      for (const id of ids) {
+        assert.equal(produced.notices[id].status, 'pending');
+        assert.deepEqual(produced.notices[id].unsentRecipient, recipient);
+      }
+      Object.assign(state, produced);
+      await f.supervisor.emit('session_shutdown');
+      f.agents.splice(f.agents.findIndex(a => a.pane_id === sender.paneId), 2);
+      await f.supervisorCommand('start');
+    }
+    // The retained sender's pane has a positive, different native occupant.
+    f.agents.push({ ...f.agents[0], pane_id: sender.paneId, terminal_id: sender.terminalId,
+      agent_session: { ...f.agents[0].agent_session, value: join(f.root, 'replacement.jsonl') } });
+    returnRecipient = () => f.agents.push({ ...f.agents[0], pane_id: blocker === 'returning recipient' ? 'h:relocated' : recipient.paneId,
+      terminal_id: recipient.terminalId, agent_status: 'working',
+      agent_session: { ...f.agents[0].agent_session, value: recipient.sessionFile } });
+    if (blocker === 'live recipient') returnRecipient();
+    if (blocker) {
+      await assert.rejects(f.worker.command('start-implementation', 'Update the docs'),
+        blocker === 'returning recipient' ? /no agent started.*endpoint changed/ : /no agent started/);
+      assert.deepEqual(f.effects, []);
+      assert.deepEqual((await f.state()).notices, state.notices);
+    } else {
+      await f.worker.command('start-implementation', 'Update the docs');
+      assert.deepEqual(f.effects, ['split', 'start', 'task']);
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+      const after = await f.state();
+      assert.deepEqual(after.workers[workerId], sender);
+      assert.equal(Object.values(after.workers).filter(w => w.role === 'owner').length, 1);
+      for (const id of ids) {
+        assert.equal(after.notices[id].status, 'archived');
+        assert.equal(after.notices[id].text, state.notices[id].text);
+        assert.equal(after.notices[id].archive.reason, 'orphaned-before-send');
+        assert.deepEqual(after.notices[id].archive.recipient, recipient);
+      }
     }
   });
 }

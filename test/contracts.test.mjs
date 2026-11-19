@@ -19,7 +19,7 @@ test('legacy normalization preserves pauses, pending work and conservative no-re
 });
 
 test('unknown versions and malformed authority fields fail instead of acquiring defaults', () => {
-  for (const patch of [{ schemaVersion: 2 }, { paused: 'false' }, { workers: [] },
+  for (const patch of [{ schemaVersion: 3 }, { paused: 'false' }, { workers: [] },
     { routes: { r: { paused: null } } }, { resumed: null },
     { budgets: { w: { count: -1, hash: 'h' } } }, { inflight: { w: {} } }]) {
     assert.throws(() => decodeSupervisor({ ...newSupervisor(), ...patch }),

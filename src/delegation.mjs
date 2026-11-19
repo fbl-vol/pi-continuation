@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { realpath } from 'node:fs/promises';
+import { readdir, realpath } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
@@ -106,7 +107,10 @@ export async function delegationAuthority(root, reference, binding) {
   } else if (JSON.stringify(grant.parent) !== JSON.stringify(binding)) refuse('Delegation belongs to another planning session');
   const state = await delegationOwner(root, grant);
   if (state.routes[binding.workspaceId]?.paused) refuse('Delegation route is paused');
-  const worker = Object.values(state.workers).find(w => w.sessionId === binding.sessionId || w.paneId === binding.paneId);
+  // A planning session may occupy a historical pane. The checkout check,
+  // not a pane-only match, decides whether that prior binding blocks launch.
+  const worker = Object.values(state.workers).find(w => w.sessionId === binding.sessionId ||
+    (!(grant.ownerLaunch && !reference.spawnId) && w.paneId === binding.paneId));
   const recipient = inheritedRecipient ?? worker?.recipient;
   if (inheritedRecipient && (!worker || worker.recipient?.id !== inheritedRecipient.id))
     refuse('Inherited owner recipient changed; no delegation through this tree');
@@ -165,24 +169,207 @@ export async function delegatedStart(root, id, record, state, live) {
   return { ...spawn, displayLabel: delegatedDisplayLabel(spawn.role, grant) };
 }
 
-// A missing agent is not enough: a shell pane can still exist or the session
-// can be reported elsewhere. Ignore only closed, paused bindings with no
-// unresolved delivery, leaving their records intact for historical inspection.
-async function closedWorker(root, socketPath, worker, state, live, transport, readSnapshot) {
-  const id = worker.workerId;
-  if (!worker.paused || !isId(id) || !worker.sessionFile || !worker.sessionId || !worker.paneId ||
-      state.inflight[id] || Object.values(state.notices).some(n => n.workerId === id &&
-        ['pending', 'sending', 'uncertain'].includes(n.status))) return false;
-  if (worker.delegationId && (await readJson(spawnPath(root, worker.delegationId))).status !== 'dispatched') return false;
-  const possiblyLive = ({ agents }) => agents.some(a => a.pane_id === worker.paneId ||
-    [worker.sessionFile, worker.sessionId].includes(a.agent_session?.value));
-  if (possiblyLive(live)) return false;
-  try { await transport(socketPath, 'pane.get', { pane_id: worker.paneId }); }
-  catch (error) {
+const unresolvedNotice = notice => ['pending', 'sending', 'uncertain'].includes(notice.status);
+
+function exactSessionReference(binding) {
+  return ['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
+    .every(key => typeof binding[key] === 'string' && binding[key].length > 0) &&
+    binding.sessionKind === 'path' && binding.sessionValue === binding.sessionFile;
+}
+
+// Absence requires both a targeted pane result and consistent global views.
+// A live old session anywhere, a shell, or a changing/partial identity is not absence.
+function historicalPane(binding, view) {
+  if (!exactSessionReference(binding)) return undefined;
+  const oldValues = [binding.sessionFile, binding.sessionId];
+  const matchesOld = row => oldValues.includes(row.agent_session?.value);
+  if (!Array.isArray(view.panes) || [...view.agents, ...view.panes].some(matchesOld)) return undefined;
+  const agents = view.agents.filter(a => a.pane_id === binding.paneId);
+  const panes = view.panes.filter(a => a.pane_id === binding.paneId);
+  if (!agents.length && !panes.length) return null;
+  if (agents.length !== 1 || panes.length !== 1) return undefined;
+  const agent = agents[0];
+  const value = agent.agent_session?.value;
+  if (typeof value !== 'string' || !value || !agent.terminal_id || !agent.workspace_id || !agent.tab_id ||
+      !(agent.foreground_cwd || agent.cwd)) return undefined;
+  const replacement = { paneId: agent.pane_id, terminalId: agent.terminal_id,
+    workspaceId: agent.workspace_id, tabId: agent.tab_id, cwd: agent.foreground_cwd || agent.cwd,
+    sessionKind: 'path', sessionValue: value };
+  if (sameOccupant(agent, replacement) && sameOccupant(panes[0], replacement)) return replacement;
+}
+
+async function absentSession(binding, live, readPane, readSnapshot) {
+  const first = historicalPane(binding, live);
+  if (first === undefined) return false;
+  let pane;
+  try {
+    const result = await readPane(binding.paneId);
+    if (result.type !== 'pane_info') return false;
+    pane = result.pane;
+  } catch (error) {
     if (error.code !== 'pane_not_found') throw error;
-    return !possiblyLive(await readSnapshot(socketPath));
+    pane = null;
   }
-  return false;
+  if (first === null ? pane !== null : !sameOccupant(pane, first)) return false;
+  return isDeepStrictEqual(first, historicalPane(binding, await readSnapshot()));
+}
+
+async function historicalWorkerBlocker(root, worker, state, live, readPane, readSnapshot, pending) {
+  const id = worker.workerId;
+  if (!worker.paused || !isId(id) || state.workers[id] !== worker) return 'not a validated paused binding';
+  if (state.ownerWaits[id] || state.dispositions[id]?.action === 'decision') return 'unresolved owner wait or decision';
+  if (state.inflight[id]) return `unresolved resume ${state.inflight[id].id}`;
+  const notices = Object.values(state.notices).filter(n =>
+    (n.workerId === id || (worker.role === 'owner' && n.recipient?.id === worker.coordinatorId)) && unresolvedNotice(n));
+  if (notices.some(n => !pending || n.workerId !== id || n.kind !== 'blocker' || n.status !== 'pending' || !n.unsentRecipient))
+    return `unresolved ${notices.map(n => `${n.status} notice ${isId(n.id) ? n.id : '(invalid ID)'}`).join(', ')}`;
+  try {
+    const saved = await readJson(join(root, `worker-${id}.json`));
+    if (!registrationMatches(saved, worker) || await realpath(saved.checkpoint) !== worker.checkpoint)
+      return 'retained registration does not match';
+    if (worker.delegationId) {
+      const attempt = await readJson(spawnPath(root, worker.delegationId));
+      if (attempt.id !== worker.delegationId || attempt.workerId !== id || attempt.status !== 'dispatched')
+        return `unresolved delegated startup ${worker.delegationId}`;
+    }
+    const observed = await readObservation(root, id).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    if (observed && (!sameSession(observed.session, worker) || observed.bootstrapPending || observed.outcome === 'approval'))
+      return 'unverified observation, unresolved startup, or approval';
+    if (!await absentSession(worker, live, readPane, readSnapshot)) return 'exact session live or absence unverified';
+  } catch { return 'historical binding evidence unavailable'; }
+  for (const notice of notices) pending.set(notice.id, notice);
+  return null;
+}
+
+async function inspectCheckout(root, grant, parent, recipient, state, live, readPane, readSnapshot, recover) {
+  if (!grant.checkout || await checkoutIdentity(grant.cwd) !== grant.checkout) refuse('Delegation checkout identity changed');
+  const pending = recover ? new Map() : undefined;
+  for (const worker of Object.values(state.workers)) {
+    const id = isId(worker.workerId) ? worker.workerId : '(invalid ID)';
+    let checkout;
+    try { checkout = await checkoutIdentity(worker.cwd); }
+    catch { refuse(`Existing worker checkout cannot be verified for ${id}; inspect writer ownership`); }
+    if (checkout !== grant.checkout) continue;
+    const parentOwner = worker.role === 'owner' && worker.coordinatorId &&
+      worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
+      worker.paneId === parent.paneId && recipient?.id === worker.coordinatorId;
+    if (!parentOwner) {
+      const blocker = await historicalWorkerBlocker(root, worker, state, live, readPane, readSnapshot, pending);
+      if (blocker) refuse(`Checkout already has a supervised worker ${id}: ${blocker}; inspect writer ownership`);
+    }
+  }
+  return pending;
+}
+
+const writerClaimPath = (root, checkout) => join(root, `delegation-writer-${digest(checkout)}.json`);
+async function requireNoWriterClaim(root, checkout) {
+  try {
+    const existing = await readJson(writerClaimPath(root, checkout));
+    refuse(`Checkout retains a writer claim${isId(existing?.id) ? ` ${existing.id}` : ''}; inspect ownership before launch`);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
+/** Owner queue only. No notice selection supplied by the caller; derive it from
+ * the exact native checkout attempt and the current supervisor snapshot. */
+export async function archiveLaunchNotices(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
+  const id = request.id;
+  const attempt = await readJson(spawnPath(root, id));
+  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
+  const fence = ownerLaunchPath(root, grant.checkout);
+  const verifyAttempt = async () => {
+    const launch = await readJson(fence);
+    if (launch.token !== id || !isDeepStrictEqual(attempt, await readJson(spawnPath(root, id))))
+      refuse('Native start attempt changed');
+    await requireNoWriterClaim(root, grant.checkout);
+  };
+  if (attempt.id !== id || attempt.status !== 'prepared' || attempt.role !== 'owner' ||
+      attempt.ownerToken !== state.ownerToken || attempt.grantId !== grant.id || !grant.ownerLaunch ||
+      attempt.authority.spawnId || attempt.task !== grant.scope) refuse('No matching native start attempt');
+  await verifyAttempt();
+  const previous = structuredClone(state);
+  const live = await readSnapshot();
+  requireDelegationParent(live, attempt.parent);
+  const pending = await inspectCheckout(root, grant, attempt.parent, undefined, previous, live, readPane, readSnapshot, true);
+  for (const notice of pending.values()) {
+    if (!await canArchiveNotice(root, notice, previous, readPane, readSnapshot))
+      refuse(`Pending blocker notice ${notice.id} for worker ${notice.workerId} has unverified history; inspect delivery`);
+  }
+  await verifyAttempt();
+  const beforeArchive = await readSnapshot();
+  const endpoints = new Map();
+  for (const notice of pending.values()) {
+    for (const binding of [previous.workers[notice.workerId], notice.unsentRecipient]) {
+      if (endpoints.has(binding)) continue;
+      const occupant = historicalPane(binding, beforeArchive);
+      if (occupant === undefined || !await absentSession(binding, beforeArchive, readPane, readSnapshot))
+        refuse(`Blocker notice ${notice.id} endpoint changed or is unverified; inspect delivery`);
+      endpoints.set(binding, { occupant, noticeId: notice.id });
+    }
+  }
+  // Use one final view for every endpoint so later pane checks do not
+  // hide a relocation that happened while checking another notice.
+  const final = await readSnapshot();
+  requireDelegationParent(final, attempt.parent);
+  for (const [binding, { occupant, noticeId }] of endpoints) {
+    if (!isDeepStrictEqual(occupant, historicalPane(binding, final)))
+      refuse(`Blocker notice ${noticeId} endpoint changed or is unverified; inspect delivery`);
+  }
+  if (!stillCurrent() || !isDeepStrictEqual(previous, state)) refuse('Supervisor or checkout state changed before archival');
+  const at = new Date().toISOString();
+  for (const id of pending.keys()) {
+    const notice = state.notices[id];
+    const { sessionId, sessionFile, paneId } = state.workers[notice.workerId];
+    notice.archive = { at, reason: 'orphaned-before-send', sender: { sessionId, sessionFile, paneId },
+      recipient: notice.unsentRecipient, launchId: attempt.id };
+    delete notice.unsentRecipient;
+    notice.status = 'archived';
+  }
+  if (pending.size) await commit();
+  return [...pending.keys()];
+}
+
+const registrationMatches = (saved, binding) => sameSession({ id: saved.sessionId, file: saved.sessionFile }, binding) &&
+  saved.cwd === binding.cwd && saved.paneId === binding.paneId;
+
+async function noRelatedStartup(root, bindings) {
+  for (const file of await readdir(root)) {
+    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
+    const attempt = await readJson(join(root, file));
+    if (file !== `spawn-${attempt.id}.json` || !exactSessionReference(attempt.parent ?? {})) return false;
+    if (attempt.status === 'dispatched') continue;
+    if ([attempt.parent, attempt.child].some(ref => ref && bindings.some(binding =>
+      ref.sessionId === binding.sessionId || ref.sessionFile === binding.sessionFile))) return false;
+  }
+  return true;
+}
+
+async function canArchiveNotice(root, notice, state, readPane, readSnapshot) {
+  if (!isId(notice.id) || !isId(notice.workerId)) return false;
+  const sender = state.workers[notice.workerId];
+  const recipient = notice.unsentRecipient;
+  const addressed = notice.recipient ?? state.routes[notice.route]?.coordinator;
+  if (!sender || sender.route !== notice.route || !isDeepStrictEqual(addressed, recipient) ||
+      (notice.recipient && !isDeepStrictEqual(sender.recipient, recipient)) || !isId(recipient.id)) return false;
+  const owner = Object.values(state.workers).find(worker => worker.sessionId === recipient.sessionId ||
+    worker.sessionFile === recipient.sessionFile || worker.coordinatorId === recipient.id);
+  if (owner && (!owner.paused || owner.coordinatorId !== recipient.id || !sameSession({ id: recipient.sessionId,
+    file: recipient.sessionFile }, owner) || state.ownerWaits[owner.workerId] || state.inflight[owner.workerId] ||
+    state.dispositions[owner.workerId]?.action === 'decision')) return false;
+  try {
+    const observed = await readObservation(root, sender.workerId);
+    if (!sameSession(observed.session, sender) || observed.bootstrapPending || observed.hold ||
+        observed.outcome === 'approval') return false;
+    const registeredRecipient = await readJson(join(root, `coordinator-${recipient.id}.json`));
+    if (registeredRecipient.id !== recipient.id || !registrationMatches(registeredRecipient, recipient) ||
+        !await noRelatedStartup(root, [sender, recipient])) return false;
+    await readJson(join(root, `receipt-${notice.id}.json`)).then(() => { refuse('Notice receipt exists'); }, error => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    return await absentSession(recipient, await readSnapshot(), readPane, readSnapshot) &&
+      await absentSession(sender, await readSnapshot(), readPane, readSnapshot);
+  } catch { return false; }
 }
 
 export const delegationInstructions = 'Stay within the approved delegation scope. Delegation grants no secrets, deployment, publication or expanded task authority. ' +
@@ -229,7 +416,9 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
   await claim(spawnPath(root, id), spawn);
   const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
-  const launchFence = ownerLaunch ? ownerLaunchPath(root, authority.grant.checkout) : undefined;
+  const launchFence = ownerLaunch || role === 'writer' ? ownerLaunchPath(root, authority.grant.checkout) : undefined;
+  const readPane = id => transport(socketPath, 'pane.get', { pane_id: id });
+  const readLive = () => readSnapshot(socketPath);
   let fenceClaimed = false;
   let splitRequested = false;
   let dispatched = false;
@@ -239,39 +428,36 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       fenceClaimed = true;
     }
     if (role === 'writer' || ownerLaunch) {
-      // A conservative cooperating-writer fence. Never automatically release it
-      // on model completion, a crash, rejection, or an uncertain creation.
-      if (!authority.grant.checkout || await checkoutIdentity(authority.grant.cwd) !== authority.grant.checkout)
-        refuse('Delegation checkout identity changed');
       const { state: current, fresh } = await check();
-      for (const worker of Object.values(current.workers)) {
-        let checkout;
-        try { checkout = await checkoutIdentity(worker.cwd); }
-        catch {
-          // An unavailable cwd is not evidence that this worker is unrelated.
-          refuse('Existing worker checkout cannot be verified; inspect writer ownership before delegation');
-        }
-        if (checkout === authority.grant.checkout) {
-          const owner = worker.role === 'owner' && worker.coordinatorId &&
-            worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
-            worker.paneId === parent.paneId && recipient?.id === worker.coordinatorId;
-          if (!owner && !await closedWorker(root, socketPath, worker, current, fresh, transport, readSnapshot))
-            refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
-        }
-      }
+      const pending = await inspectCheckout(root, authority.grant, parent, recipient, current, fresh, readPane, readLive, ownerLaunch);
       if (ownerLaunch) {
-        // Retained claims are not proof that it is safe to launch a successor.
-        const writerClaim = join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`);
-        const writer = await readJson(writerClaim).catch(error => {
-          if (error.code !== 'ENOENT') throw error;
-        });
-        if (writer) refuse('Checkout retains a writer claim; inspect ownership before launch');
+        await requireNoWriterClaim(root, authority.grant.checkout);
+        if (pending.size) {
+          checkLocal();
+          const result = await send(root, { type: 'launch-archive', id, ownerToken: authority.grant.ownerToken },
+            'supervisor', { timeoutMs: 15000 });
+          if (!result.accepted || result.id !== id) refuse(result.message ?? 'Historical notice disposition unverified');
+          if (result.archived.length) ctx.ui.notify(`Archived ${result.archived.length} undelivered blocker notice(s); see supervisor status.`, 'info');
+        }
       } else {
-        await claim(join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`), { id, grantId: spawn.grantId });
+        // Serialize acquisitions against owner starts, then keep the existing
+        // durable writer claim regardless of later dispatch or failures.
+        await claim(writerClaimPath(root, authority.grant.checkout), { id, grantId: spawn.grantId });
+        await release(launchFence, id);
+        fenceClaimed = false;
       }
     }
-    await check();
     await save('creating');
+    const beforeSplit = await check();
+    if (ownerLaunch || role === 'writer') {
+      await inspectCheckout(root, authority.grant, parent, recipient, beforeSplit.state, beforeSplit.fresh, readPane, readLive, false);
+      if (ownerLaunch) await requireNoWriterClaim(root, authority.grant.checkout);
+      const latest = await check();
+      const eligibilityState = ({ workers, notices, inflight, dispositions, ownerWaits, routes }) =>
+        ({ workers, notices, inflight, dispositions, ownerWaits, routes });
+      if (!isDeepStrictEqual(eligibilityState(beforeSplit.state), eligibilityState(latest.state)))
+        refuse('Checkout eligibility changed before creation; inspect ownership');
+    }
     checkLocal();
     // From the first possible native effect until observed dispatch, retain the
     // checkout fence even if the response is lost or this process exits.
@@ -367,6 +553,8 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   } catch (error) {
     spawn.failure = error.message;
     await save('held');
+    if (ownerLaunch && !splitRequested)
+      throw new Error(`Implementation start ${id} refused before pane creation; no agent started (${error.message}).`);
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
   } finally {
     if (fenceClaimed && (!splitRequested || dispatched)) {

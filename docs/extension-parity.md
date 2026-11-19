@@ -131,10 +131,18 @@ user constraints and checks. Only complete, verified user turns are carried as
 prior context, not as a separate assignment. No skill
 invocation or extra confirmation. Unclear or invalid selection, provider
 failure, or a changed planning session creates no owner.
-Explicit command text remains supported. Paused history is excluded from writer
-conflicts only if Herdr confirms the original pane is gone and the exact session
-is not reported elsewhere, and no unresolved delivery remains. Existing writer
-claims, checkout fences, and historical records stay intact.
+Explicit command text remains supported. Verify a paused historical session with
+its pane closed or an exact replacement occupant, plus two checkout-related pending
+ordinary blocker notices with durable no-send evidence and both endpoints absent.
+One native invocation archives the notices as undelivered, rechecks ownership, and
+enrolls exactly one owner before dispatch, without confirmation or retry. Restart and
+inspect the original binding, pauses and archived notices. Repeat with a live session,
+writer claim, decision, or unproven delivery: the command explains the blocker and
+creates no pane. In particular, v0.4.5 pending notices do not prove delivery was
+never attempted and remain blocking; the successful archive scenario uses proof
+recorded by the new supervisor before its first send attempt. A possibly effected
+launch stays held for inspection, not replay.
+See the [contract](contract.md) for the retained state and compatibility boundary.
 
 ### Approved coordinating-owner amendment (since v0.4.0)
 
