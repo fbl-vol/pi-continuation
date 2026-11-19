@@ -104,7 +104,7 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
-### Approved one-command owner launch (unreleased)
+### Approved one-command owner launch (since v0.4.1)
 
 In an idle unsupervised Herdr Pi session in the target checkout, the user's
 `/start-implementation <agreed assignment>` is the opt-in to launch one fresh,

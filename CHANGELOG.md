@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.1] - 2026-11-19
+
+- Start a fresh supervised coordinating owner with `/start-implementation <agreed
+  assignment>` from an unsupervised Herdr Pi session. The command replaces the
+  three manual owner setup steps, not approvals for later decisions.
+- Retain uncertain owner launches and block another attempt for the same Git
+  checkout, even if the wording or originating session changes.
+- Await corrective-wake state writes so the restart check can verify lock
+  release without polling the persisted state. Use the same checks locally
+  through the opt-in pre-push hook and in CI.
+
+This GitHub release is for controlled trials. The full live owner workflow
+has not yet been verified.
+
 ## [0.4.0] - 2026-11-19
 
 GitHub minor release for controlled trials; npm publication remains disabled.
