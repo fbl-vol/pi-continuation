@@ -873,7 +873,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       if (!wakePending) void queue(() => wake(ctx));
       return;
     }
-    void queue(async () => {
+    return queue(async () => {
       for (const { id, stop } of await attention()) {
         if (!attempted.some(item => item.id === id && item.stop === stop.stop)) continue;
         recordUnresolvedAttention(state, id, stop.stop, randomUUID());

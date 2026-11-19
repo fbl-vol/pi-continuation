@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicJson, readJson } from '../src/store.mjs';
@@ -62,7 +62,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
         [crashedWorker]: { route: 'w1', paused: false, paneId: 'w1:p9', sessionId: 'other' } },
       handled: {}, inflight: { [crashedWorker]: { id: pendingAction, stop: randomUUID() } } });
     await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
-    bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
+    const supervisor = bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
     await pi.command('init', ctx);
     await waitFor(() => messages.length === 1);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[crashedWorker].paused, true);
@@ -72,17 +72,21 @@ test('one corrective wake then only the unresolved worker is suspended', async (
     assert.equal((await readJson(join(root, 'supervisor.json'))).repair[workerId].count, 0);
     handlers.get('before_agent_start')({ messageType: 'custom',
       message: { customType: 'pi-continuation-attention' } });
-    handlers.get('agent_settled')({}, ctx);
-    await waitFor(() => messages.length === 2);
+    await handlers.get('agent_settled')({}, ctx);
+    assert.equal(messages.length, 2, 'corrective wake is delivered before the settle handler completes');
     handlers.get('before_agent_start')({ messageType: 'custom',
       message: { customType: 'pi-continuation-attention' } });
-    handlers.get('agent_settled')({}, ctx);
-    await waitFor(async () => (await readJson(join(root, 'supervisor.json'))).workers[workerId].paused);
+    // Await the actual writes instead of repeatedly opening supervisor.json
+    // while the writer is trying to replace it on Windows.
+    await handlers.get('agent_settled')({}, ctx);
     assert.equal(messages.length, 2);
     const state = await readJson(join(root, 'supervisor.json'));
     assert.equal(state.repair[workerId].failure, 'Unresolved after corrective wake');
+    assert.equal(state.workers[workerId].paused, true);
     assert.equal(state.routes.w1.paused, false);
+    assert.equal(supervisor.active, true, 'corrective wake exhaustion must not withdraw ownership');
     await handlers.get('session_shutdown')();
+    await assert.rejects(access(join(root, 'supervisor.lock')), { code: 'ENOENT' });
     await pi.command('init', ctx);
     assert.notEqual((await readJson(join(root, 'supervisor.lock'))).token, state.ownerToken);
   } finally {
