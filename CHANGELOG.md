@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.4] - 2026-11-19
+
+- Generate Herdr-compatible agent names and wait for interactive Pi readiness
+  before enrollment without repeating a start request.
+- Run a real Herdr/Pi startup smoke test on Linux pre-push and in Linux CI,
+  with temporary state and a scripted loopback model.
+- A very fast reply can still pause the new owner. The smoke test verifies
+  startup and assignment delivery, not that race or the full live workflow.
+
 ## [0.4.3] - 2026-11-19
 
 - Accept Herdr 0.9.5's `pane_info` response after splitting a pane so delegated
