@@ -20,4 +20,8 @@ if [ -n "$status" ]; then
   exit 1
 fi
 
-exec npm run check
+npm run check
+if [ "$(uname -s)" = Linux ]; then
+  exec npm run check:native
+fi
+printf '%s\n' 'pre-push: native launch smoke test runs on Linux CI.'

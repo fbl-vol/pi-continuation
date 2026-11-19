@@ -61,6 +61,7 @@
   },
   "scripts": {
     "check": "npm test && npm run check:package",
+    "check:native": "python3 scripts/check-native-launch.py",
     "test": "node --test",
     "check:package": "node scripts/check-package.mjs"
   },

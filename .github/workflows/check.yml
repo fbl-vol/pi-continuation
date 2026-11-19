@@ -19,3 +19,19 @@ jobs:
           cache: npm
       - run: npm ci --legacy-peer-deps --ignore-scripts
       - run: npm run check
+      - name: Prepare pinned native test tools
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/continuation-native"
+          mkdir -p "$tools/bin"
+          curl --fail --silent --show-error --location --max-time 60 \
+            https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64 \
+            --output "$tools/bin/herdr"
+          printf '%s  %s\n' 14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d "$tools/bin/herdr" | sha256sum -c -
+          chmod +x "$tools/bin/herdr"
+          npm install --prefix "$tools" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.2
+          printf '%s\n' "$tools/bin" "$tools/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Native Herdr and Pi launch
+        if: runner.os == 'Linux'
+        run: npm run check:native
