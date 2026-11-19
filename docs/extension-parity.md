@@ -120,7 +120,7 @@ refusal identifies the original attempt when available. Inspect its retained
 record and live pane/session before any recovery; no timeout, rephrasing, or
 restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
 
-### Chat-based owner launch (unreleased)
+### Chat-based owner launch (since v0.4.2)
 
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
 configured model identifies the latest user assignment or agreement to the

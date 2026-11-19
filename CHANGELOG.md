@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.2] - 2026-11-19
+
+- Run bare `/start-implementation` to hand off the agreed plan from the current
+  conversation without another command or confirmation. The handoff preserves
+  the latest user agreement and cited earlier constraints. Explicit scope remains
+  supported; unclear plans do not launch an owner.
+- Verified closed, paused worker records no longer block fresh launches by
+  themselves. History, retained writer claims, and unresolved deliveries still
+  receive their existing protections.
+
+This GitHub release is for controlled trials. Real-model plan selection and the
+full live workflow have not yet been verified.
+
 ## [0.4.1] - 2026-11-19
 
 - Start a fresh supervised coordinating owner with `/start-implementation <agreed
