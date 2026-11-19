@@ -8,6 +8,7 @@ import { Type } from 'typebox';
 import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
 import { isId, readObservation, readSupervisor } from './contracts.mjs';
 import { currentSession } from './session.mjs';
+import { agreedLaunchScope } from './checkpoint.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
 import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 
@@ -141,6 +142,26 @@ export async function delegatedStart(root, id, record, state, live) {
   return spawn;
 }
 
+// A missing agent is not enough: a shell pane can still exist or the session
+// can be reported elsewhere. Ignore only closed, paused bindings with no
+// unresolved delivery, leaving their records intact for historical inspection.
+async function closedWorker(root, socketPath, worker, state, live, transport, readSnapshot) {
+  const id = worker.workerId;
+  if (!worker.paused || !isId(id) || !worker.sessionFile || !worker.sessionId || !worker.paneId ||
+      state.inflight[id] || Object.values(state.notices).some(n => n.workerId === id &&
+        ['pending', 'sending', 'uncertain'].includes(n.status))) return false;
+  if (worker.delegationId && (await readJson(spawnPath(root, worker.delegationId))).status !== 'dispatched') return false;
+  const possiblyLive = ({ agents }) => agents.some(a => a.pane_id === worker.paneId ||
+    [worker.sessionFile, worker.sessionId].includes(a.agent_session?.value));
+  if (possiblyLive(live)) return false;
+  try { await transport(socketPath, 'pane.get', { pane_id: worker.paneId }); }
+  catch (error) {
+    if (error.code !== 'pane_not_found') throw error;
+    return !possiblyLive(await readSnapshot(socketPath));
+  }
+  return false;
+}
+
 export const delegationInstructions = 'Stay within the approved delegation scope. Delegation grants no secrets, deployment, publication or expanded task authority. ' +
   'Keep one implementation writer per checkout; read-only delegates must not edit source or delegate writers. ' +
   'Independent review is not acceptance. Awaiting user finding selection is a genuine decision pause: do not apply review findings or resume through that gate until the user selects them.';
@@ -199,7 +220,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       // on model completion, a crash, rejection, or an uncertain creation.
       if (!authority.grant.checkout || await checkoutIdentity(authority.grant.cwd) !== authority.grant.checkout)
         refuse('Delegation checkout identity changed');
-      const current = ownerLaunch ? (await check()).state : authority.state;
+      const { state: current, fresh } = await check();
       for (const worker of Object.values(current.workers)) {
         let checkout;
         try { checkout = await checkoutIdentity(worker.cwd); }
@@ -211,7 +232,8 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
           const owner = worker.role === 'owner' && worker.coordinatorId &&
             worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
             worker.paneId === parent.paneId && recipient?.id === worker.coordinatorId;
-          if (!owner) refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
+          if (!owner && !await closedWorker(root, socketPath, worker, current, fresh, transport, readSnapshot))
+            refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
         }
       }
       if (ownerLaunch) {
@@ -299,34 +321,52 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
   let generation = 0;
   const reference = ctx => ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
     e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
+  async function launch(argument, ctx) {
+    let scope = argument.trim();
+    if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !socketPath || !paneId || !ctx.isIdle() ||
+        Buffer.byteLength(scope) > 8000)
+      refuse('Use /start-implementation [agreed scope] in an idle Herdr Pi TUI (up to 8000 UTF-8 bytes)');
+    const version = generation;
+    const session = currentSession(ctx);
+    const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
+      currentSession(ctx).leaf === session.leaf;
+    const cwd = await realpath(ctx.cwd);
+    const checkout = await checkoutIdentity(cwd);
+    const state = await readSupervisor(root);
+    const grant = { id: randomUUID(), cwd, checkout, role: 'writer', ownerLaunch: true,
+      ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
+    await delegationOwner(root, grant);
+    const live = await snapshot(socketPath);
+    grant.parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
+    if (!allowed() || !sameSession(currentSession(ctx), grant.parent) || state.supervisorSession === session.id ||
+        Object.values(state.workers).some(w => w.sessionId === session.id || w.sessionFile === session.file))
+      refuse('Launch requires an unchanged unsupervised planning session');
+    requireDelegationParent(live, grant.parent);
+    if (state.routes[grant.parent.workspaceId]?.paused) refuse('Delegation route is paused');
+    if (!scope) {
+      const signal = AbortSignal.timeout(45000);
+      try { scope = await agreedLaunchScope(ctx, signal); }
+      catch { refuse('Could not read the agreed plan with the configured model. No owner launched.'); }
+      if (!scope || signal.aborted)
+        refuse('No single agreed assignment found. Clarify which plan to hand off, then run /start-implementation.');
+      if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
+        refuse('Planning session changed while reading the plan; no owner launched');
+    }
+    grant.scope = scope;
+    await claim(join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`), { grantId: grant.id });
+    await claim(grantPath(root, grant.id), grant);
+    const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
+      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });
+    ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
+  }
+  let launching = false;
   pi.registerCommand('start-implementation', {
-    description: 'Launch one supervised coordinating owner for an explicitly agreed assignment: <scope>',
+    description: 'Launch a supervised coordinating owner from the agreed chat plan or explicit scope',
     handler: async (argument, ctx) => {
-      const scope = argument.trim();
-      if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !socketPath || !paneId || !ctx.isIdle() ||
-          !scope || Buffer.byteLength(scope) > 8000)
-        refuse('Use /start-implementation <agreed scope> in an idle Herdr Pi TUI (up to 8000 UTF-8 bytes)');
-      const version = generation;
-      const session = currentSession(ctx);
-      const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked;
-      const cwd = await realpath(ctx.cwd);
-      const checkout = await checkoutIdentity(cwd);
-      const state = await readSupervisor(root);
-      const grant = { id: randomUUID(), cwd, checkout, scope, role: 'writer', ownerLaunch: true,
-        ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
-      await delegationOwner(root, grant);
-      const live = await snapshot(socketPath);
-      grant.parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
-      if (!allowed() || !sameSession(currentSession(ctx), grant.parent) || state.supervisorSession === session.id ||
-          Object.values(state.workers).some(w => w.sessionId === session.id || w.sessionFile === session.file))
-        refuse('Launch requires an unchanged unsupervised planning session');
-      requireDelegationParent(live, grant.parent);
-      if (state.routes[grant.parent.workspaceId]?.paused) refuse('Delegation route is paused');
-      await claim(join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`), { grantId: grant.id });
-      await claim(grantPath(root, grant.id), grant);
-      const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
-        task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });
-      ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
+      if (launching) refuse('An implementation start is already in progress');
+      launching = true;
+      try { await launch(argument, ctx); }
+      finally { launching = false; }
     },
   });
   pi.registerCommand('continuation-delegate', {

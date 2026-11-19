@@ -120,6 +120,22 @@ refusal identifies the original attempt when available. Inspect its retained
 record and live pane/session before any recovery; no timeout, rephrasing, or
 restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
 
+### Chat-based owner launch (unreleased)
+
+A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
+configured model identifies the latest user assignment or agreement to the
+immediately preceding assistant proposal from bounded current conversation text.
+Those complete turns preserve user corrections; a subsequent assistant proposal
+cannot borrow an earlier approval. The model can also cite applicable earlier
+user constraints and checks. Only complete, verified user turns are carried as
+prior context, not as a separate assignment. No skill
+invocation or extra confirmation. Unclear or invalid selection, provider
+failure, or a changed planning session creates no owner.
+Explicit command text remains supported. Paused history is excluded from writer
+conflicts only if Herdr confirms the original pane is gone and the exact session
+is not reported elsewhere, and no unresolved delivery remains. Existing writer
+claims, checkout fences, and historical records stay intact.
+
 ### Approved coordinating-owner amendment (since v0.4.0)
 
 A coordinating owner is an exact Pi session that explicitly registers as a non-writing
