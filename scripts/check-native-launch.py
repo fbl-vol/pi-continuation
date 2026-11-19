@@ -81,16 +81,22 @@ def run(root, model):
         'apiKey': 'fixture-not-secret', 'models': [{'id': 'fixture', 'name': 'Fixture',
             'reasoning': False, 'input': ['text'], 'contextWindow': 8192, 'maxTokens': 1024,
             'cost': dict(input=0, output=0, cacheRead=0, cacheWrite=0)}]}}}))
+    bash = shutil.which('bash')
+    if not bash:
+        raise RuntimeError('Native check requires Bash on PATH')
+    (home/'.bashrc').write_text('if [ -n "$PI_CONTINUATION_SPAWN" ]; then\n'
+                               '  sleep 3 && printf "%s\\n" "$PI_CONTINUATION_SPAWN" > "$HOME/slow-shell-ready"\n'
+                               'fi\n')
     (config/'config.toml').write_text('''onboarding = false
 [terminal]
-default_shell = "/bin/sh"
+default_shell = %s
 shell_mode = "non_login"
 [update]
 version_check = false
 manifest_check = false
 [session]
 resume_agents_on_restore = false
-''')
+''' % json.dumps(bash))
     cli('integration', 'install', 'pi')
     with (root/'server.log').open('w+') as log:
         server = subprocess.Popen([herdr, 'server'], cwd=work, env=env, stdin=subprocess.DEVNULL,
@@ -102,7 +108,15 @@ resume_agents_on_restore = false
             supervisor = ws['root_pane']['pane_id']
             planner = cli('pane', 'split', supervisor, '--direction', 'down', '--cwd', str(work))['pane']['pane_id']
             panes.extend([supervisor, planner])
+            def shell_alone(pane):
+                info = cli('pane', 'process-info', '--pane', pane)['process_info']
+                shell = info.get('shell_pid')
+                processes = info.get('foreground_processes', [])
+                return (shell and info.get('foreground_process_group_id') == shell and len(processes) == 1
+                        and processes[0]['pid'] == shell and processes[0]['name'] == 'bash')
+
             for name, pane in [('smoke-supervisor', supervisor), ('smoke-planner', planner)]:
+                until(f'{name} shell available', lambda: shell_alone(pane))
                 cli('agent', 'start', name, '--kind', 'pi', '--pane', pane)
             cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
             def visible(pane):
@@ -124,6 +138,7 @@ resume_agents_on_restore = false
                         return attempt
             attempt = until('owner assignment dispatched', dispatched, 50)
             panes.append(attempt['paneId'])
+            assert (home/'slow-shell-ready').read_text().strip() == attempt['id']
             state = json.loads(state_path.read_text())
             assert list(state['workers']) == [attempt['workerId']], state['workers']
             owner = state['workers'][attempt['workerId']]
@@ -140,7 +155,7 @@ resume_agents_on_restore = false
             turns = [json.loads(line) for line in Path(owner['sessionFile']).read_text().splitlines()]
             users = [turn for turn in turns if turn.get('message', {}).get('role') == 'user']
             assert len(users) == 1 and TASK in json.dumps(users[0]), users
-            print('Native launch passed: real pane + interactive Pi + exact owner enrollment + one assignment receipt')
+            print('Native launch passed: slow Bash startup + interactive Pi + exact owner enrollment + one assignment receipt')
         except Exception:
             for pane in panes:
                 try:

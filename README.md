@@ -194,7 +194,7 @@ their own clean checkout. On Linux the hook also runs `npm run check:native`;
 make Python 3, Herdr 0.9.5 and Pi 1.5.2 available on `PATH`. Linux CI provisions
 those versions and runs the same native check. It uses disposable Herdr and Pi
 processes and a scripted loopback model to verify a real owner launch through
-interactive readiness, exact enrollment and one observed assignment. It uses no
+slow Bash startup, interactive readiness, exact enrollment and one observed assignment. It uses no
 live profile or provider credentials. The regular Linux, macOS, and Windows CI
 matrix still runs; this smoke test does not cover native macOS/Windows or model
 judgment. For fixes, include evidence that the relevant check fails before the

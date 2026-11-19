@@ -32,6 +32,17 @@ async function fixture(t, options = {}) {
       if (options.splitLost) throw new Error('lost split response after creation');
       return { type: 'pane_info', pane }; // Herdr 0.9.5 replies with PaneInfo, not its PaneCreated event.
     }
+    if (method === 'pane.process_info') {
+      const child = children.find(c => c.pane.pane_id === params.pane_id);
+      child.shellReads = (child.shellReads ?? 0) + 1;
+      const foreground = options.shellBusyOnce && child.shellReads === 1 ? 11 : 10;
+      return { type: 'pane_process_info', process_info: { pane_id: params.pane_id, shell_pid: 10,
+        foreground_process_group_id: foreground, foreground_processes: [{ pid: foreground }] } };
+    }
+    if (method === 'pane.get') {
+      const child = children.find(c => c.pane.pane_id === params.pane_id);
+      if (child) return { type: 'pane_info', pane: { ...child.pane, ...options.preStartPanePatch } };
+    }
     if (method === 'agent.start') {
       effects.push('start');
       const child = children.find(c => c.pane.pane_id === params.pane_id);
@@ -114,6 +125,23 @@ test('P1/P2/P7 unsupervised planner creates only a new identity, enrolls before 
   await assert.rejects(f.worker.spawn({ ...task, key: 'renamed' }), /EEXIST/);
   await assert.rejects(f.worker.spawn({ ...task, key: 'changed-role', role: 'read-only' }), /EEXIST/);
   assert.equal(f.effects.filter(e => e === 'task').length, 2, 'one initial task per new worker');
+});
+
+test('P1/P7 a foreground shell startup job delays the single start request', {
+  skip: !['linux', 'darwin'].includes(process.platform),
+}, async t => {
+  const f = await fixture(t, { shellBusyOnce: true });
+  await f.worker.command('start-implementation', 'Implement the agreed fixture change.');
+  assert.equal(f.children[0].shellReads, 2);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P1/P7 a replaced pre-start terminal receives no start request', async t => {
+  const f = await fixture(t, { preStartPanePatch: { terminal_id: 'replacement' } });
+  await assert.rejects(f.worker.command('start-implementation', 'Implement the agreed fixture change.'),
+    /New pane changed before Pi startup/);
+  assert.deepEqual(f.effects, ['split']);
+  assert.equal((await f.attempt()).status, 'held');
 });
 
 for (const readiness of ['ready', 'replaced', 'blocked']) {
