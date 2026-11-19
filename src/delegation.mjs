@@ -263,6 +263,28 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     spawn.terminalId = split.pane.terminal_id;
     await check();
     await save('starting');
+    // Unix Herdr rejects a shell with a foreground startup job. Wait for the
+    // foreground shell to be alone, without submitting or retrying agent.start.
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      const shellDeadline = performance.now() + 10000;
+      while (true) {
+        checkLocal();
+        const status = await transport(socketPath, 'pane.process_info', { pane_id: spawn.paneId });
+        const info = status.process_info;
+        if (status.type !== 'pane_process_info' || info?.pane_id !== spawn.paneId)
+          refuse('New pane shell readiness unavailable');
+        if (info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid &&
+            info.foreground_processes?.length === 1 && info.foreground_processes[0].pid === info.shell_pid) break;
+        if (performance.now() >= shellDeadline) refuse('New pane shell did not become ready');
+        await delay(150, undefined, { signal });
+      }
+    }
+    await check();
+    const target = await transport(socketPath, 'pane.get', { pane_id: spawn.paneId });
+    if (target.type !== 'pane_info' || target.pane?.pane_id !== spawn.paneId || !spawn.terminalId ||
+        target.pane.terminal_id !== spawn.terminalId || target.pane.workspace_id !== parent.workspaceId ||
+        target.pane.tab_id !== parent.tabId || target.pane.agent || target.pane.agent_session)
+      refuse('New pane changed before Pi startup');
     checkLocal();
     // Herdr names are at most 32 characters; keep the full UUID in base 36.
     const name = `pc-${BigInt(`0x${id.replaceAll('-', '')}`).toString(36)}`;
