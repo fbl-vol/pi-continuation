@@ -147,6 +147,20 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     return { accepted: true, id: notice.id };
   }
 
+  async function register(ctx, id, owner) {
+    if (coordinator) throw new Error('Coordinator already registered');
+    await ensureRoot(root);
+    const session = currentSession(ctx);
+    const record = { id, sessionId: session.id, sessionFile: session.file,
+      cwd: ctx.cwd, paneId, ...(owner ? { role: 'owner' } : {}) };
+    await claim(join(root, `coordinator-${id}.json`), record);
+    pi.appendEntry('pi-continuation-coordinator', { id, sessionId: session.id, paneId,
+      ...(owner ? { role: 'owner' } : {}) });
+    close = await listen(record, ctx);
+    coordinator = record;
+    return record;
+  }
+
   pi.registerCommand('continuation-coordinator', {
     description: 'Register this exact Pi session as a material-notice recipient; does not grant approval',
     handler: async (args, ctx) => {
@@ -171,18 +185,11 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
         owner ? 'Receive only exact child material notices. To supervise this coordinating session, run /continuation-worker start afterward. This is not a writer or global supervisor.' :
           'Receive material notices in this exact session; no continuation or approval authority.')) return;
       try {
-        await ensureRoot(root);
         const session = currentSession(ctx);
         if (owner && (session.id !== before.id || session.file !== before.file ||
             session.leaf !== before.leaf || !ctx.isIdle()))
           throw new Error('Owner session changed during confirmation');
-        const record = { id: randomUUID(), sessionId: session.id, sessionFile: session.file,
-          cwd: ctx.cwd, paneId, ...(owner ? { role: 'owner' } : {}) };
-        await atomicJson(join(root, `coordinator-${record.id}.json`), record);
-        pi.appendEntry('pi-continuation-coordinator', { id: record.id, sessionId: session.id, paneId,
-          ...(owner ? { role: 'owner' } : {}) });
-        close = await listen(record, ctx);
-        coordinator = record;
+        const record = await register(ctx, randomUUID(), owner);
         ctx.ui.notify(`Coordinator ${record.id} registered`);
       } catch (error) { throw report('register', error); }
     },
@@ -227,4 +234,5 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     await close?.(); close = undefined;
   });
+  return { registerOwner: (ctx, id) => register(ctx, id, true) };
 }

@@ -5,7 +5,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
-import { atomicJson, claim, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
 import { isId, readObservation, readSupervisor } from './contracts.mjs';
 import { currentSession } from './session.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
@@ -28,6 +28,17 @@ const recordPath = (root, kind, id) => {
 };
 export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
+const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
+
+async function claimOwnerLaunch(path, id) {
+  try { await claim(path, { token: id }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const pending = await readJson(path).catch(() => undefined);
+    const attempt = isId(pending?.token) ? ` ${pending.token}` : '';
+    refuse(`Unresolved owner launch${attempt} for this checkout; inspect before starting another`);
+  }
+}
 const sameSession = (session, binding) => session.id === binding.sessionId && session.file === binding.sessionFile;
 
 function nativeBinding(agent, session, cwd) {
@@ -62,9 +73,11 @@ export async function delegationAuthority(root, reference, binding) {
   let inheritedRecipient;
   if (reference.spawnId) {
     const parent = await readJson(spawnPath(root, reference.spawnId));
-    if (parent.grantId !== grant.id || !['writer', 'read-only'].includes(parent.role) || parent.status !== 'dispatched' ||
-        JSON.stringify(parent.child) !== JSON.stringify(binding)) refuse('Subdelegation parent is not the dispatched exact child');
-    role = grant.role === 'read-only' ? 'read-only' : parent.role;
+    const launchOwner = grant.ownerLaunch && parent.role === 'owner';
+    if (parent.grantId !== grant.id || (grant.ownerLaunch ? !launchOwner : !['writer', 'read-only'].includes(parent.role)) ||
+        parent.status !== 'dispatched' || JSON.stringify(parent.child) !== JSON.stringify(binding))
+      refuse('Subdelegation parent is not the dispatched exact child with delegation authority');
+    role = launchOwner ? 'writer' : grant.role === 'read-only' ? 'read-only' : parent.role;
     inheritedRecipient = parent.recipient;
   } else if (JSON.stringify(grant.parent) !== JSON.stringify(binding)) refuse('Delegation belongs to another planning session');
   const state = await delegationOwner(root, grant);
@@ -82,6 +95,12 @@ export async function delegationAuthority(root, reference, binding) {
   }
   if (worker?.role === 'owner' && ['user', 'released'].includes(state.ownerWaits?.[worker.workerId]?.kind))
     refuse('Owner is waiting for a user decision; no delegation through this gate');
+  if (grant.ownerLaunch) {
+    if (reference.spawnId && worker?.role !== 'owner') refuse('Exact supervised coordinating owner required');
+    if (!reference.spawnId && (state.supervisorSession === binding.sessionId ||
+      Object.values(state.workers).some(w => w.sessionId === binding.sessionId || w.sessionFile === binding.sessionFile)))
+      refuse('Launch requires an unsupervised planning session');
+  }
   if (worker) {
     const observation = await readObservation(root, worker.workerId);
     if (['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
@@ -96,7 +115,12 @@ export async function delegationAuthority(root, reference, binding) {
 export async function delegatedStart(root, id, record, state, live) {
   const spawn = await readJson(spawnPath(root, id));
   const grant = await readJson(grantPath(root, spawn.grantId));
-  if (spawn.id !== id || spawn.grantId !== grant.id || !['writer', 'read-only'].includes(spawn.role) ||
+  const launchOwner = spawn.role === 'owner';
+  if (spawn.id !== id || spawn.grantId !== grant.id ||
+      (launchOwner ? !grant.ownerLaunch || spawn.authority?.spawnId || spawn.task !== grant.scope ||
+        record.role !== 'owner' || record.coordinatorId !== grant.id :
+        !['writer', 'read-only'].includes(spawn.role) || record.role === 'owner' ||
+        (grant.ownerLaunch && !spawn.authority?.spawnId)) ||
       spawn.status !== 'enrolling' || grant.revoked || spawn.ownerToken !== state.ownerToken ||
       grant.ownerToken !== state.ownerToken || grant.supervisorSession !== state.supervisorSession ||
       record.sessionId !== spawn.child?.sessionId || record.sessionFile !== spawn.child?.sessionFile ||
@@ -124,14 +148,16 @@ export const delegationInstructions = 'Stay within the approved delegation scope
 /** One durable attempt, never resumed after a crash or a lost response. Read-only
  * readiness checks may repeat; pane creation, agent start, enrollment and task send may not. */
 export async function spawnDelegated({ root, socketPath, paneId, ctx, reference, task, role, key,
-  signal, allowed = () => true, transport = request, readSnapshot = snapshot, send = sendAction }) {
-  if (!['writer', 'read-only'].includes(role) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
+  signal, ownerLaunch = false, allowed = () => true, transport = request, readSnapshot = snapshot, send = sendAction }) {
+  if (!(ownerLaunch ? role === 'owner' : ['writer', 'read-only'].includes(role)) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
       !key?.trim() || key.length > 120) refuse('A stable assignment key, bounded task and writer/read-only role are required');
   const session = currentSession(ctx);
   const live = await readSnapshot(socketPath);
   const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
   const authority = await delegationAuthority(root, reference, parent);
   if (role === 'writer' && authority.role === 'read-only') refuse('Read-only delegates cannot create writers');
+  if (ownerLaunch ? !authority.grant.ownerLaunch || reference.spawnId || task !== authority.grant.scope :
+    authority.grant.ownerLaunch && !reference.spawnId) refuse('Owner launch requires the native start command');
   const checkLocal = () => {
     signal?.throwIfAborted();
     if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Parent interaction/identity changed; inspect delegation');
@@ -159,13 +185,22 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
   await claim(spawnPath(root, id), spawn);
   const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
+  const launchFence = ownerLaunch ? ownerLaunchPath(root, authority.grant.checkout) : undefined;
+  let fenceClaimed = false;
+  let splitRequested = false;
+  let dispatched = false;
   try {
-    if (role === 'writer') {
+    if (launchFence) {
+      await claimOwnerLaunch(launchFence, id);
+      fenceClaimed = true;
+    }
+    if (role === 'writer' || ownerLaunch) {
       // A conservative cooperating-writer fence. Never automatically release it
       // on model completion, a crash, rejection, or an uncertain creation.
       if (!authority.grant.checkout || await checkoutIdentity(authority.grant.cwd) !== authority.grant.checkout)
         refuse('Delegation checkout identity changed');
-      for (const worker of Object.values(authority.state.workers)) {
+      const current = ownerLaunch ? (await check()).state : authority.state;
+      for (const worker of Object.values(current.workers)) {
         let checkout;
         try { checkout = await checkoutIdentity(worker.cwd); }
         catch {
@@ -179,11 +214,23 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
           if (!owner) refuse('Checkout already has a supervised worker; delegate read-only work or inspect writer ownership');
         }
       }
-      await claim(join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`), { id, grantId: spawn.grantId });
+      if (ownerLaunch) {
+        // Retained claims are not proof that it is safe to launch a successor.
+        const writerClaim = join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`);
+        const writer = await readJson(writerClaim).catch(error => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        if (writer) refuse('Checkout retains a writer claim; inspect ownership before launch');
+      } else {
+        await claim(join(root, `delegation-writer-${digest(authority.grant.checkout)}.json`), { id, grantId: spawn.grantId });
+      }
     }
     await check();
     await save('creating');
     checkLocal();
+    // From the first possible native effect until observed dispatch, retain the
+    // checkout fence even if the response is lost or this process exits.
+    splitRequested = true;
     const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
       cwd: authority.grant.cwd, focus: false,
       env: { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root } });
@@ -230,22 +277,58 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     }
     if (receipt.status !== 'sent') refuse('Assignment run was not observed; inspect, never resend');
     await save('dispatched');
+    dispatched = true;
     return { id, workerId: spawn.workerId, paneId: spawn.paneId, sessionId: spawn.child.sessionId,
       sessionFile: spawn.child.sessionFile, status: spawn.status };
   } catch (error) {
     spawn.failure = error.message;
     await save('held');
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
+  } finally {
+    if (fenceClaimed && (!splitRequested || dispatched)) {
+      try { await release(launchFence, id); }
+      catch { ctx.ui.notify(`Could not release owner launch fence ${id}; inspect before starting another`, 'warning'); }
+    }
   }
 }
 
 export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN } = {}) {
+  paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN, registerOwner } = {}) {
   let closeBootstrap;
   let stopInput;
   let generation = 0;
   const reference = ctx => ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
     e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
+  pi.registerCommand('start-implementation', {
+    description: 'Launch one supervised coordinating owner for an explicitly agreed assignment: <scope>',
+    handler: async (argument, ctx) => {
+      const scope = argument.trim();
+      if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !socketPath || !paneId || !ctx.isIdle() ||
+          !scope || Buffer.byteLength(scope) > 8000)
+        refuse('Use /start-implementation <agreed scope> in an idle Herdr Pi TUI (up to 8000 UTF-8 bytes)');
+      const version = generation;
+      const session = currentSession(ctx);
+      const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked;
+      const cwd = await realpath(ctx.cwd);
+      const checkout = await checkoutIdentity(cwd);
+      const state = await readSupervisor(root);
+      const grant = { id: randomUUID(), cwd, checkout, scope, role: 'writer', ownerLaunch: true,
+        ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
+      await delegationOwner(root, grant);
+      const live = await snapshot(socketPath);
+      grant.parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
+      if (!allowed() || !sameSession(currentSession(ctx), grant.parent) || state.supervisorSession === session.id ||
+          Object.values(state.workers).some(w => w.sessionId === session.id || w.sessionFile === session.file))
+        refuse('Launch requires an unchanged unsupervised planning session');
+      requireDelegationParent(live, grant.parent);
+      if (state.routes[grant.parent.workspaceId]?.paused) refuse('Delegation route is paused');
+      await claim(join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`), { grantId: grant.id });
+      await claim(grantPath(root, grant.id), grant);
+      const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
+        task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });
+      ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
+    },
+  });
   pi.registerCommand('continuation-delegate', {
     description: 'Authorize one scoped delegation tree: <writer|read-only> <assignment scope> | revoke',
     handler: async (argument, ctx) => {
@@ -253,9 +336,12 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       await ensureRoot(root);
       if (argument.trim() === 'revoke') {
         const ref = reference(ctx);
-        if (!ref || ref.spawnId) refuse('Revoke in the originating planning session');
+        if (!ref) refuse('No scope to revoke');
         const grant = await readJson(grantPath(root, ref.grantId));
-        if (!sameSession(currentSession(ctx), grant.parent)) refuse('Delegation session changed');
+        const source = ref.spawnId && grant.ownerLaunch ? await readJson(spawnPath(root, ref.spawnId)) : undefined;
+        const binding = !ref.spawnId ? grant.parent : source?.role === 'owner' && source.grantId === grant.id ? source.child : undefined;
+        if (!binding || !sameSession(currentSession(ctx), binding) || paneId !== binding.paneId)
+          refuse('Revoke in the originating session or the launched coordinating owner');
         grant.revoked = true;
         await atomicJson(grantPath(root, grant.id), grant);
         ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
@@ -331,6 +417,19 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         if (action.type === 'hello' && ticket.status === 'starting')
           return { accepted: true, id: delegationId, session: currentSession(ctx) };
         if (action.type === 'enroll' && ticket.status === 'enrolling') {
+          if (ticket.role === 'owner') {
+            const grant = await readJson(grantPath(root, ticket.grantId));
+            if (!grant.ownerLaunch || ticket.authority?.spawnId || !registerOwner)
+              refuse('Exact one-command owner launch required');
+            const { state } = await delegationAuthority(root, ticket.authority, ticket.parent);
+            if (state.routes[ticket.child.workspaceId]?.paused) refuse('Delegation route is paused');
+            const live = await snapshot(socketPath);
+            requireDelegationParent(live, ticket.parent);
+            if (!sameOccupant(live.agents.find(a => a.pane_id === paneId), ticket.child) ||
+                generation !== bootstrapVersion || worker.promptBlocked || worker.hold)
+              refuse('Owner startup interrupted or identity changed');
+            await registerOwner(ctx, grant.id);
+          }
           await worker.enrollDelegated(ctx, ticket, () => generation === bootstrapVersion);
           const state = await delegationOwner(root, await readJson(grantPath(root, ticket.grantId)));
           const binding = Object.values(state.workers).find(w => w.sessionId === ticket.child.sessionId);
@@ -348,7 +447,14 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
           if (!binding || binding.paused || state.routes[binding.route]?.paused ||
               !sameOccupant(fresh.agents.find(a => a.pane_id === paneId), binding)) refuse('Assignment scope/identity changed');
           await delegationAuthority(root, ticket.authority, ticket.parent);
-          await worker.dispatchDelegated(ctx, ticket, `Approved delegation scope:\n${grant.scope}\n\nRole: ${ticket.role}.\n${delegationInstructions}\n\nAssignment:\n${ticket.task}`);
+          const message = ticket.role === 'owner' ?
+            `Approved assignment for this supervised coordinating owner (not the writer):\n${grant.scope}\n\n` +
+            'Use the implementation-owner skill when available. You are the permanent user inbox, not the brainstorming session. ' +
+            'Use continuation_spawn to start the sole writer and scoped read-only reviewers, retaining them for selected fixes and verification. ' +
+            'Use continuation_owner_wait for child results or a real user decision. Initiate independent review after implementation; do not apply findings without user selection here. ' +
+            'Create the PR only where authorized after verification. Send no assignment notices to the brainstorming session.\n' + delegationInstructions :
+            `Approved delegation scope:\n${grant.scope}\n\nRole: ${ticket.role}.\n${delegationInstructions}\n\nAssignment:\n${ticket.task}`;
+          await worker.dispatchDelegated(ctx, ticket, message);
           return { accepted: true, id: ticket.id };
         }
         return { accepted: false };

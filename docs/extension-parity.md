@@ -104,6 +104,22 @@ decision pause**: a supervisor must not resume a worker to apply review findings
 until the user selects them. Independent review remains distinct from acceptance.
 Source/fake-runtime validation is not authority for live spawning or installation.
 
+### Approved one-command owner launch (unreleased)
+
+In an idle unsupervised Herdr Pi session in the target checkout, the user's
+`/start-implementation <agreed assignment>` is the opt-in to launch one fresh,
+non-writing owner under the existing supervisor. No follow-up confirmation in
+that pane. The launch uses the delegated bootstrap and verifies enrollment before
+sending the assignment. Only the exact launched owner inherits the bounded grant
+for one writer and read-only reviewers. Loading a skill, interpreting model text
+or merely installing the package does not launch anything. Existing pauses,
+writer conflicts, identity checks, retained attempts, and user decision waits
+continue to apply. An unresolved launch blocks new owner launches for the same
+Git checkout even if the assignment text or originating session changes. The
+refusal identifies the original attempt when available. Inspect its retained
+record and live pane/session before any recovery; no timeout, rephrasing, or
+restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
+
 ### Approved coordinating-owner amendment (since v0.4.0)
 
 A coordinating owner is an exact Pi session that explicitly registers as a non-writing

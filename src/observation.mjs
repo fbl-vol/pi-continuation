@@ -683,8 +683,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         throw new Error('Delegated enrollment requires a new idle unheld worker');
       const saved = await readJson(spawnPath(root, ticket.id));
       const session = currentSession(ctx);
+      const owner = ctx.sessionManager.getBranch().find(e => e.type === 'custom' &&
+        e.customType === 'pi-continuation-coordinator' && e.data?.role === 'owner' && e.data.sessionId === session.id);
       const record = { sessionId: session.id, sessionFile: session.file, paneId, cwd: ctx.cwd,
-        start: { nonce: saved.id }, delegationId: saved.id };
+        start: { nonce: saved.id }, delegationId: saved.id,
+        ...(owner ? { role: 'owner', coordinatorId: owner.data.id } : {}) };
       await delegatedStart(root, saved.id, record, await readSupervisor(root), await snapshot(socketPath));
       starting = true;
       try { await startWorker(ctx, saved, stillEligible); }
