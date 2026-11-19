@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
 import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
@@ -19,6 +19,29 @@ async function checkoutIdentity(cwd) {
       { timeout: 2500, maxBuffer: 8192, windowsHide: true });
     return await realpath(stdout.trim());
   } catch { refuse('Writer delegation requires a verifiable Git checkout (and Git on PATH)'); }
+}
+
+export function delegatedDisplayLabel(role, { scope, checkout }) {
+  const prefix = { owner: 'Owner', writer: 'Writer', 'read-only': 'Read-only' }[role];
+  // Use the shared grant, never the delegate's message/key. Only a single
+  // recognizable task code is safe to take from otherwise private prose.
+  const codes = new Set(typeof scope === 'string' ? scope.match(/(?<![\w-])W\d{3}(?:-D\d{2})?(?![\w-])/g) : []);
+  const repo = typeof checkout === 'string' && basename(checkout) === '.git' ? basename(dirname(checkout)) : '';
+  const shortRepo = /^[a-z0-9][a-z0-9._-]*$/i.test(repo) ?
+    (repo.length > 10 ? `${repo.slice(0, 9)}…` : repo) : '';
+  const suffix = codes.size === 1 ? [...codes][0] : shortRepo;
+  return suffix ? `${prefix} · ${suffix}` : prefix;
+}
+
+async function labelNewPane(transport, socketPath, child, label) {
+  // Herdr 0.9.5 has no conditional rename. Inspect the exact current
+  // session immediately before the one optional write, never during refresh.
+  try {
+    const current = await transport(socketPath, 'pane.get', { pane_id: child.paneId }, { timeoutMs: 500 });
+    if (current.type === 'pane_info' && !current.pane?.label && sameOccupant(current.pane, child)) {
+      await transport(socketPath, 'pane.rename', { pane_id: child.paneId, label }, { timeoutMs: 500 });
+    }
+  } catch { /* display only; assignment is already delivered, never retry */ }
 }
 
 const digest = text => createHash('sha256').update(text).digest('hex');
@@ -139,7 +162,7 @@ export async function delegatedStart(root, id, record, state, live) {
       state.workers[spawn.parentWorkerId].recipient?.id !== spawn.recipient.id &&
       state.workers[spawn.parentWorkerId].coordinatorId !== spawn.recipient.id))
     refuse('Delegated owner recipient changed');
-  return spawn;
+  return { ...spawn, displayLabel: delegatedDisplayLabel(spawn.role, grant) };
 }
 
 // A missing agent is not enough: a shell pane can still exist or the session
@@ -341,8 +364,6 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     if (receipt.status !== 'sent') refuse('Assignment run was not observed; inspect, never resend');
     await save('dispatched');
     dispatched = true;
-    return { id, workerId: spawn.workerId, paneId: spawn.paneId, sessionId: spawn.child.sessionId,
-      sessionFile: spawn.child.sessionFile, status: spawn.status };
   } catch (error) {
     spawn.failure = error.message;
     await save('held');
@@ -353,6 +374,9 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       catch { ctx.ui.notify(`Could not release owner launch fence ${id}; inspect before starting another`, 'warning'); }
     }
   }
+  await labelNewPane(transport, socketPath, spawn.child, delegatedDisplayLabel(role, authority.grant));
+  return { id, workerId: spawn.workerId, paneId: spawn.paneId, sessionId: spawn.child.sessionId,
+    sessionFile: spawn.child.sessionFile, status: spawn.status };
 }
 
 export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,

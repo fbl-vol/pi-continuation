@@ -41,6 +41,24 @@ Agents row. Herdr 0.9.5 elides custom rows whose values are absent, so ordinary
 unreported agents keep their native rows. Collapsed views and narrow sidebars may
 not show all details; use Pi's `/continuation` menu for the explanation.
 
+## Delegated role labels
+
+New delegated sessions get a compact initial pane label and a friendly `agent`
+row such as `Owner · W123` or `Writer · W123`. Generic read-only delegates show
+`Read-only`, not `Reviewer`. All roles in a grant use the same suffix: a unique
+recognizable task code (for example `W123` or `W123-D04`), a short checkout name
+when available, or no suffix. The assignment text is not sent to Herdr as
+metadata. The internal `pc-…` launch name is unchanged.
+
+After dispatch, the extension checks the new pane's current session and only
+attempts to name it if it is still unlabeled. It never retries the rename or
+renames on refresh; existing and later manual labels remain visible on Herdr's
+pane surfaces. Herdr 0.9.5 cannot make the check and rename atomic. The separate
+`agent` row uses expiring display metadata for the exact enrolled session. Stop,
+loss or replacement withdraw that metadata without renaming the pane. Role,
+native activity and supervision status are separate; if optional labeling fails,
+startup and delivery are unaffected. Existing sessions are not backfilled.
+
 ## Meaning and lifetime
 
 - `Supervised` means registered in the active supervision list, **not** that the
@@ -78,8 +96,9 @@ bound display freshness, not eligibility. Absence of a badge proves only that no
 current annotation is visible—not that no other supervisor exists.
 
 Metadata failures are reported separately and do not activate, pause, resume or
-mutate supervision state. Pane titles, native agent lifecycle/activity and other
-sources' metadata are not overwritten. Control failures remain control failures.
+mutate supervision state. The reporter does not change pane labels or titles,
+native agent lifecycle/activity, or other sources' presentation. Control failures
+remain control failures.
 
 ## Evidence limits
 

@@ -115,6 +115,7 @@ export async function workerStartCandidate(root, request, state, live, superviso
   if (request.replaceWorkerId && !repeated && replacement?.workerId !== request.replaceWorkerId)
     throw Object.assign(new Error('Replacement binding changed'), { code: 'WORKER_CONFLICT' });
   const candidate = await workerCandidate(root, request.workerId, route, others, live, supervisorPane);
+  if (delegated?.displayLabel) candidate.displayLabel = delegated.displayLabel;
   if (delegated?.recipient) candidate.recipient = await coordinatorCandidate(root,
     delegated.recipient.id, others, live, supervisorPane);
   return { binding: existing ?? candidate, route, repeated, replacement };

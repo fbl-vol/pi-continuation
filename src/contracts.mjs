@@ -14,7 +14,7 @@ import { readJson } from './store.mjs';
  *   terminalId: string, workspaceId: string, tabId: string,
  *   sessionKind: string, sessionValue: string, pendingSession?: string}} NativeBinding
  * @typedef {NativeBinding & {workerId: string, route: string, checkpoint?: string,
- *   paused: boolean, reason?: string, role?: 'owner', coordinatorId?: string,
+ *   paused: boolean, reason?: string, role?: 'owner', coordinatorId?: string, displayLabel?: string,
  *   recipient?: NativeBinding & {id: string, role: 'owner'}}} WorkerBinding
  * @typedef {{paused: boolean, coordinator?: NativeBinding & {id: string}, reason?: string}} Route
  * @typedef {{id: string, workerId: string, stop?: string, route: string, reportHash?: string,

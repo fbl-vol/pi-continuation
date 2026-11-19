@@ -120,13 +120,24 @@ test('error holds and independent global pause remain separate from native worki
 
 test('Stop and native identity replacement clear annotations, never follow the replacement or affect unrelated panes', async t => {
   const f = await fixture(t);
+  f.binding.displayLabel = 'Writer · W123';
   f.live.agents.push({ ...f.live.agents[0], pane_id: 'w:p2' });
   await f.reporter.refresh();
+  const first = paneCalls(f).at(-1).params;
+  assert.equal(first.display_agent, 'Writer · W123');
+  assert.equal(first.tokens.pi_continuation, 'Supervised');
+  f.live.agents[0].label = 'Manual pane name';
+  f.clock(5000);
+  await f.reporter.refresh();
+  assert.equal(paneCalls(f).at(-1).params.display_agent, first.display_agent);
+  assert.ok(f.calls.every(c => ['pane.report_metadata', 'workspace.report_metadata'].includes(c.method)));
   assert.ok(f.calls.filter(c => c.method === 'pane.report_metadata').every(c => ['w:p1', 'w:p0'].includes(c.params.pane_id)));
   f.binding.stopped = true;
   f.binding.paused = true;
   await f.reporter.refresh();
   assert.ok(f.calls.slice(-2).every(c => Object.values(c.params.tokens).every(v => v === null)));
+  assert.equal(paneCalls(f).at(-1).params.clear_display_agent, true);
+  assert.equal(paneCalls(f).at(-1).params.display_agent, undefined);
   delete f.binding.stopped;
   f.binding.paused = false;
   await f.reporter.refresh();
@@ -134,15 +145,38 @@ test('Stop and native identity replacement clear annotations, never follow the r
   f.live.agents[0].agent_session.value = join(f.root, 'replacement.jsonl');
   await f.reporter.refresh();
   assert.ok(f.calls.slice(beforeReplacement).every(c => Object.values(c.params.tokens).every(v => v === null)));
+  assert.equal(paneCalls(f).at(-1).params.clear_display_agent, true);
+  assert.equal(paneCalls(f).at(-1).params.source, first.source);
+});
+
+test('a newly enrolled ordinary session in the same pane does not inherit the old role name', async t => {
+  const f = await fixture(t);
+  f.binding.displayLabel = 'Writer · W123';
+  await f.reporter.refresh();
+  const { displayLabel, ...old } = f.binding;
+  assert.equal(paneCalls(f).at(-1).params.display_agent, displayLabel);
+
+  const file = join(f.root, 'replacement.jsonl');
+  await writeFile(file, '{}\n');
+  f.state.workers[old.workerId] = { ...old, sessionId: randomUUID(), sessionFile: file, sessionValue: file };
+  f.live.agents[0].agent_session.value = file;
+  await f.reporter.refresh();
+  const replacement = paneCalls(f).at(-1).params;
+  assert.equal(replacement.clear_display_agent, true);
+  assert.equal(replacement.display_agent, undefined);
+  assert.equal(replacement.tokens.pi_continuation, 'Status unknown');
 });
 
 test('owner replacement withdraws old reports; old reporter never adopts the new owner', async t => {
   const f = await fixture(t);
+  f.binding.displayLabel = 'Read-only';
   await f.reporter.refresh();
   const prior = f.calls.length;
   f.state.ownerToken = randomUUID();
   await f.reporter.refresh();
   assert.ok(f.calls.slice(prior).every(c => Object.values(c.params.tokens).every(v => v === null)));
+  assert.equal(paneCalls(f).at(-1).params.clear_display_agent, true);
+  assert.equal(ownerCalls(f).at(-1).params.clear_display_agent, undefined);
   const afterClear = f.calls.length;
   await f.reporter.refresh();
   assert.equal(f.calls.length, afterClear);
@@ -282,11 +316,14 @@ test('a lost first acknowledgement still receives shutdown cleanup; another targ
     if (calls.length === 1) throw new Error('synthetic lost acknowledgement');
     return { type: 'ok' };
   } }));
+  f.binding.displayLabel = 'Writer · W123';
   await f.reporter.refresh();
   assert.equal(f.errors.length, 1);
   assert.ok(f.calls.some(c => c.method === 'workspace.report_metadata' && c.params.tokens.pi_continuation_summary === '1 worker'));
   await f.reporter.close();
-  assert.ok(paneCalls(f).some(c => Object.values(c.params.tokens).every(v => v === null)));
+  assert.equal(paneCalls(f)[0].params.display_agent, 'Writer · W123');
+  assert.equal(paneCalls(f).at(-1).params.clear_display_agent, true);
+  assert.ok(Object.values(paneCalls(f).at(-1).params.tokens).every(v => v === null));
   assert.equal(f.state.workers[f.binding.workerId].paused, false);
 });
 
