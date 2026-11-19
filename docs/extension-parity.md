@@ -114,7 +114,11 @@ sending the assignment. Only the exact launched owner inherits the bounded grant
 for one writer and read-only reviewers. Loading a skill, interpreting model text
 or merely installing the package does not launch anything. Existing pauses,
 writer conflicts, identity checks, retained attempts, and user decision waits
-continue to apply. This extends P1/P5/P6/P7 without changing advanced controls.
+continue to apply. An unresolved launch blocks new owner launches for the same
+Git checkout even if the assignment text or originating session changes. The
+refusal identifies the original attempt when available. Inspect its retained
+record and live pane/session before any recovery; no timeout, rephrasing, or
+restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
 
 ### Approved coordinating-owner amendment (since v0.4.0)
 

@@ -5,7 +5,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
-import { atomicJson, claim, defaultRoot, ensureRoot, readJson } from './store.mjs';
+import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
 import { isId, readObservation, readSupervisor } from './contracts.mjs';
 import { currentSession } from './session.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
@@ -28,6 +28,17 @@ const recordPath = (root, kind, id) => {
 };
 export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
+const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
+
+async function claimOwnerLaunch(path, id) {
+  try { await claim(path, { token: id }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const pending = await readJson(path).catch(() => undefined);
+    const attempt = isId(pending?.token) ? ` ${pending.token}` : '';
+    refuse(`Unresolved owner launch${attempt} for this checkout; inspect before starting another`);
+  }
+}
 const sameSession = (session, binding) => session.id === binding.sessionId && session.file === binding.sessionFile;
 
 function nativeBinding(agent, session, cwd) {
@@ -174,13 +185,22 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
   await claim(spawnPath(root, id), spawn);
   const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
+  const launchFence = ownerLaunch ? ownerLaunchPath(root, authority.grant.checkout) : undefined;
+  let fenceClaimed = false;
+  let splitRequested = false;
+  let dispatched = false;
   try {
+    if (launchFence) {
+      await claimOwnerLaunch(launchFence, id);
+      fenceClaimed = true;
+    }
     if (role === 'writer' || ownerLaunch) {
       // A conservative cooperating-writer fence. Never automatically release it
       // on model completion, a crash, rejection, or an uncertain creation.
       if (!authority.grant.checkout || await checkoutIdentity(authority.grant.cwd) !== authority.grant.checkout)
         refuse('Delegation checkout identity changed');
-      for (const worker of Object.values(authority.state.workers)) {
+      const current = ownerLaunch ? (await check()).state : authority.state;
+      for (const worker of Object.values(current.workers)) {
         let checkout;
         try { checkout = await checkoutIdentity(worker.cwd); }
         catch {
@@ -208,6 +228,9 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     await check();
     await save('creating');
     checkLocal();
+    // From the first possible native effect until observed dispatch, retain the
+    // checkout fence even if the response is lost or this process exits.
+    splitRequested = true;
     const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
       cwd: authority.grant.cwd, focus: false,
       env: { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root } });
@@ -254,12 +277,18 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     }
     if (receipt.status !== 'sent') refuse('Assignment run was not observed; inspect, never resend');
     await save('dispatched');
+    dispatched = true;
     return { id, workerId: spawn.workerId, paneId: spawn.paneId, sessionId: spawn.child.sessionId,
       sessionFile: spawn.child.sessionFile, status: spawn.status };
   } catch (error) {
     spawn.failure = error.message;
     await save('held');
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
+  } finally {
+    if (fenceClaimed && (!splitRequested || dispatched)) {
+      try { await release(launchFence, id); }
+      catch { ctx.ui.notify(`Could not release owner launch fence ${id}; inspect before starting another`, 'warning'); }
+    }
   }
 }
 

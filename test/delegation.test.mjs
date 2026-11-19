@@ -138,6 +138,8 @@ test('P1/P6 native launch needs no child confirmations and delegates only throug
   const ownerBinding = Object.values((await f.state()).workers)[0];
   assert.equal(ownerBinding.role, 'owner');
   assert.equal(ownerBinding.sessionId, owner.native.id);
+  assert.equal((await readdir(f.root)).some(file => file.startsWith('owner-launch-pending-')), false,
+    'observed owner dispatch releases the checkout fence');
   await assert.rejects(f.worker.command('start-implementation', scope), /EEXIST/);
   await assert.rejects(f.worker.spawn(task), /No scoped delegation grant/);
   const writer = (await owner.native.spawn(task)).details;
@@ -158,6 +160,10 @@ test('P4/P5 native launch preserves pauses and never retries uncertain pane crea
   await f.supervisorCommand('activate global');
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /held for inspection.*disconnected before response/);
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /EEXIST/);
+  const attempt = await f.attempt();
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope.'), error =>
+    error.message.includes('Unresolved owner launch') && error.message.includes(attempt.id));
+  assert.equal((await readJson(join(f.root, `spawn-${attempt.id}.json`))).status, 'held');
   assert.deepEqual(f.effects, ['split']);
 });
 
