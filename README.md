@@ -154,14 +154,21 @@ bounded protections and recovery limits.
 
 ## Coordinating-owner workflow (since v0.4.0)
 
-Since v0.4.1, with the intended global supervisor already running, enter `/start-implementation <agreed
-assignment>` from the unsupervised brainstorming session in the target Git checkout.
-Supply the agreed scope and checks as command text. This one invocation authorizes
+With the intended global supervisor already running, agree on a plan in the
+unsupervised brainstorming session in the target Git checkout, then enter
+`/start-implementation`. In current source, the bare command asks the configured
+model to identify the agreed plan in recent chat text; if it cannot identify one,
+no pane is created. There is no separate skill step. You can still specify the
+scope with `/start-implementation <agreed assignment>` (required in v0.4.1).
+This one invocation authorizes
 launching and enrolling a non-writing owner and giving it scoped delegation for
 one writer and read-only reviewers. Continue in the owner pane the command reports;
 there are no setup confirmations in that pane. A skill or ordinary model message
 cannot replace invocation. If launch is held or uncertain, inspect the attempt
-rather than retrying or rephrasing it. Genuine user decisions still pause the owner.
+rather than retrying or rephrasing it. A verified closed, paused worker with no
+pending delivery does not block a new writer solely because its history is still
+registered. Live or uncertain ownership and retained writer claims still block.
+Genuine user decisions still pause the owner.
 
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register

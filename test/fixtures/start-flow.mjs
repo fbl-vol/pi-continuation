@@ -28,7 +28,10 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
               workspaces: [...new Set(agents.map(a => a.workspace_id))].map(workspace_id =>
                 ({ workspace_id, label: `Workspace ${workspace_id}` })) } });
         socket.write(JSON.stringify({ id: request.id, result }) + '\n');
-      } catch { socket.destroy(); }
+      } catch (error) {
+        if (error.code === 'pane_not_found') socket.end(JSON.stringify({ id: request.id, error: { code: error.code } }) + '\n');
+        else socket.destroy();
+      }
     });
   });
   function native(paneId, options = {}) {

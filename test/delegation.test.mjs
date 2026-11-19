@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -19,6 +19,8 @@ async function fixture(t, options = {}) {
   let serial = 0;
   f.onRequest(async request => {
     const { method, params } = request;
+    if (method === 'pane.get' && options.closedPanes?.includes(params.pane_id))
+      throw Object.assign(new Error('Pane closed'), { code: 'pane_not_found' });
     if (method === 'pane.split') {
       effects.push('split');
       await options.beforeSplit?.(f);
@@ -151,6 +153,75 @@ test('P1/P6 native launch needs no child confirmations and delegates only throug
   await assert.rejects(owner.native.spawn({ ...task, key: 'another', task: 'Create a second writer' }), /Checkout already has/);
   assert.equal(f.effects.filter(e => e === 'task').length, 3);
 });
+
+test('P1 bare launch reads the agreed plan from chat, without a skill invocation or confirmation', async t => {
+  const f = await fixture(t);
+  const plan = 'Update the help text; run the focused help tests. Do not change behavior.';
+  f.worker.user('Can we improve the help text?');
+  f.worker.assistant(plan);
+  f.worker.user('Yes, that is the plan.');
+  f.worker.ctx.model = {};
+  f.worker.ctx.modelRegistry = { complete: async (_model, context) => {
+    assert.equal(context.tools, undefined);
+    assert.deepEqual(JSON.parse(context.messages[0].content).map(x => x.text),
+      ['Can we improve the help text?', plan, 'Yes, that is the plan.']);
+    return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify({
+      agreement: { turn: 2, quote: 'Yes, that is the plan.' }, plan: [{ turn: 1, quote: plan }],
+    }) }] };
+  } };
+  await f.worker.command('start-implementation', '');
+  assert.ok(f.children[0].task.includes(plan));
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  assert.equal(f.worker.confirmations.length + f.children[0].native.confirmations.length, 0);
+});
+
+for (const reason of ['ambiguous', 'invented', 'changed']) {
+  test(`P1 bare launch makes no pane or grant for ${reason} chat evidence`, async t => {
+    const f = await fixture(t);
+    f.worker.user('Please implement the new help text.');
+    f.worker.ctx.model = {};
+    f.worker.ctx.modelRegistry = { complete: async () => {
+      if (reason === 'changed') f.worker.user('Actually, hold off for now.');
+      return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(reason === 'ambiguous' ? null : {
+        agreement: { turn: 0, quote: 'Please implement the new help text.' },
+        plan: [{ turn: 0, quote: reason === 'invented' ? 'Publish a release.' : 'Please implement the new help text.' }],
+      }) }] };
+    } };
+    await assert.rejects(f.worker.command('start-implementation', ''),
+      reason === 'changed' ? /Planning session changed/ : /No single agreed assignment/);
+    assert.deepEqual(f.effects, []);
+    assert.equal((await readdir(f.root)).some(name => name.startsWith('delegation-')), false);
+  });
+}
+
+for (const condition of ['closed', 'pane exists', 'session moved', 'unresolved']) {
+  test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
+    const f = await fixture(t, { closedPanes: condition === 'pane exists' ? [] : ['w:old'] });
+    const state = await f.state();
+    const id = '11111111-1111-4111-8111-111111111111';
+    const old = { workerId: id, route: 'w', paused: true, paneId: 'w:old', cwd: f.root,
+      sessionId: 'old-session', sessionFile: join(f.root, 'old.jsonl'), checkpoint: join(f.root, 'old.md') };
+    state.workers[id] = old;
+    await writeFile(old.checkpoint, 'Historical checkpoint');
+    await atomicJson(join(f.root, `worker-${id}.json`), old);
+    if (condition === 'unresolved') state.inflight[id] = { id, stop: id };
+    await atomicJson(join(f.root, 'supervisor.json'), state);
+    // Restart fixture supervisor so its own memory has the same retained binding.
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    if (condition === 'session moved') f.agents.push({ ...f.agents[0], pane_id: 'w:moved',
+      agent_session: { ...f.agents[0].agent_session, value: old.sessionFile } });
+    if (condition === 'closed') {
+      await f.worker.command('start-implementation', 'Update the docs');
+      const writer = (await f.children[0].native.spawn(task)).details;
+      assert.equal(writer.status, 'dispatched');
+      assert.deepEqual((await f.state()).workers[id], old);
+    } else {
+      await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), /Checkout already has a supervised worker/);
+      assert.deepEqual(f.effects, []);
+    }
+  });
+}
 
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
   const f = await fixture(t, { splitLost: true });
