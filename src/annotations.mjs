@@ -24,16 +24,20 @@ export function createAnnotations({ root, socketPath, ownerToken, ownerBinding, 
       value.supervisorSession === ownerBinding.sessionId ? value : undefined;
   };
   const ownerMatches = live => !!ownerBinding &&
-    sameOccupant(live.agents.find(a => a.pane_id === ownerBinding.paneId), ownerBinding);
+    sameOccupant(live?.agents.find(a => a.pane_id === ownerBinding.paneId), ownerBinding);
   const report = error => { failures++; if (!failed) { failed = true; onError(error); } };
-  const send = async entry => {
+  const send = async (entry, clearDisplay = false) => {
     const result = await transport(socketPath, `${entry.kind}.report_metadata`, {
       [`${entry.kind}_id`]: entry.id, source, seq: ++sequence, ttl_ms: ttlMs,
-      ...(entry.kind === 'pane' ? { applies_to_source: 'herdr:pi' } : {}), tokens: entry.tokens });
+      ...(entry.kind === 'pane' ? { applies_to_source: 'herdr:pi' } : {}),
+      ...(clearDisplay ? { clear_display_agent: true } : entry.displayLabel ? { display_agent: entry.displayLabel } : {}),
+      tokens: entry.tokens });
     if (result?.type !== 'ok') throw new Error('Unexpected Herdr metadata acknowledgement');
   };
   const clear = async (key, entry) => {
-    try { await send({ ...entry, tokens: Object.fromEntries(Object.keys(entry.tokens).map(k => [k, null])) }); }
+    try {
+      await send({ ...entry, tokens: Object.fromEntries(Object.keys(entry.tokens).map(k => [k, null])) }, !!entry.displayLabel);
+    }
     catch (error) {
       // A deleted target has no tokens left to clear. Other failures stay visible;
       // TTL remains the fallback for an unreachable target that may still exist.
@@ -54,7 +58,7 @@ export function createAnnotations({ root, socketPath, ownerToken, ownerBinding, 
       catch (error) { if (error.code !== 'ENOENT') report(error); }
       const status = workerStatus(state, binding, agent, observation);
       desired.set(`pane:${binding.paneId}`, { kind: 'pane', id: binding.paneId, binding,
-        identity: JSON.stringify(binding), tokens: paneTokens(status.label, status.kind) });
+        identity: JSON.stringify(binding), tokens: paneTokens(status.label, status.kind), displayLabel: binding.displayLabel });
       const group = groups.get(binding.workspaceId) ?? [];
       group.push(status);
       groups.set(binding.workspaceId, group);
@@ -119,9 +123,11 @@ export function createAnnotations({ root, socketPath, ownerToken, ownerBinding, 
         return; // A fresh event or the TTL renewal will reconcile, not a hot retry.
       }
       if (entry.kind === 'workspace' && !verified.workspaces?.some(w => w.workspace_id === entry.id)) continue;
-      sent.set(key, { ...entry, at: -Infinity }); // A lost first response still needs cleanup/expiry.
+      const clearDisplay = !!prior?.displayLabel && !entry.displayLabel;
+      // If an acknowledgement is lost, cleanup still owns any name we may have published.
+      sent.set(key, { ...entry, displayLabel: entry.displayLabel ?? prior?.displayLabel, at: -Infinity });
       try {
-        await send(entry);
+        await send(entry, clearDisplay);
         sent.set(key, { ...entry, at: now() });
       } catch (error) { report(error); }
     }

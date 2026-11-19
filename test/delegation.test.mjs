@@ -8,14 +8,40 @@ import { startFixture } from './fixtures/start-flow.mjs';
 import { atomicJson, readJson } from '../src/store.mjs';
 import { sendAction } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
-import { delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
+import { delegatedDisplayLabel, delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
 import { checkpointHash } from '../src/policy.mjs';
+
+test('role names use just a unique shared task code, a bounded checkout name, or the role', () => {
+  const grant = { scope: 'Implement W123-D04; W123-D04 only. Private prose must not appear.' };
+  assert.equal(delegatedDisplayLabel('owner', grant), 'Owner · W123-D04');
+  assert.equal(delegatedDisplayLabel('writer', grant), 'Writer · W123-D04');
+  assert.equal(delegatedDisplayLabel('read-only', grant), 'Read-only · W123-D04');
+  const checkout = join('parent', 'fixture-long-repository', '.git');
+  assert.equal(delegatedDisplayLabel('writer', { scope: 'W123 or W456', checkout }), 'Writer · fixture-l…');
+  assert.equal(delegatedDisplayLabel('read-only', { scope: 'Review xW123 W123-secret W1234' }), 'Read-only');
+  assert.equal(delegatedDisplayLabel('writer', { scope: '', checkout: join('private path!', '.git') }), 'Writer');
+});
+
+for (const [scenario, options, attempts] of [
+  ['sets one name after dispatch', {}, 1],
+  ['preserves a manual name', { postStartPanePatch: { label: 'My label' } }, 0],
+  ['never renames a replacement session', { postStartPanePatch: { agent_session: { value: 'replacement' } } }, 0],
+  ['does not hold or repeat a launch on rename failure', { renameLost: true }, 1],
+]) test(`delegated pane ${scenario}`, async t => {
+  const f = await fixture(t, options);
+  await f.worker.command('start-implementation', 'Implement synthetic W123-D04');
+  const child = f.children[0];
+  const state = JSON.parse(await readFile(join(f.root, 'supervisor.json'), 'utf8'));
+  assert.equal(Object.values(state.workers)[0].displayLabel, 'Owner · W123-D04');
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  assert.deepEqual(f.renames, attempts ? [{ pane_id: child.pane.pane_id, label: 'Owner · W123-D04' }] : []);
+});
 
 async function fixture(t, options = {}) {
   const f = await startFixture(t, { blank: true });
   execFileSync('git', ['init', '--quiet', f.root]);
   await f.supervisorCommand('start');
-  const effects = [], children = [];
+  const effects = [], children = [], renames = [];
   let serial = 0;
   f.onRequest(async request => {
     const { method, params } = request;
@@ -41,7 +67,16 @@ async function fixture(t, options = {}) {
     }
     if (method === 'pane.get') {
       const child = children.find(c => c.pane.pane_id === params.pane_id);
-      if (child) return { type: 'pane_info', pane: { ...child.pane, ...options.preStartPanePatch } };
+      if (child) return { type: 'pane_info', pane: child.agent ?
+        { ...child.agent, label: child.pane.label, ...options.postStartPanePatch } :
+        { ...child.pane, ...options.preStartPanePatch } };
+    }
+    if (method === 'pane.rename') {
+      renames.push(params);
+      if (options.renameLost) throw new Error('Synthetic missing rename acknowledgement');
+      const child = children.find(c => c.pane.pane_id === params.pane_id);
+      child.pane.label = params.label;
+      return { type: 'ok' };
     }
     if (method === 'agent.start') {
       effects.push('start');
@@ -85,7 +120,7 @@ async function fixture(t, options = {}) {
   const authorize = (scope = 'Implement the approved fixture feature. Read-only subdelegation is permitted; user selects review fixes.') =>
     f.worker.command('continuation-delegate', `writer ${scope}`);
   const attempts = async () => (await readdir(f.root)).filter(p => /^spawn-[a-f0-9-]{36}\.json$/.test(p));
-  return { ...f, effects, children, authorize, attempts,
+  return { ...f, effects, children, renames, authorize, attempts,
     attempt: async () => readJson(join(f.root, (await attempts())[0])) };
 }
 const task = { key: 'implementation', task: 'Implement approved stage one and validate it.', role: 'writer' };
