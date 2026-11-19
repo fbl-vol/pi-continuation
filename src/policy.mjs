@@ -9,6 +9,9 @@ function existingNotice(state, workerId, stop, kind) {
     n.kind === kind && !(kind === 'completion' && n.status === 'stale'));
 }
 
+export const recipientFor = (state, workerId) => state.workers[workerId]?.recipient ??
+  state.routes[state.workers[workerId]?.route]?.coordinator;
+
 export function planDisposition(state, args, checkpoint, materialEvidence = '') {
   const reject = message => ({ kind: 'reject', message });
   const evidence = args.evidence.trim();
@@ -24,12 +27,13 @@ export function planDisposition(state, args, checkpoint, materialEvidence = '') 
   if (completion && args.reportHash !== checkpointHash(checkpoint))
     return reject('Checkpoint changed or report hash missing; inspect current report');
   if (args.action === 'notify') {
-    if (!args.kind || !state.routes[worker.route]?.coordinator)
+    if (!args.kind || !recipientFor(state, args.workerId))
       return reject('Material kind and exact coordinator binding required');
     const existing = existingNotice(state, args.workerId, args.stop, args.kind);
     if (existing) return reject(`Notice already ${existing.status}`);
     return { kind: 'notify', notice: { workerId: args.workerId, stop: args.stop,
       kind: args.kind, text: evidence, route: worker.route,
+      ...(worker.recipient ? { recipient: worker.recipient } : {}),
       ...(completion ? { reportHash: args.reportHash } : {}) } };
   }
   if (args.action === 'pause') return { kind: 'pause' };
@@ -52,7 +56,8 @@ export function recordDisposition(state, workerId, stop, action) {
 export function addNotice(state, notice) {
   const existing = notice.stop && existingNotice(state, notice.workerId, notice.stop, notice.kind);
   if (existing) return existing;
-  const saved = { ...notice, status: 'pending' };
+  const saved = { ...notice, ...(state.workers[notice.workerId]?.recipient ?
+    { recipient: state.workers[notice.workerId].recipient } : {}), status: 'pending' };
   state.notices[notice.id] = saved;
   return saved;
 }
@@ -122,7 +127,8 @@ export function recoverUncertain(state) {
   }
   for (const notice of Object.values(state.notices)) {
     if (notice.status === 'sending') {
-      state.routes[notice.route].paused = true;
+      if (notice.recipient && state.workers[notice.workerId]) state.workers[notice.workerId].paused = true;
+      else state.routes[notice.route].paused = true;
       notice.status = 'uncertain';
     }
   }
@@ -136,7 +142,7 @@ export function recordUnresolvedAttention(state, workerId, stop, noticeId) {
     const worker = state.workers[workerId];
     worker.paused = true;
     prior.failure = 'Unresolved after corrective wake';
-    if (state.routes[worker.route]?.coordinator && !prior.noticeId) {
+    if (recipientFor(state, workerId) && !prior.noticeId) {
       const notice = addNotice(state, { id: noticeId, workerId, stop, kind: 'blocker',
         text: 'Continuation disposition unresolved after corrective wake', route: worker.route });
       prior.noticeId = notice.id;

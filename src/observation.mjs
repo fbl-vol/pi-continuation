@@ -275,7 +275,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     },
   });
 
-  const registerWorker = async (argument, ctx, managed = false, delegated, stillEligible = () => true) => {
+  const registerWorker = async (argument, ctx, managed = false, delegated, stillEligible = () => true,
+    ownerEntry) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Requires a Herdr-managed Pi TUI with its integration', 'error'); return;
       }
@@ -334,7 +335,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       const record = { workerId, sessionId: session.id, sessionFile: session.file,
         paneId, checkpoint, cwd: ctx.cwd, socketPath, stateRoot: root, paused: true, requiresReady: true,
         ...(managed ? { managedInput: true, managedCheckpoint: true } : {}),
-        ...(delegated ? { delegationId: delegated.id } : {}) };
+        ...(delegated ? { delegationId: delegated.id } : {}),
+        ...(ownerEntry ? { role: 'owner', coordinatorId: ownerEntry.id } : {}) };
       const candidate = { interrupted: false, version: stopVersion };
       preparing = candidate;
       let receiver;
@@ -466,10 +468,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (Object.values(supervisor.retiredWorkers).some(old => old.sessionId === session.id || old.sessionFile === session.file)) {
       ctx.ui.notify(workerStartRefusal('WORKER_RETIRED'), 'warning'); return;
     }
-    if (session.id === supervisor.supervisorSession || entries.some(entry =>
-      entry.type === 'custom' && entry.customType === 'pi-continuation-coordinator' &&
-      entry.data?.sessionId === session.id)) {
-      ctx.ui.notify('A supervisor or coordinator cannot become a worker', 'error'); return;
+    const coordinatorEntry = entries.filter(entry => entry.type === 'custom' &&
+      entry.customType === 'pi-continuation-coordinator' && entry.data?.sessionId === session.id).at(-1)?.data;
+    if (session.id === supervisor.supervisorSession || (coordinatorEntry && coordinatorEntry.role !== 'owner')) {
+      ctx.ui.notify('A supervisor or ordinary coordinator cannot become a worker', 'error'); return;
     }
     if (!worker) {
       // Do not create a new registration to escape a disabled committed binding.
@@ -483,7 +485,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           ctx.ui.notify('This session has an inactive registration; inspect and reload before start', 'warning'); return;
         } catch (error) { if (error.code !== 'ENOENT') { report('inspect registration', error, ctx); return; } }
       }
-      await registerWorker('', ctx, true, delegated, stillEligible);
+      await registerWorker('', ctx, true, delegated, stillEligible, coordinatorEntry);
       if (!worker) return;
     } else {
       const guard = promptsFor(ctx);

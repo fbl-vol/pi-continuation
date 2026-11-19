@@ -83,7 +83,8 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
       command: (name, argument) => commands.get(name)(argument, ctx),
       emit: async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn(event, ctx); },
       dispose: args => tools.get('continuation_disposition')('call', args, undefined, undefined, ctx),
-      spawn: (args, signal) => tools.get('continuation_spawn')('spawn-call', args, signal, undefined, ctx) };
+      spawn: (args, signal) => tools.get('continuation_spawn')('spawn-call', args, signal, undefined, ctx),
+      wait: args => tools.get('continuation_owner_wait')('wait-call', args, undefined, undefined, ctx) };
     natives.push(result);
     return result;
   }

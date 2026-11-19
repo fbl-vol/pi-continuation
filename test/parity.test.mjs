@@ -83,7 +83,7 @@ async function fixture(t, { coordinatorInput = false, ordinary = false, priorHan
     getLeafId: () => 'coordinator-leaf', getBranch: () => [{ type: 'custom',
       customType: 'pi-continuation-coordinator', data: coordinator }],
   } };
-  bindCoordinator({ on: (name, fn) => ch.set(name, fn), registerCommand: () => {},
+  bindCoordinator({ on: (name, fn) => ch.set(name, fn), registerCommand: () => {}, registerTool: () => {},
     sendMessage: message => notices.push(message) }, { root, paneId: coordinator.paneId, socketPath });
   await ch.get('session_start')({}, cctx);
   if (coordinatorInput) ch.get('input')({ source: 'interactive' });

@@ -14,9 +14,11 @@ import { readJson } from './store.mjs';
  *   terminalId: string, workspaceId: string, tabId: string,
  *   sessionKind: string, sessionValue: string, pendingSession?: string}} NativeBinding
  * @typedef {NativeBinding & {workerId: string, route: string, checkpoint?: string,
- *   paused: boolean, reason?: string}} WorkerBinding
+ *   paused: boolean, reason?: string, role?: 'owner', coordinatorId?: string,
+ *   recipient?: NativeBinding & {id: string, role: 'owner'}}} WorkerBinding
  * @typedef {{paused: boolean, coordinator?: NativeBinding & {id: string}, reason?: string}} Route
  * @typedef {{id: string, workerId: string, stop?: string, route: string, reportHash?: string,
+ *   recipient?: NativeBinding & {id: string, role: 'owner'},
  *   kind: 'completion'|'blocker'|'decision', text: string,
  *   status: 'pending'|'sending'|'sent'|'stale'|'uncertain'|'resolved'}} Notice
  * @typedef {{id: string, workerId: string, stop: string, ownerToken: string,
@@ -30,7 +32,8 @@ import { readJson } from './store.mjs';
  *   budgets: Object<string, {count: number, hash: string, checkpoint: string}>,
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
  *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
- *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>}} SupervisorState
+ *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>,
+ *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>}} SupervisorState
  */
 
 export const SCHEMA_VERSION = 1;
@@ -61,6 +64,10 @@ export function decodeSupervisor(record) {
     if (worker.stopped !== undefined && (worker.stopped !== true || worker.paused !== true ||
         typeof worker.stoppedPaused !== 'boolean' || !isId(worker.stopToken))) invalid();
     if (worker.stopped === undefined && (worker.stoppedPaused !== undefined || worker.stopToken !== undefined)) invalid();
+    if (worker.role !== undefined && (worker.role !== 'owner' || !isId(worker.coordinatorId))) invalid();
+    if (worker.recipient !== undefined && (!object(worker.recipient) || !isId(worker.recipient.id) ||
+        worker.recipient.role !== 'owner' || !isId(worker.recipient.sessionId) ||
+        typeof worker.recipient.sessionFile !== 'string')) invalid();
   }
   for (const name of ['handled', 'dispositions', 'budgets', 'repair', 'notices', 'inflight']) {
     if (version === 0 && state[name] == null) state[name] = {};
@@ -73,6 +80,16 @@ export function decodeSupervisor(record) {
     if (!isId(id) || !object(worker) || worker.workerId !== id || worker.paused !== true ||
         !isId(worker.retiredBy) || typeof worker.sessionId !== 'string' ||
         typeof worker.sessionFile !== 'string' || Object.hasOwn(state.workers, id)) invalid();
+  }
+  if (state.ownerWaits === undefined) state.ownerWaits = {};
+  if (!object(state.ownerWaits)) invalid();
+  for (const [id, wait] of Object.entries(state.ownerWaits)) {
+    if (!isId(id) || state.workers[id]?.role !== 'owner' || !object(wait) ||
+        !['child', 'user', 'released'].includes(wait.kind) ||
+        (wait.kind === 'child' ? !Array.isArray(wait.children) || !wait.children.length ||
+          wait.children.some(child => !isId(child)) : wait.children !== undefined) ||
+        (wait.kind === 'released' ? !(wait.stop === null || typeof wait.stop === 'string') :
+          wait.stop !== undefined)) invalid();
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
@@ -110,6 +127,8 @@ export function decodeSupervisor(record) {
         (notice.reportHash !== undefined && (typeof notice.reportHash !== 'string' ||
           !/^[a-f0-9]{64}$/.test(notice.reportHash))) ||
         !Object.hasOwn(state.routes, notice.route) ||
+        (notice.recipient !== undefined && (!object(notice.recipient) || !isId(notice.recipient.id) ||
+          notice.recipient.role !== 'owner' || !isId(notice.recipient.sessionId))) ||
         !['completion', 'blocker', 'decision'].includes(notice.kind) ||
         !['pending', 'sending', 'sent', 'stale', 'uncertain', 'resolved'].includes(notice.status)) invalid();
   }

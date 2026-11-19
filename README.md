@@ -152,6 +152,22 @@ No live delegated-worker or native Windows/macOS runtime acceptance is claimed.
 The [approved amendment and P1–P7 scenarios](docs/extension-parity.md) define its
 bounded protections and recovery limits.
 
+## Source-only coordinating-owner workflow
+
+Current source includes an approved, isolated-test-only coordinating-owner amendment;
+**installed v0.3.3 does not include it**. With a separately authorized updated
+installation and a running global supervisor, an intended owner can register
+`/continuation-coordinator owner`, then `/continuation-worker start`, then authorize
+its bounded `writer` delegation scope with `/continuation-delegate`. The owner is a
+supervised non-writer and an exact recipient for its delegated children, not another
+supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
+user-decision wait. A child material notice wakes only its owner; user selection
+requires explicit `/continuation-owner resume` in that owner session after the actual
+user decision, then a successful ordinary user-input turn before pending notices
+can deliver. Neither release nor a child can bypass the decision fence. No command
+assumes approval or repairs an uncertain effect. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
+for the bounded safeguards. No live owner bootstrap or unattended delivery is claimed.
+
 ## Development and disposable use
 
 Run `npm ci --legacy-peer-deps`, `npm test`, and `npm run check:package`. Tests use fake sessions/transports, temporary state, loopback sockets and competing child processes—not real workers. The explicit package allowlist excludes tests, private records and experimental SDK launcher/resources. Pi 1.5.0 and Herdr protocol 22 are the development baseline, not a cross-platform certification.

@@ -12,7 +12,7 @@ export function bindContinuation(pi, options = {}) {
     { root: process.env.PI_CONTINUATION_ROOT } : {}), ...options };
   const worker = bindObservation(pi, { ...options, launchGuard: () => true, reviewCurrentReports: true });
   const supervisor = bindSupervisor(pi, { ...options, allowExperimentalActivation: true });
-  bindCoordinator(pi, options);
+  bindCoordinator(pi, { ...options, confirmOwner: worker.confirmDelegation });
   bindDelegation(pi, worker, options);
   bindManagement(pi, worker, supervisor, options);
   return worker;

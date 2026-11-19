@@ -17,7 +17,8 @@ import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
-  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention } from './policy.mjs';
+  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention,
+  recipientFor } from './policy.mjs';
 
 const stateFile = root => join(root, 'supervisor.json');
 const lockFile = root => join(root, 'supervisor.lock');
@@ -113,6 +114,17 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       statusEvidence: `Herdr reports blocked at state sequence ${sequence}; inspect the worker's current prompt. This status does not grant approval.` };
   };
   const checkpointPath = workerId => pinnedCheckpoint(root, workerId, state.workers[workerId]);
+  const acknowledgeWaitingOwner = async id => {
+    const binding = state.workers[id];
+    const observed = await readObservation(root, id);
+    if (observed.outcome === 'completed' && !observed.hold && observed.stop &&
+        observed.session.id === binding.sessionId && observed.session.file === binding.sessionFile &&
+        state.handled[id] !== observed.stop) {
+      recordDisposition(state, id, observed.stop, 'acknowledge');
+      return true;
+    }
+    return false;
+  };
   const isolateUnavailable = async () => {
     if (!active() || !lastSnapshot) return;
     let changed = false;
@@ -130,6 +142,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
       let reason;
       if (!sameOccupant(agent, binding)) reason = 'Worker identity unavailable';
+      else if (binding.recipient && !sameOccupant(lastSnapshot.agents.find(a =>
+        a.pane_id === binding.recipient.paneId), binding.recipient)) reason = 'Assignment owner unavailable';
       else {
         try {
           await checkpointPath(id);
@@ -155,7 +169,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       binding.paused = true;
       binding.reason = reason;
       changed = true;
-      if (state.routes[binding.route]?.coordinator) {
+      if (recipientFor(state, id)) {
         const noticeId = randomUUID();
         addNotice(state, { id: noticeId, workerId: id, kind: 'blocker',
           text: reason + '; inspect exact binding before activation', route: binding.route });
@@ -168,6 +182,12 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const result = [];
     for (const [id, binding] of Object.entries(state.workers)) {
       if (binding.paused || state.routes[binding.route]?.paused) continue;
+      if (state.ownerWaits?.[id]) {
+        try {
+          if (await acknowledgeWaitingOwner(id)) await commit();
+        } catch (error) { if (error.code !== 'ENOENT') report('read waiting owner', error, diagnosticContext); }
+        continue;
+      }
       try {
         const agent = lastSnapshot?.agents.find(a => a.pane_id === binding.paneId);
         if (!sameOccupant(agent, binding)) continue;
@@ -200,9 +220,19 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     for (const notice of Object.values(state.notices ?? {})) {
       if (notice.status !== 'pending') continue;
       const route = state.routes[notice.route];
-      if (!route || route.paused || !route.coordinator) continue;
-      const agent = lastSnapshot.agents.find(a => a.pane_id === route.coordinator.paneId);
-      if (!sameOccupant(agent, route.coordinator) || !isSettled(agent)) continue;
+      const recipient = notice.recipient ?? route?.coordinator;
+      if (!route || route.paused || !recipient ||
+          (notice.recipient && state.workers[notice.workerId]?.recipient?.id !== recipient.id)) continue;
+      const owner = notice.recipient && Object.entries(state.workers).find(([, worker]) =>
+        worker.role === 'owner' && worker.coordinatorId === recipient.id &&
+        worker.sessionId === recipient.sessionId);
+      if (owner && ['user', 'released'].includes(state.ownerWaits[owner[0]]?.kind)) continue;
+      const agent = lastSnapshot.agents.find(a => a.pane_id === recipient.paneId);
+      if (!sameOccupant(agent, recipient)) {
+        if (notice.recipient) { state.workers[notice.workerId].paused = true; await commit(); }
+        continue;
+      }
+      if (!isSettled(agent)) continue;
       if (notice.kind === 'completion') {
         try {
           const latest = await readObservation(root, notice.workerId);
@@ -224,7 +254,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
       try {
         const receipt = await withWorkerHandoff(root, notice.workerId, state.workers[notice.workerId],
-          { effect: true }, () => sendAction(root, { ...notice, ownerToken: state.ownerToken }, route.coordinator.id));
+          { effect: true }, () => sendAction(root, { ...notice, ownerToken: state.ownerToken }, recipient.id));
         if (receipt.accepted === false && receipt.stale === true && receipt.id === notice.id) {
           if (notice.kind === 'completion') await staleCompletion(notice);
           else { notice.status = 'stale'; await commit(); }
@@ -238,13 +268,19 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const saved = await readJson(join(root, `receipt-${notice.id}.json`));
         if (!receipt.accepted || receipt.id !== notice.id || saved.status !== 'sent') throw new Error('Notice delivery uncertain');
         notice.status = 'sent';
+        if (owner && state.ownerWaits[owner[0]]?.kind === 'child' &&
+            state.ownerWaits[owner[0]].children.includes(notice.workerId)) {
+          await acknowledgeWaitingOwner(owner[0]);
+          delete state.ownerWaits[owner[0]];
+        }
       } catch (error) {
         if (error.code === 'OWNERSHIP_FENCE') {
           state.workers[notice.workerId].paused = true;
           state.workers[notice.workerId].reason = 'Worker ownership unavailable';
           notice.status = 'pending'; // Definite pre-delivery rejection; no notice was accepted.
         } else {
-          route.paused = true;
+          if (notice.recipient) state.workers[notice.workerId].paused = true;
+          else route.paused = true;
           notice.status = 'uncertain';
         }
         report('deliver notice', error, diagnosticContext);
@@ -270,7 +306,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const path = await checkpointPath(id);
         const reportText = await readFile(path, 'utf8');
         evidence.push({ id, outcome: stop.outcome, stop: stop.stop, hold: stop.hold,
-          coordinatorBound: !!state.routes[state.workers[id].route]?.coordinator,
+          coordinatorBound: !!recipientFor(state, id),
           checkpointPath: path, reportHash: checkpointHash(reportText),
           finalReply: stop.finalReply, statusEvidence: stop.statusEvidence,
           checkpoint: reportText.slice(0, 4096) });
@@ -294,7 +330,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     // subscription acknowledgement so snapshot/event overlap remains safe.
     const discovery = await snapshot(socketPath);
     const candidates = [...Object.values(state.workers).filter(w => !w.stopped).map(w => w.paneId),
-      ...Object.values(state.routes).map(r => r.coordinator?.paneId).filter(Boolean)];
+      ...Object.values(state.routes).map(r => r.coordinator?.paneId).filter(Boolean),
+      ...Object.values(state.workers).map(w => w.recipient?.paneId).filter(Boolean)];
     const paneIds = candidates.filter(id => discovery.agents.some(a => a.pane_id === id));
     closeEvents?.();
     subscriptionLive = false;
@@ -349,7 +386,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       const live = await snapshot(socketPath);
       const { binding, route, repeated, replacement } = await workerStartCandidate(root, request, state, live, paneId);
       if (state.inflight[request.workerId] || Object.values(state.notices).some(notice =>
-        notice.route === route && notice.status === 'uncertain'))
+        notice.status === 'uncertain' && (notice.recipient ? notice.workerId === request.workerId : notice.route === route)))
         return { accepted: false, code: 'DELIVERY_PENDING', message: workerStartRefusal('DELIVERY_PENDING') };
       if (!repeated) {
         const join = () => withWorkerHandoff(root, request.workerId, binding, {}, async () => {
@@ -406,6 +443,41 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  const acceptOwnerWait = request => queue(async () => {
+    if (!active() || !subscriptionLive || state.paused || !state.acceptStarts) return { accepted: false };
+    const worker = state.workers[request.workerId];
+    if (worker?.role !== 'owner' || worker.stopped || worker.paused ||
+        worker.sessionId !== request.sessionId || worker.sessionFile !== request.sessionFile ||
+        worker.coordinatorId !== request.coordinatorId || state.routes[worker.route]?.paused) return { accepted: false };
+    const live = await snapshot(socketPath);
+    if (!sameOccupant(live.agents.find(a => a.pane_id === worker.paneId), worker)) return { accepted: false };
+    const recipient = await coordinatorCandidate(root, request.coordinatorId, state, live, paneId);
+    if (recipient.role !== 'owner' || recipient.sessionId !== worker.sessionId) return { accepted: false };
+    if (request.kind === 'resume-user') {
+      if (state.ownerWaits[request.workerId]?.kind !== 'user') return { accepted: false };
+      await acknowledgeWaitingOwner(request.workerId);
+      state.ownerWaits[request.workerId] = { kind: 'released',
+        stop: (await readObservation(root, request.workerId)).stop };
+    } else if (request.kind === 'settled-user') {
+      const wait = state.ownerWaits[request.workerId];
+      if (wait?.kind !== 'released') return { accepted: false };
+      const observed = await readObservation(root, request.workerId);
+      if (observed.session.id !== worker.sessionId || observed.session.file !== worker.sessionFile ||
+          observed.outcome !== 'completed' || observed.hold || !observed.stop || observed.stop === wait.stop)
+        return { accepted: false };
+      delete state.ownerWaits[request.workerId];
+    } else if (request.kind === 'user') state.ownerWaits[request.workerId] = { kind: 'user' };
+    else if (request.kind === 'child' && Array.isArray(request.children) && request.children.length &&
+        request.children.every(id => uuid(id) && state.workers[id]?.recipient?.id === recipient.id &&
+          state.workers[id]?.recipient?.sessionId === recipient.sessionId)) {
+      if (['user', 'released'].includes(state.ownerWaits[request.workerId]?.kind)) return { accepted: false };
+      state.ownerWaits[request.workerId] = { kind: 'child', children: [...new Set(request.children)] };
+    } else return { accepted: false };
+    await commit();
+    if (request.kind === 'child' || request.kind === 'settled-user') await flushNotices();
+    return { accepted: true };
+  });
+
   const acceptManagement = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive) return { accepted: false, message: 'Supervisor unavailable' };
     try {
@@ -452,7 +524,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
           closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
-            acceptManagement(request, ctx) : acceptWorkerStart(request, ctx));
+            acceptManagement(request, ctx) : request?.type === 'owner-wait' ?
+              acceptOwnerWait(request) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
@@ -512,7 +585,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           catch { observed = { outcome: 'unknown' }; }
           workers[workerId] = { route: binding.route, paneId: binding.paneId,
             paused: binding.paused, reason: binding.reason, failure: binding.failure,
-            outcome: observed.outcome, stop: observed.stop,
+            outcome: observed.outcome, stop: observed.stop, ownerWait: state.ownerWaits[workerId],
             handled: state.handled[workerId], nudges: state.budgets[workerId]?.count ?? 0,
             repair: state.repair[workerId], inflight: state.inflight[workerId],
             next: binding.paused ? 'inspect and explicitly activate' :
@@ -529,6 +602,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (!state.routes[kind] || !uuid(id)) throw new Error('Usage: coordinator <route> <coordinator-id>');
         const live = await snapshot(socketPath);
         const binding = await coordinatorCandidate(root, id, state, live, paneId);
+        if (binding.role === 'owner') throw new Error('An assignment owner cannot be a workspace-wide coordinator');
         const existing = state.routes[kind].coordinator;
         if (existing) {
           if (existing.id === id) { notify(ctx, 'Coordinator already bound; pauses preserved'); return; }
@@ -647,6 +721,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const binding = state.workers[args.workerId];
         if (!binding || binding.stopped || (args.action !== 'acknowledge' &&
             (state.paused || binding.paused || state.routes[binding.route]?.paused))) return 'Paused';
+        const decisionWait = () => ['user', 'released'].includes(state.ownerWaits[args.workerId]?.kind);
+        if (args.action === 'resume' && decisionWait())
+          return 'Owner is waiting for a user decision; no continuation through this gate';
         lastSnapshot = await snapshot(socketPath);
         const reviewedAgent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
         const reviewedInput = inputVersion;
@@ -721,7 +798,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (plan.kind === 'budget-exhausted') {
           recordDisposition(state, args.workerId, args.stop, 'blocker');
           binding.reason = plan.reason;
-          if (state.routes[binding.route]?.coordinator) {
+          if (recipientFor(state, args.workerId)) {
             addNotice(state, { id: randomUUID(), workerId: args.workerId, stop: args.stop,
               kind: 'blocker', text: plan.reason + '; inspect before resuming', route: binding.route });
           }
@@ -729,8 +806,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           await flushNotices();
           return 'Two nudges without evidenced progress; worker paused';
         }
-        if (_signal?.aborted || state.paused || binding.paused || state.routes[binding.route]?.paused)
-          return 'Cancelled or paused';
+        if (_signal?.aborted || state.paused || binding.paused || state.routes[binding.route]?.paused ||
+            decisionWait()) return 'Cancelled, paused or waiting for a user decision';
         const id = randomUUID();
         const intent = prepareResume(state, args.workerId, args.stop, id);
         await commit();
@@ -740,7 +817,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           const delivery = await snapshot(socketPath);
           const agent = delivery.agents.find(a => a.pane_id === binding.paneId);
           if (_signal?.aborted || !subscriptionLive || promptActive || inputVersion !== reviewedInput ||
-              state.paused || binding.paused || state.routes[binding.route]?.paused ||
+              state.paused || binding.paused || state.routes[binding.route]?.paused || decisionWait() ||
               !sameOccupant(agent, binding) || !isSettled(agent) ||
               !Number.isSafeInteger(reviewedAgent.state_change_seq) ||
               agent.state_change_seq !== reviewedAgent.state_change_seq ||

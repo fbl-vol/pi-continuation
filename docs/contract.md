@@ -18,6 +18,47 @@ Shared-UI calls are synchronously observed before display. Registration/hold-cle
 
 New run/checkpoint error holds include optional `holdError: { kind: "run" | "checkpoint", at: <ISO timestamp> }` alongside the existing hold fields. `at` is when the hold was recorded, not a reconstructed failure time. This additive provenance never changes eligibility and survives subsequent observations/reload until explicit resolution. Old records remain readable and held without fabricated cause/time; no existing hold is cleared or migrated. Sidebar labels and Details use this evidence, not raw provider/tool error text.
 
+## Supervised coordinating owners (source amendment; not in v0.3.3)
+
+`/continuation-coordinator owner` registers an exact non-writing recipient in the
+current Pi session; `/continuation-worker start` independently confirms worker
+supervision for that same session. The global supervisor remains separate. The
+owner registration must match its worker binding in session, file, pane and owner
+state; ordinary coordinators still cannot enroll as workers. The scoped delegation
+parent retains a writer *ceiling*, not a writer claim: only the verified coordinating
+owner is omitted from the existing checkout's supervised-worker writer-conflict
+check. Other supervised workers and durable writer claims still exclude a second
+writer. Neither role nor grant makes the owner a source editor.
+
+Delegated children pin the exact owner recipient on joining, including inherited
+read-only subdelegations. A material notice persists the recipient with its worker
+and route. The supervisor rechecks live Herdr identity, native stop/checkpoint,
+route pause and ownership before addressed delivery; the recipient independently
+checks its session, binding, owner token, notice status, wait state and one-use
+receipt. A busy or user-waiting owner defers before acceptance. An ambiguous
+owner-bound delivery pauses only that child; old route-coordinator notices keep
+their route-level behavior. Loss of an owner recipient similarly isolates only
+its child. Same-workspace owner siblings never share an implicit inbox. Neither
+recipient identity nor Herdr labels grant task or approval authority.
+
+`continuation_owner_wait` writes a child wait tied to exact already-supervised child
+IDs, or a user-decision wait, through the existing supervisor owner endpoint. It
+cannot clear a user wait. A current completed owner stop is acknowledged while
+waiting so it cannot be nudged again when the wait ends; this is not assignment
+completion. A matching material notice consumes a child wait only after the
+existing receipt confirms delivery. A user wait defers all notices to that owner
+and rejects further delegation, including inherited already-dispatched children.
+Direct owner continuation is refused at the disposition and effect boundary. The
+confirmed own-session `/continuation-owner resume` records a durable release
+fence after the user has supplied the decision; it does not flush pending notices.
+Only a subsequent ordinary interactive/RPC user turn that completes without a
+hold clears that fence, after which pending notices may deliver. Aborted/held
+turns, synthetic messages and reload do not clear it. Neither command grants
+approval, selects findings, clears a worker hold or activates scopes. Waits and
+release fences live in the retained supervisor snapshot and survive reload. There is no
+second scheduler, polling service or automatic user-selection wake. This source
+path has isolated tests, not live adoption or package-release evidence.
+
 ## Contextual human management (since v0.3.0)
 
 `/continuation` uses native guarded selection and confirmation, not model-callable
