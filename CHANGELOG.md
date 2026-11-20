@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.6] - 2026-11-20
+
+- Show readable role labels in newly delegated Herdr panes and the Agents
+  sidebar, without renaming existing panes or changing supervision status.
+- Let `/start-implementation` proceed past verified inactive historical
+  registrations and safely archive provably undelivered orphaned blocker notices
+  in the same invocation. Live writers, ambiguous state and unresolved effects
+  still block. Legacy pending notices without no-send evidence still block, and
+  existing held launch attempts are not retried.
+- Older versions cannot read the new supervisor state schema. Update participating
+  sessions together before using the new behavior; a package downgrade alone
+  does not roll back persisted state.
+
 ## [0.4.5] - 2026-11-19
 
 - Wait for the delegated pane's foreground shell on Linux and macOS before
