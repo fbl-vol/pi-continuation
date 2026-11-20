@@ -235,10 +235,17 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('push preference choices', lambda: 'Push branch · Ask First' in visible(planner))
                 cli('agent', 'send-keys', planner, 'enter')
                 until('draft choice', lambda: 'Push branch: Automatic' in visible(planner))
+                cli('agent', 'send-keys', planner, 'down', 'enter')
+                until('fix preference choices', lambda: 'Fix review findings · Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('effective draft choice', lambda:
+                    'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(visible(planner).split()))
                 cli('agent', 'send-keys', planner, 'down', 'down', 'down', 'down', 'down', 'enter')
                 def saved():
                     path = state_dir/'delivery-preferences.json'
-                    return path.exists() and json.loads(path.read_text())['values']['pushBranch'] == 'Automatic'
+                    if not path.exists(): return False
+                    values = json.loads(path.read_text())['values']
+                    return values['pushBranch'] == 'Automatic' and values['fixReviewFindings'] == 'Automatically Fix'
                 until('delivery preference saved', saved)
                 # Native clients supply PTY dimensions; the fixture sidebar takes 42 columns.
                 for width in (80, 40):
@@ -262,6 +269,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                         screen = until(f'saved choices at {width} columns', lambda: visible(planner) if
                             'Push branch: Automatic' in visible(planner) else None)
                         assert 'Close review panes: Off' in screen
+                        assert 'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(screen.split())
                         if evidence: (evidence/f'delivery-saved-{width}.txt').write_text(screen)
                         if width == 40: cli('agent', 'send-keys', planner, 'esc')
                     finally:

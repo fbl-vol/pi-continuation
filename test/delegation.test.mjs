@@ -530,7 +530,11 @@ test('P1/P3 new owner pins preferences, shows effective human-selection rule and
   assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Off',
     'later defaults do not rewrite a running assignment');
   let step = 0;
-  owner.select((_title, choices) => {
+  owner.select((title, choices) => {
+    if (step === 1 || step === 3) {
+      assert.match(title, /This assignment · delivery preferences/);
+      assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    }
     const answer = ['This assignment: delivery', 'Push branch: Off', 'Ask First', 'Save'][step++];
     assert.ok(choices.includes(answer), JSON.stringify(choices));
     return answer;

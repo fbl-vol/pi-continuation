@@ -188,7 +188,9 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
       const editPreferences = async (title, saved, save) => {
         const draft = { ...saved };
         while (true) {
-          const rows = deliveryFields.map(field => `${field.label}: ${draft[field.key]}`);
+          const effective = effectiveDeliveryPreferences(draft);
+          const rows = deliveryFields.map(field => `${field.label}: ${draft[field.key]}` +
+            (draft[field.key] === effective[field.key] ? '' : ` (effective: ${effective[field.key]})`));
           const choice = await select(`${title}\nRepository rules and human decisions still apply.`,
             [...rows, 'Save', 'Cancel']);
           if (!choice || choice === 'Cancel') return;
@@ -240,10 +242,7 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
           if (!grant.ownerLaunch || grant.id !== view.own.binding.coordinatorId)
             refuse('Exact owner assignment unavailable');
           const previous = await readAssignmentDeliveryPreferences(root, grant);
-          const effective = effectiveDeliveryPreferences(previous);
-          const title = effective.fixReviewFindings === previous.fixReviewFindings ?
-            'This assignment · effective choices' : 'This assignment · Fix review: Ask First required';
-          return editPreferences(title, previous, async draft => {
+          return editPreferences('This assignment · delivery preferences', previous, async draft => {
             await freshView(view.own);
             const latest = await readJson(path);
             if (latest.revoked || !unchanged(latest, grant))

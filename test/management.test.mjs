@@ -85,6 +85,27 @@ test('delivery defaults save only the explicit draft and persist across menu ope
   await other.command('continuation', '');
 });
 
+test('delivery menu distinguishes saved automatic fixes from effective Ask First in draft and after Save', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  let step = 0;
+  planner.select((title, choices) => {
+    if (step === 3) assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    const answer = ['Delivery preferences', 'Fix review findings: Ask First', 'Automatically Fix', 'Save'][step++];
+    assert.ok(choices.includes(answer), JSON.stringify(choices));
+    return answer;
+  });
+  await planner.command('continuation', '');
+  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatically Fix');
+  step = 0;
+  planner.select((_title, choices) => {
+    if (step++ === 0) return 'Delivery preferences';
+    assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    return undefined;
+  });
+  await planner.command('continuation', '');
+});
+
 test('retained Stop withdraws the active row; own Return preserves identity, spent budget and consumed stop', async t => {
   const f = await started(t);
   assert.match((await resume(f)).content[0].text, /Continuation delivered/);
