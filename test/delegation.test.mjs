@@ -44,7 +44,7 @@ async function fixture(t, options = {}) {
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
   let serial = 0;
-  f.onRequest(async request => {
+  f.onRequest(async (request, socket) => {
     const { method, params } = request;
     if (method === 'pane.get') await options.beforePaneRead?.(f, params.pane_id);
     if (method === 'pane.get' && options.closedPanes?.includes(params.pane_id))
@@ -138,7 +138,7 @@ async function fixture(t, options = {}) {
       const child = children.find(c => c.pane.pane_id === params.target);
       return { type: 'agent_info', agent: { ...child.agent, ...options.readinessPatch } };
     }
-    await options.onSnapshot?.(f, children, request);
+    await options.onSnapshot?.(f, children, request, socket);
   });
   const authorize = (scope = 'Implement the approved fixture feature. Read-only subdelegation is permitted; user selects review fixes.') =>
     f.worker.command('continuation-delegate', `writer ${scope}`);
@@ -455,6 +455,39 @@ test('P1/P7 one occupied-checkout choice creates the alternate tree in a new spa
   } finally {
     execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
   }
+});
+
+test('P1/P7 failed supervisor activation after a worktree choice leaves no tree or intent', async t => {
+  let subscription;
+  const f = await fixture(t, { onSnapshot: (_fixture, _children, request, socket) => {
+    if (request.method === 'events.subscribe') subscription = socket;
+  } });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const existing = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  await f.supervisorCommand('pause global');
+  assert.ok(subscription, 'Supervisor subscription must be observed before testing its loss');
+
+  let proposed;
+  f.worker.select(async (title, choices) => {
+    proposed = title.match(/^Path: (.+)$/m)?.[1];
+    assert.ok(proposed);
+    subscription.destroy();
+    for (let i = 0; i < 100 && !(await f.state()).failure; i++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok((await f.state()).failure, 'The supervisor must have lost its subscription');
+    return choices[0];
+  });
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04 here.'),
+    /Supervisor (ownership unavailable|fault)/);
+  assert.equal(existsSync(proposed), false);
+  assert.deepEqual((await readdir(f.root)).filter(name => name.startsWith('owner-worktree-')), []);
+  assert.deepEqual(f.effects, []);
+  assert.equal((await f.state()).paused, true);
 });
 
 test('P1/P7 an exact authorized worktree skips the selector and second confirmation', async t => {

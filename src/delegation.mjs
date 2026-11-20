@@ -113,7 +113,7 @@ const grantPath = (root, id) => recordPath(root, 'delegation', id);
 const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
 
 async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed,
-  authorizedWorktree, explicitSpace) {
+  authorizedWorktree, explicitSpace, readyForCreate) {
   const common = await commonDirectory(target);
   const intent = join(root, `owner-worktree-${digest(`${parent.sessionId}\n${common}\n${scope}`)}.json`);
   try {
@@ -175,6 +175,11 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
       refuse('Worktree choice cancelled; no owner launched');
     if (choice === 'Create in new space') space = 'new';
   }
+  if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; no worktree created');
+  // The create-or-cancel selection is the user's authorization. Resume the
+  // supervisor before claiming the intent or creating Git state; rejection
+  // must not strand a worktree or an uncertain-effect claim.
+  await readyForCreate();
   if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; no worktree created');
   requireDelegationParent(await snapshot(socketPath), parent);
   // Claim before the Git effect. A lost response must never create a second
@@ -813,6 +818,14 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         (state.acceptStarts && state.reason !== 'Explicit global pause') ||
         (!state.acceptStarts && state.reason && state.reason !== 'Explicit global pause')))
       refuse('Supervisor fault or unknown pause requires inspection before launch');
+    const activateForLaunch = async () => {
+      if (!state.paused && state.acceptStarts) return;
+      const activation = await sendAction(root, { type: 'launch-activate', ownerToken: state.ownerToken },
+        'supervisor');
+      if (!activation.accepted || activation.ownerToken !== state.ownerToken)
+        refuse(activation.message ?? 'Supervisor could not resume for this implementation');
+      state = await readSupervisor(root);
+    };
     const grant = { id: randomUUID(), cwd, originCwd: cwd, role: 'writer', ownerLaunch: true,
       ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
     const live = await snapshot(socketPath);
@@ -844,20 +857,14 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
     const target = checkout.checkout;
     const placement = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
-      grant.parent, allowed, options.worktree, options.space ?? checkout.space);
+      grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch);
     grant.cwd = placement.cwd;
     grant.space = placement.space;
     grant.worktreeCreated = grant.cwd !== target;
     grant.checkout = await checkoutIdentity(grant.cwd);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
       refuse('Planning session changed while choosing checkout; no owner launched');
-    if (state.paused || !state.acceptStarts) {
-      const activation = await sendAction(root, { type: 'launch-activate', ownerToken: state.ownerToken },
-        'supervisor');
-      if (!activation.accepted || activation.ownerToken !== state.ownerToken)
-        refuse(activation.message ?? 'Supervisor could not resume for this implementation');
-      state = await readSupervisor(root);
-    }
+    await activateForLaunch();
     await delegationOwner(root, grant);
     const scopePath = join(root, `owner-launch-${digest(`${grant.checkout}\n${scope}`)}.json`);
     try {
