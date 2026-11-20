@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0] - 2026-11-20
+
+- Start or reuse a dedicated supervisor during `/start-implementation`; resume
+  an ordinary global pause without clearing independent pauses or holds.
+- Choose worktree and Herdr space in one step, and retry a proved pre-effect
+  refusal with the same command after correcting the prerequisite.
+- Recover an unchanged managed worker report after a verified checkpoint rewrite.
+- Configure delivery preferences in `/continuation`, including per-assignment
+  overrides. Human finding selection and Git permissions still apply.
+- Uncertain starts or deliveries are not retried; one-answer owner decision
+  release and automatic writer-slot closeout are not implemented.
+
 ## [0.5.0] - 2026-11-20
 
 - Select the assignment's named or absolute local checkout independently of the

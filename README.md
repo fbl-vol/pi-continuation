@@ -2,7 +2,7 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Current release: `v0.5.0`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.5.0); npm publication remains disabled (`private: true`). The coordinating-owner workflow has isolated test coverage, not live end-to-end acceptance. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Current release: `v0.6.0`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.6.0); npm publication remains disabled (`private: true`). The coordinating-owner workflow has isolated test coverage, not live end-to-end acceptance. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,22 +14,22 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install v0.5.0
+## Install v0.6.0
 
 Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
 
 ```sh
-pi install git:github.com/fbl-vol/pi-continuation@v0.5.0
+pi install git:github.com/fbl-vol/pi-continuation@v0.6.0
 ```
 
 Installation changes that profile's Pi settings; restart or reload the intended Pi session afterward. To upgrade an existing pinned installation, run the same install command with the new tag; `pi update --extensions` alone does not advance a pinned tag. Other running sessions keep their loaded code until individually restarted or reloaded. A full restart resolved a stale menu after `/reload` in a controlled trial; restart the intended session if reloading does not pick up the update. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
 
-Before using v0.5.0's checkout selection and per-tree writer claims, restart or reload the participating supervisor, owners and Pi sessions on the same version. Installation alone does not update running sessions or retry or clear a held launch. Older versions cannot read supervisor state written in the v0.4.6 schema; downgrading the package does not restore older state.
+Before using the new launch and recovery workflow, restart or reload the participating supervisor, owners and Pi sessions on the same version. Installation alone does not update running sessions or retry or clear a held launch. Older versions cannot read supervisor state written in the v0.4.6 schema; downgrading the package does not restore older state.
 
 To remove this package from the same profile:
 
 ```sh
-pi remove git:github.com/fbl-vol/pi-continuation@v0.5.0
+pi remove git:github.com/fbl-vol/pi-continuation@v0.6.0
 ```
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
@@ -111,12 +111,12 @@ a successful tool alone never clears a hold. Newly recorded failed turns display
 Details shows the cause, when the hold was recorded and the confirmed recovery
 control. Existing unclassified holds remain `Held: error` until explicitly resolved;
 no automatic migration, hold clearing or live-worker upgrade is included.
-Published v0.3.2 retains its earlier tool-error holds. In unreleased source,
+Published v0.3.2 retains its earlier tool-error holds. Since v0.6.0,
 a managed checkpoint-write failure with an otherwise successful, unchanged
 settled report can recover on session restore after a fresh successful write of
 the identical checkpoint. The supervisor lifts only its matching automatic
-checkpoint-unavailable pause; explicit pauses and other holds remain. Installed
-v0.5.0 still requires confirmed manual recovery for this case.
+checkpoint-unavailable pause; explicit pauses and other holds remain.
+v0.5.0 requires confirmed manual recovery for this case.
 
 ## Supervised delegation (since v0.3.0)
 
@@ -164,7 +164,7 @@ bounded protections and recovery limits.
 ## Coordinating-owner workflow (since v0.4.0)
 
 Agree on a plan in the unsupervised brainstorming session in the target Git
-checkout, then enter `/start-implementation`. Current unreleased source can start
+checkout, then enter `/start-implementation`. Since v0.6.0, the command can start
 a dedicated supervisor space during that invocation if none is running; an
 ordinary global pause on a running supervisor resumes without another prompt.
 A retained ambiguous supervisor startup or unresolved owner lock remains held
@@ -178,7 +178,7 @@ launching and enrolling a non-writing owner and giving it scoped delegation for
 one writer and read-only reviewers. Continue in the owner pane the command reports;
 there are no setup confirmations in that pane. A skill or ordinary model message
 cannot replace invocation. If launch is held or uncertain, inspect the attempt
-rather than retrying or rephrasing it. In unreleased source, an explicit
+rather than retrying or rephrasing it. Since v0.6.0, an explicit
 pre-split refusal with retained no-effect proof can use the same command and
 scope after its prerequisite is fixed; a requested split or worktree effect
 still requires inspection. Installed v0.5.0 retains its original claim behavior. A verified closed, paused worker with no
@@ -196,7 +196,7 @@ uncertain prior creation or ownership still requires inspection, not retry. Thes
 source/isolated tests and disposable Linux nested-checkout launch do not claim live,
 Windows or macOS runtime acceptance.
 
-**Unreleased source:** `/start-implementation --new-space -- <agreed assignment>`
+**Since v0.6.0:** `/start-implementation --new-space -- <agreed assignment>`
 (or bare `/start-implementation --new-space`) places the owner and writer together
 in a newly named Herdr space; the planner stays in its current space. The normal
 launch still uses the current space without prompting. Ambiguous checkout or
@@ -209,7 +209,7 @@ to avoid another prompt; omit `space` for the no-prompt current-space default.
 The base must still match HEAD. Lost creation responses and changed details
 remain held, not retried under a different path or space.
 
-**Unreleased delivery preferences:** `/continuation` → `Delivery preferences`
+**Delivery preferences (since v0.6.0):** `/continuation` → `Delivery preferences`
 shows saved per-user defaults for new owner assignments, with Save or Escape/
 Cancel. An exact owner may view or explicitly override only that assignment via
 `This assignment: delivery`; `continuation_delivery_preferences` reads its
