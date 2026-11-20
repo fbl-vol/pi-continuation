@@ -879,6 +879,11 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
       currentSession(ctx).leaf === session.leaf;
     const cwd = await realpath(ctx.cwd);
+    let pending;
+    try { pending = await readJson(join(root, 'supervisor-start-pending.json')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (pending !== undefined)
+      refuse(`Supervisor startup ${pending?.token ?? 'unknown'} is unresolved; inspect before launching an owner`);
     let state;
     try { state = await readSupervisor(root); }
     catch (error) { if (error.code !== 'ENOENT') throw error; state = newSupervisor(); }

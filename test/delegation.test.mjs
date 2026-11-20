@@ -514,6 +514,24 @@ test('P1/P7 an exact authorized worktree skips the selector and second confirmat
   }
 });
 
+test('P1/P4 a live supervisor cannot bypass an unresolved lost-start response', async t => {
+  const f = await fixture(t);
+  const id = 'b936e2c9-9e87-42de-9837-9b38f2a7dd0d';
+  const parent = f.worker.ctx.sessionManager.getSessionId();
+  const scope = 'Implement W123-D04.';
+  await atomicJson(join(f.root, 'supervisor-start-pending.json'), { token: id, parent, scope });
+  await atomicJson(join(f.root, `supervisor-start-${id}.json`), {
+    id, parent, scope, cwd: f.root, status: 'activating',
+    pane: { pane_id: 'w:supervisor', terminal_id: 'exact-supervisor-terminal' },
+  });
+  const owner = (await f.state()).ownerToken;
+  await assert.rejects(f.worker.command('start-implementation', scope),
+    /Supervisor startup .* is unresolved/);
+  assert.deepEqual(f.effects, [], 'no owner pane, Pi start or task under a pending supervisor start');
+  assert.equal((await f.state()).ownerToken, owner);
+  assert.equal((await readJson(join(f.root, 'supervisor-start-pending.json'))).token, id);
+});
+
 test('P1/P4 a lost supervisor space response remains held and does not create another space', async t => {
   const f = await fixture(t, { supervisorWorkspaceLost: true });
   await f.supervisor.emit('session_shutdown');
