@@ -209,6 +209,18 @@ to avoid another prompt; omit `space` for the no-prompt current-space default.
 The base must still match HEAD. Lost creation responses and changed details
 remain held, not retried under a different path or space.
 
+**Unreleased delivery preferences:** `/continuation` → `Delivery preferences`
+shows saved per-user defaults for new owner assignments, with Save or Escape/
+Cancel. An exact owner may view or explicitly override only that assignment via
+`This assignment: delivery`; `continuation_delivery_preferences` reads its
+current effective choices. Global edits never silently change an existing
+assignment. Automatic finding fixes can be saved but remain **Ask First** under
+the current human-selection contract. Preferences do not grant publication,
+replace independent review, override repository restrictions, or alter live
+supervision. The native 80/40-column settings view and assignment snapshot have
+only disposable Linux Pi/Herdr evidence; no private owner-skill integration,
+live settings or cross-platform acceptance is claimed.
+
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register
 `/continuation-coordinator owner`, then `/continuation-worker start`, then authorize

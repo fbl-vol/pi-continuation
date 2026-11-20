@@ -139,6 +139,17 @@ This is not automatic enrollment on package installation and does not waive
 user decisions, independent pauses or review holds. The v0.5.0 release still
 requires a running supervisor before owner launch.
 
+**Unreleased W005-D08:** `/continuation` offers a native Delivery preferences
+menu. Explicit Save persists per-user defaults for future assignments; Cancel
+and Escape discard drafts. Each new owner pins its defaults, while its own
+assignment may be explicitly overridden without changing the global choice.
+The owner sees effective choices in its assignment and can reread them with the
+exact-owner `continuation_delivery_preferences` tool. Saved Automatically Fix
+remains effectively Ask First until a separate human-selection amendment.
+Preferences are not publication, merge or approval authority; mandatory review,
+repo restrictions and independent holds still apply. Neither menu nor read tool
+performs Git, review, retirement, or live state effects.
+
 ### Chat-based owner launch (since v0.4.2)
 
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the

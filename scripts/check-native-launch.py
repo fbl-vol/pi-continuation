@@ -113,7 +113,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
-        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor):
+        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -215,6 +215,64 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if delivery_preferences:
+                cli('agent', 'prompt', planner, '/continuation')
+                until('delivery menu entry', lambda: 'Delivery preferences' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                screen = until('delivery preferences view', lambda: visible(planner) if
+                    'Push branch: Ask First' in visible(planner) else None)
+                assert 'Start review: Automatic' in screen and 'Close review panes: Off' in screen
+                if evidence: (evidence/'delivery-default-80.txt').write_text(screen)
+                cli('agent', 'send-keys', planner, 'esc')
+                assert not (state_dir/'delivery-preferences.json').exists()
+                until('planner idle after preference cancel', lambda:
+                    cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/continuation')
+                until('delivery menu reopened', lambda: 'Delivery preferences' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('default choices shown again', lambda: 'Push branch: Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'down', 'down', 'enter')
+                until('push preference choices', lambda: 'Push branch · Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('draft choice', lambda: 'Push branch: Automatic' in visible(planner))
+                cli('agent', 'send-keys', planner, 'down', 'down', 'down', 'down', 'down', 'enter')
+                def saved():
+                    path = state_dir/'delivery-preferences.json'
+                    return path.exists() and json.loads(path.read_text())['values']['pushBranch'] == 'Automatic'
+                until('delivery preference saved', saved)
+                # Native clients supply PTY dimensions; the fixture sidebar takes 42 columns.
+                for width in (80, 40):
+                    master, slave = pty.openpty()
+                    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                struct.pack('HHHH', 60, width + 42, 0, 0))
+                    client = subprocess.Popen([herdr], cwd=work, env=env, stdin=slave,
+                                              stdout=slave, stderr=slave, start_new_session=True,
+                                              preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+                    os.close(slave)
+                    try:
+                        until(f'{width}-column pane', lambda:
+                            cli('pane', 'layout', '--pane', planner)['layout']['area']['width'] == width)
+                        if width == 80:
+                            cli('pane', 'focus', '--pane', supervisor, '--direction', 'down')
+                            until('planner idle after preference save', lambda:
+                                cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                            cli('agent', 'prompt', planner, '/continuation')
+                            until('delivery menu at 80 columns', lambda: '→ Delivery preferences' in visible(planner))
+                            cli('agent', 'send-keys', planner, 'enter')
+                        screen = until(f'saved choices at {width} columns', lambda: visible(planner) if
+                            'Push branch: Automatic' in visible(planner) else None)
+                        assert 'Close review panes: Off' in screen
+                        if evidence: (evidence/f'delivery-saved-{width}.txt').write_text(screen)
+                        if width == 40: cli('agent', 'send-keys', planner, 'esc')
+                    finally:
+                        client.terminate()
+                        try: client.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            client.kill()
+                            client.wait(timeout=5)
+                        os.close(master)
+                print('Native delivery menu passed: defaults, Escape, Save and 80/40-column views', flush=True)
+                return
             previous_supervisor = None
             if restart_supervisor:
                 previous_supervisor = json.loads(state_path.read_text())['ownerToken']
@@ -337,6 +395,10 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             turns = [json.loads(line) for line in Path(owner['sessionFile']).read_text().splitlines()]
             users = [turn for turn in turns if turn.get('message', {}).get('role') == 'user']
             assert len(users) == 1 and model.task in json.dumps(users[0]), users
+            grant = json.loads((state_dir/f"delegation-{attempt['grantId']}.json").read_text())
+            assert grant['deliveryPreferences']['startReview'] == 'Automatic'
+            assert 'Effective delivery preferences for this assignment:' in json.dumps(users[0])
+            assert 'Fix review findings: Ask First' in json.dumps(users[0])
             def displayed(pane, activity, role):
                 agent = cli('agent', 'get', pane)['agent']
                 info = cli('pane', 'get', pane)['pane']
@@ -459,6 +521,7 @@ if __name__ == '__main__':
     parser.add_argument('--paused-supervisor', action='store_true', help='resume ordinary global pause in owner launch')
     parser.add_argument('--no-supervisor', action='store_true', help='bootstrap a new supervisor in the same invocation')
     parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
+    parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -471,6 +534,7 @@ if __name__ == '__main__':
         try:
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
-                args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor)
+                args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
+                args.delivery_preferences)
         finally:
             model.shutdown()

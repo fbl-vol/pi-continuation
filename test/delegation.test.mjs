@@ -11,6 +11,8 @@ import { sendAction } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
 import { delegatedDisplayLabel, delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
 import { checkpointHash } from '../src/policy.mjs';
+import { defaultDeliveryPreferences, readAssignmentDeliveryPreferences,
+  readDeliveryPreferences, saveDeliveryPreferences } from '../src/preferences.mjs';
 
 test('role names use just a unique shared task code, a bounded checkout name, or the role', () => {
   const grant = { scope: 'Implement W123-D04; W123-D04 only. Private prose must not appear.' };
@@ -512,6 +514,37 @@ test('P1/P7 an exact authorized worktree skips the selector and second confirmat
   } finally {
     if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
   }
+});
+
+test('P1/P3 new owner pins preferences, shows effective human-selection rule and saves only its override', async t => {
+  const f = await fixture(t);
+  const original = { ...defaultDeliveryPreferences(), fixReviewFindings: 'Automatically Fix', pushBranch: 'Off' };
+  await saveDeliveryPreferences(f.root, original);
+  await f.worker.command('start-implementation', 'Implement W123-D04.');
+  const grant = await readJson(join(f.root, `delegation-${(await f.attempt()).grantId}.json`));
+  const owner = f.children[0].native;
+  assert.deepEqual(grant.deliveryPreferences, original);
+  assert.match(f.children[0].task, /Fix review findings: Ask First/);
+  assert.match(f.children[0].task, /Push branch: Off/);
+  await saveDeliveryPreferences(f.root, { ...original, pushBranch: 'Automatic' });
+  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Off',
+    'later defaults do not rewrite a running assignment');
+  let step = 0;
+  owner.select((_title, choices) => {
+    const answer = ['This assignment: delivery', 'Push branch: Off', 'Ask First', 'Save'][step++];
+    assert.ok(choices.includes(answer), JSON.stringify(choices));
+    return answer;
+  });
+  await owner.command('continuation', '');
+  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Ask First');
+  assert.equal((await readDeliveryPreferences(f.root)).pushBranch, 'Automatic');
+  const effective = await owner.tool('continuation_delivery_preferences');
+  assert.equal(effective.details.grantId, grant.id);
+  assert.equal(effective.details.saved, undefined, 'the model-facing tool exposes only effective choices');
+  assert.equal(effective.details.effective.fixReviewFindings, 'Ask First');
+  assert.equal(effective.details.effective.pushBranch, 'Ask First');
+  await assert.rejects(f.worker.tool('continuation_delivery_preferences'),
+    /Exact supervised coordinating owner/);
 });
 
 test('P1/P4 a live supervisor cannot bypass an unresolved lost-start response', async t => {
