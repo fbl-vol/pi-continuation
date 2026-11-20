@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readdir, realpath } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
 import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
@@ -14,11 +14,65 @@ import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
 import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 
 const exec = promisify(execFile);
-async function checkoutIdentity(cwd) {
+async function checkoutRoot(cwd) {
+  const { stdout } = await exec('git', ['-C', cwd, 'rev-parse', '--show-toplevel'],
+    { timeout: 2500, maxBuffer: 8192, windowsHide: true });
+  return realpath(stdout.trim());
+}
+
+async function launchCheckout(ctx, scope, select) {
+  const current = await checkoutRoot(ctx.cwd);
+  const candidates = new Set([current]);
+  const explicit = new Set();
+  // Only inspect paths already named by the assignment. The planner's cwd is
+  // a default, not a grant to infer a different repository from arbitrary prose.
+  const tokens = scope.match(/"[^"]+"|'[^']+'|`[^`]+`|\S+/g) ?? [];
+  const namedTokens = [];
+  for (const token of tokens) {
+    const path = token.replace(/^["'`(]+|["'`),;:.!?]+$/g, '');
+    if (!isAbsolute(path)) { namedTokens.push(token); continue; }
+    try { explicit.add(await checkoutRoot(path)); }
+    catch { refuse('Assignment checkout path cannot be verified; no owner launched'); }
+  }
+  const names = namedTokens.join(' ').toLowerCase().split(/[^a-z0-9._-]+/i)
+    .map(token => token.replace(/[.,;:!?]+$/, ''));
+  let base = current;
+  for (let depth = 0; depth < 4; depth++) {
+    let entries;
+    try { entries = await readdir(base, { withFileTypes: true }); }
+    catch { break; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !names.includes(entry.name.toLowerCase())) continue;
+      try { candidates.add(await checkoutRoot(join(base, entry.name))); } catch { /* not a checkout */ }
+    }
+    if (dirname(base) === base) break;
+    base = dirname(base);
+  }
+  const named = [...candidates].filter(path => names.includes(basename(path).toLowerCase()));
+  const choices = [...new Set([...named, ...explicit])];
+  if (!choices.length) choices.push(current);
+  if (choices.length === 1) return choices[0];
+  const chosen = await select('Choose the assignment checkout', choices);
+  if (!chosen || !choices.includes(chosen)) refuse('Checkout selection cancelled; no owner launched');
+  return chosen;
+}
+
+async function commonDirectory(cwd) {
+  const { stdout } = await exec('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { timeout: 2500, maxBuffer: 8192, windowsHide: true });
+  return realpath(stdout.trim());
+}
+
+async function checkoutIdentity(cwd, retained) {
   try {
-    const { stdout } = await exec('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-      { timeout: 2500, maxBuffer: 8192, windowsHide: true });
-    return await realpath(stdout.trim());
+    const tree = await checkoutRoot(cwd);
+    // Existing grants/claims used the common Git directory. Preserve their
+    // identity and exclusion while new assignments fence each working tree.
+    if (retained && retained !== tree) {
+      if (retained === await commonDirectory(cwd)) return retained;
+      refuse('Delegation checkout identity changed');
+    }
+    return tree;
   } catch { refuse('Writer delegation requires a verifiable Git checkout (and Git on PATH)'); }
 }
 
@@ -27,7 +81,8 @@ export function delegatedDisplayLabel(role, { scope, checkout }) {
   // Use the shared grant, never the delegate's message/key. Only a single
   // recognizable task code is safe to take from otherwise private prose.
   const codes = new Set(typeof scope === 'string' ? scope.match(/(?<![\w-])W\d{3}(?:-D\d{2})?(?![\w-])/g) : []);
-  const repo = typeof checkout === 'string' && basename(checkout) === '.git' ? basename(dirname(checkout)) : '';
+  const repo = typeof checkout === 'string' ?
+    (basename(checkout) === '.git' ? basename(dirname(checkout)) : basename(checkout)) : '';
   const shortRepo = /^[a-z0-9][a-z0-9._-]*$/i.test(repo) ?
     (repo.length > 10 ? `${repo.slice(0, 9)}…` : repo) : '';
   const suffix = codes.size === 1 ? [...codes][0] : shortRepo;
@@ -54,6 +109,79 @@ const recordPath = (root, kind, id) => {
 export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
 const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
+
+async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed) {
+  const common = await commonDirectory(target);
+  const intent = join(root, `owner-worktree-${digest(`${parent.sessionId}\n${common}\n${scope}`)}.json`);
+  try {
+    const previous = await readJson(intent);
+    refuse(`Prior worktree intent at ${previous.path} (${previous.branch}); inspect, do not retry`);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const active = [];
+  for (const binding of Object.values(state.workers)) {
+    if (binding.role === 'owner' || binding.paused || binding.stopped ||
+        await checkoutRoot(binding.cwd).catch(() => undefined) !== target) continue;
+    const agent = live.agents.find(a => a.pane_id === binding.paneId);
+    if (sameOccupant(agent, binding) && ['idle', 'working', 'done', 'blocked'].includes(agent.agent_status))
+      active.push(binding);
+  }
+  if (!active.length) return target;
+  for (const binding of Object.values(state.workers)) {
+    if (active.includes(binding)) continue;
+    let tree;
+    try { tree = await checkoutRoot(binding.cwd); }
+    catch { refuse('Existing worker checkout cannot be verified; inspect before creating another worktree'); }
+    if (tree === target && (binding.role !== 'owner' || binding.paused ||
+        state.ownerWaits[binding.workerId] || state.inflight[binding.workerId] ||
+        state.dispositions[binding.workerId]?.action === 'decision' ||
+        Object.values(state.notices).some(n => n.recipient?.id === binding.coordinatorId && unresolvedNotice(n))))
+      refuse('Other checkout registrations need inspection before creating another worktree');
+  }
+  // An alternate tree is not a way to retry an uncertain owner creation or
+  // an unaccounted-for writer claim in the original tree.
+  for (const path of new Set([ownerLaunchPath(root, target), ownerLaunchPath(root, common),
+    join(root, `owner-launch-${digest(`${target}\n${scope}`)}.json`),
+    join(root, `owner-launch-${digest(`${common}\n${scope}`)}.json`)])) {
+    try { await readJson(path); refuse('Unresolved owner launch; inspect before choosing another worktree'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  for (const path of new Set([writerClaimPath(root, target), writerClaimPath(root, common)])) {
+    let claimRecord;
+    try { claimRecord = await readJson(path); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (!active.some(binding => binding.delegationId === claimRecord.id))
+      refuse('Writer claim is not accounted for by the live writer; inspect before choosing another worktree');
+  }
+  const option = 'Start in a new worktree';
+  if (await worker.selectManagement(ctx, `Live writer in ${target}`, [option, 'Cancel']) !== option)
+    refuse('Worktree choice cancelled; no owner launched');
+  const base = (await exec('git', ['-C', target, 'rev-parse', '--verify', 'HEAD'],
+    { timeout: 2500, maxBuffer: 8192, windowsHide: true })).stdout.trim();
+  const code = scope.match(/(?<![\w-])W\d{3}(?:-D\d{2})?(?![\w-])/i)?.[0]?.toLowerCase() ?? 'assignment';
+  const suffix = randomUUID().slice(0, 8);
+  const branch = `work/${code}-${suffix}`;
+  const path = join(dirname(target), `${basename(target)}-${code}-${suffix}`);
+  if (!await worker.confirmDelegation(ctx, 'Start in a new worktree?',
+    `Repository: ${target}\nBase: ${base}\nBranch: ${branch}\nPath: ${path}\n\n` +
+    'Create this worktree and launch the owner here. The current writer and its assignment remain unchanged.'))
+    refuse('Worktree choice cancelled; no owner launched');
+  if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; no worktree created');
+  requireDelegationParent(await snapshot(socketPath), parent);
+  // Claim before the Git effect. A lost response must never create a second
+  // worktree for the same assignment by changing the generated branch/path.
+  try { await claim(intent, { target, base, branch, path, parent: parent.sessionId }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const previous = await readJson(intent);
+    refuse(`Prior worktree intent at ${previous.path} (${previous.branch}); inspect, do not retry`);
+  }
+  try {
+    await exec('git', ['-C', target, 'worktree', 'add', '-b', branch, path, base],
+      { timeout: 30000, maxBuffer: 8192, windowsHide: true });
+  } catch (error) { refuse(`Worktree creation uncertain at ${path} (${error.message}); inspect before retrying`); }
+  if (await checkoutRoot(path) !== await realpath(path)) refuse(`New worktree identity changed at ${path}`);
+  return path;
+}
 
 async function claimOwnerLaunch(path, id) {
   try { await claim(path, { token: id }); }
@@ -92,7 +220,8 @@ export async function delegationOwner(root, grant) {
 
 export async function delegationAuthority(root, reference, binding) {
   const grant = await readJson(grantPath(root, reference?.grantId));
-  if (grant.revoked || grant.cwd !== await realpath(binding.cwd)) refuse('Delegation scope revoked or cwd changed');
+  if (grant.revoked || (reference.spawnId ? grant.cwd : grant.originCwd ?? grant.cwd) !== await realpath(binding.cwd))
+    refuse('Delegation scope revoked or cwd changed');
   let role = grant.role;
   if (!['writer', 'read-only'].includes(role)) refuse('Delegation has no explicit role boundary');
   let inheritedRecipient;
@@ -244,18 +373,29 @@ async function historicalWorkerBlocker(root, worker, state, live, readPane, read
 }
 
 async function inspectCheckout(root, grant, parent, recipient, state, live, readPane, readSnapshot, recover) {
-  if (!grant.checkout || await checkoutIdentity(grant.cwd) !== grant.checkout) refuse('Delegation checkout identity changed');
+  if (!grant.checkout || await checkoutIdentity(grant.cwd, grant.checkout) !== grant.checkout)
+    refuse('Delegation checkout identity changed');
   const pending = recover ? new Map() : undefined;
+  const legacyGrant = grant.checkout !== await checkoutRoot(grant.cwd);
   for (const worker of Object.values(state.workers)) {
     const id = isId(worker.workerId) ? worker.workerId : '(invalid ID)';
     let checkout;
-    try { checkout = await checkoutIdentity(worker.cwd); }
+    try { checkout = legacyGrant ? await commonDirectory(worker.cwd) : await checkoutRoot(worker.cwd); }
     catch { refuse(`Existing worker checkout cannot be verified for ${id}; inspect writer ownership`); }
     if (checkout !== grant.checkout) continue;
     const parentOwner = worker.role === 'owner' && worker.coordinatorId &&
       worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
       worker.paneId === parent.paneId && recipient?.id === worker.coordinatorId;
     if (!parentOwner) {
+      // A different active owner is a notice recipient, not a source writer.
+      // Do not ignore an uncertain owner or an unresolved effect.
+      if (worker.role === 'owner' && !worker.paused && !state.ownerWaits[id] && !state.inflight[id] &&
+          state.dispositions[id]?.action !== 'decision' &&
+          !Object.values(state.notices).some(n => n.recipient?.id === worker.coordinatorId && unresolvedNotice(n)) &&
+          sameOccupant(live.agents.find(a => a.pane_id === worker.paneId), worker)) {
+        const saved = await readJson(join(root, `worker-${id}.json`));
+        if (registrationMatches(saved, worker)) continue;
+      }
       const blocker = await historicalWorkerBlocker(root, worker, state, live, readPane, readSnapshot, pending);
       if (blocker) refuse(`Checkout already has a supervised worker ${id}: ${blocker}; inspect writer ownership`);
     }
@@ -264,11 +404,24 @@ async function inspectCheckout(root, grant, parent, recipient, state, live, read
 }
 
 const writerClaimPath = (root, checkout) => join(root, `delegation-writer-${digest(checkout)}.json`);
-async function requireNoWriterClaim(root, checkout) {
-  try {
-    const existing = await readJson(writerClaimPath(root, checkout));
+async function requireNoWriterClaim(root, checkout, cwd) {
+  const paths = [writerClaimPath(root, checkout)];
+  const legacy = await commonDirectory(cwd);
+  if (legacy !== checkout) paths.push(writerClaimPath(root, legacy));
+  for (const path of paths) {
+    let existing;
+    try { existing = await readJson(path); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (path !== paths[0]) {
+      // A legacy claim carries no working-tree ID. Its grant is the only
+      // durable witness that it belongs to a different tree.
+      let grant;
+      try { grant = await readJson(grantPath(root, existing.grantId)); }
+      catch { refuse('Legacy writer claim has unverified checkout; inspect ownership before launch'); }
+      if (await checkoutRoot(grant.cwd) !== checkout) continue;
+    }
     refuse(`Checkout retains a writer claim${isId(existing?.id) ? ` ${existing.id}` : ''}; inspect ownership before launch`);
-  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
 }
 
 /** Owner queue only. No notice selection supplied by the caller; derive it from
@@ -282,7 +435,7 @@ export async function archiveLaunchNotices(root, request, state, readPane, readS
     const launch = await readJson(fence);
     if (launch.token !== id || !isDeepStrictEqual(attempt, await readJson(spawnPath(root, id))))
       refuse('Native start attempt changed');
-    await requireNoWriterClaim(root, grant.checkout);
+    await requireNoWriterClaim(root, grant.checkout, grant.cwd);
   };
   if (attempt.id !== id || attempt.status !== 'prepared' || attempt.role !== 'owner' ||
       attempt.ownerToken !== state.ownerToken || attempt.grantId !== grant.id || !grant.ownerLaunch ||
@@ -431,7 +584,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       const { state: current, fresh } = await check();
       const pending = await inspectCheckout(root, authority.grant, parent, recipient, current, fresh, readPane, readLive, ownerLaunch);
       if (ownerLaunch) {
-        await requireNoWriterClaim(root, authority.grant.checkout);
+        await requireNoWriterClaim(root, authority.grant.checkout, authority.grant.cwd);
         if (pending.size) {
           checkLocal();
           const result = await send(root, { type: 'launch-archive', id, ownerToken: authority.grant.ownerToken },
@@ -442,6 +595,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       } else {
         // Serialize acquisitions against owner starts, then keep the existing
         // durable writer claim regardless of later dispatch or failures.
+        await requireNoWriterClaim(root, authority.grant.checkout, authority.grant.cwd);
         await claim(writerClaimPath(root, authority.grant.checkout), { id, grantId: spawn.grantId });
         await release(launchFence, id);
         fenceClaimed = false;
@@ -451,7 +605,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     const beforeSplit = await check();
     if (ownerLaunch || role === 'writer') {
       await inspectCheckout(root, authority.grant, parent, recipient, beforeSplit.state, beforeSplit.fresh, readPane, readLive, false);
-      if (ownerLaunch) await requireNoWriterClaim(root, authority.grant.checkout);
+      if (ownerLaunch) await requireNoWriterClaim(root, authority.grant.checkout, authority.grant.cwd);
       const latest = await check();
       const eligibilityState = ({ workers, notices, inflight, dispositions, ownerWaits, routes }) =>
         ({ workers, notices, inflight, dispositions, ownerWaits, routes });
@@ -576,6 +730,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
   async function launch(argument, ctx) {
     let scope = argument.trim();
+    let assignment = scope;
     if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !socketPath || !paneId || !ctx.isIdle() ||
         Buffer.byteLength(scope) > 8000)
       refuse('Use /start-implementation [agreed scope] in an idle Herdr Pi TUI (up to 8000 UTF-8 bytes)');
@@ -584,9 +739,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
       currentSession(ctx).leaf === session.leaf;
     const cwd = await realpath(ctx.cwd);
-    const checkout = await checkoutIdentity(cwd);
     const state = await readSupervisor(root);
-    const grant = { id: randomUUID(), cwd, checkout, role: 'writer', ownerLaunch: true,
+    const grant = { id: randomUUID(), cwd, originCwd: cwd, role: 'writer', ownerLaunch: true,
       ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
     await delegationOwner(root, grant);
     const live = await snapshot(socketPath);
@@ -598,15 +752,24 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     if (state.routes[grant.parent.workspaceId]?.paused) refuse('Delegation route is paused');
     if (!scope) {
       const signal = AbortSignal.timeout(45000);
-      try { scope = await agreedLaunchScope(ctx, signal); }
+      let agreed;
+      try { agreed = await agreedLaunchScope(ctx, signal); }
       catch { refuse('Could not read the agreed plan with the configured model. No owner launched.'); }
+      scope = agreed?.scope;
+      assignment = agreed?.assignment;
       if (!scope || signal.aborted)
         refuse('No single agreed assignment found. Clarify which plan to hand off, then run /start-implementation.');
       if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
         refuse('Planning session changed while reading the plan; no owner launched');
     }
     grant.scope = scope;
-    await claim(join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`), { grantId: grant.id });
+    const target = await launchCheckout(ctx, assignment, (title, choices) => worker.selectManagement(ctx, title, choices));
+    grant.cwd = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
+      grant.parent, allowed);
+    grant.checkout = await checkoutIdentity(grant.cwd);
+    if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
+      refuse('Planning session changed while choosing checkout; no owner launched');
+    await claim(join(root, `owner-launch-${digest(`${grant.checkout}\n${scope}`)}.json`), { grantId: grant.id });
     await claim(grantPath(root, grant.id), grant);
     const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
       task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });

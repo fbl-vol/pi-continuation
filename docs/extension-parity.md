@@ -84,10 +84,10 @@ Global, existing route and parent-worker pauses/holds reject delegation; a pause
 arriving during startup withholds the next effect. No paused scope is silently
 activated. New workers retain ordinary identity, ownership, holds, continuation
 bounds, receipts, history and material notices. Assignment keys, exact-task claims
-and cooperating writer claims survive rejection/crash. Only one delegated writer
-per verified Git checkout (common-directory identity, including subdirectories) is
-allowed; an existing supervised worker in that checkout blocks a
-new writer, while read-only delegates cannot create writers. This coordinates
+and cooperating writer claims survive rejection/crash. Published v0.4.6 allows one
+delegated writer per Git common directory; current source narrows this to one per
+verified working tree as described below. An existing supervised worker in that
+tree blocks a new writer; read-only delegates cannot create writers. This coordinates
 cooperating agents, not an OS sandbox or a proof that arbitrary prose tasks are
 semantically within scope. The parent must stop writing before delegating a writer.
 
@@ -177,6 +177,31 @@ clear, scope activation, review finding selection or permission to apply unselec
 fixes. No timer, synthetic completion or automatic selection inference is added.
 Only isolated fake-session tests cover this amendment; installation, live enrollment,
 release and cross-platform runtime acceptance are separate.
+
+### User-approved checkout selection amendment (source only; not in v0.4.6)
+
+The native `/start-implementation` launch uses the checkout identified by the agreed
+assignment, not the planner's current working directory. An unambiguous named or
+absolute local checkout launches directly; ambiguous discovered checkouts require
+one native selection in the same invocation. Bare launch derives the target from
+the agreed assignment, not earlier constraints that remain in the owner's task;
+explicit scopes never prioritize an unrelated absolute path over a named target.
+An unverifiable explicit checkout path refuses before launch. The planner remains unsupervised and
+in place. Owner and writer start in the chosen checkout. Writer claims and worker
+eligibility use the canonical working-tree root, including subdirectories and
+alternate paths; distinct linked worktrees may each have a writer. Legacy
+common-directory grants/claims retain their prior identity and block a same-tree
+writer unless their exact tree can be verified.
+
+If an active exact writer owns the chosen tree, the user may explicitly confirm
+an alternate linked worktree after seeing its repository, base commit, branch and
+path. Git creation and launch occur in that invocation. Cancelling has no launch
+or worktree effect; a durable worktree intent prevents retrying an uncertain
+creation with a new branch or path. Unresolved owner launches or unaccounted-for
+writer claims cannot be bypassed by choosing an alternate tree. Existing pauses,
+approval decisions, receipt fences and archived historical state remain unchanged.
+This amends P1/P7, not the seven-scenario acceptance set. Source/fake-runtime tests
+are not live or cross-platform runtime acceptance.
 
 ### User-approved contextual management amendment (since v0.3.0)
 

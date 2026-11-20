@@ -130,8 +130,10 @@ supervisor**, the planning session need not enroll in continuation:
    implementation to a writer.
 
 The grant pins the displayed supervisor session, cwd, scope and role ceiling.
-Writer grants require Git on PATH and pin the checkout's Git common directory;
-subdirectories cannot acquire separate writer claims for that same checkout.
+Published v0.4.6 writer grants require Git on PATH and pin the checkout's Git common directory;
+subdirectories cannot acquire separate writer claims for that same checkout. Current
+source instead pins each canonical working tree (see below); it retains legacy
+claims until their original tree can be verified.
 The native scope grant is deliberate authorization, not automatic interpretation
 of brainstorming or a model-controlled activation flag. Normal startup must load
 this extension in the child profile/project; no installation/settings/SDK launcher
@@ -171,6 +173,15 @@ rather than retrying or rephrasing it. A verified closed, paused worker with no
 pending delivery does not block a new writer solely because its history is still
 registered. Live or uncertain ownership and retained writer claims still block.
 Genuine user decisions still pause the owner.
+
+**Current source only (not installed v0.4.6):** a named or absolute local checkout
+in the agreed assignment can be selected independently of the planning pane's cwd.
+Ambiguous targets prompt once; the planner stays put while the owner and writer
+start in the selected tree. When an exact live writer already owns it, the native
+command can offer a confirmed new linked worktree, showing its base, branch and
+path before creating and launching there. Cancelling leaves no worktree or owner;
+uncertain prior creation or ownership still requires inspection, not retry. These
+source/isolated tests do not claim live, Windows or macOS runtime acceptance.
 
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register

@@ -56,9 +56,10 @@ async function fixture(t, options = {}) {
       await options.beforeSplit?.(f);
       const id = `w:p${++serial + 10}`;
       const pane = { pane_id: id, terminal_id: `terminal-${id}`, workspace_id: 'w', tab_id: 'w:t1' };
-      children.push({ pane, env: params.env });
+      children.push({ pane, env: params.env, cwd: params.cwd });
       assert.equal(params.focus, false);
-      assert.equal(params.cwd, f.root);
+      if (options.onSplit) options.onSplit(params);
+      else assert.equal(params.cwd, options.targetCwd ? join(f.root, options.targetCwd) : f.root);
       if (options.splitLost) throw new Error('lost split response after creation');
       return { type: 'pane_info', pane }; // Herdr 0.9.5 replies with PaneInfo, not its PaneCreated event.
     }
@@ -107,7 +108,8 @@ async function fixture(t, options = {}) {
           options.onTask?.(f, child);
         } });
       child.native = native;
-      child.agent = { ...child.pane, name: params.name, agent: 'pi', cwd: f.root, agent_status: 'idle',
+      child.native.ctx.cwd = child.cwd;
+      child.agent = { ...child.pane, name: params.name, agent: 'pi', cwd: child.cwd, agent_status: 'idle',
         interactive_ready: true, completion_seq: 1, state_change_seq: 1,
         agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: native.file } };
       f.agents.push(child.agent);
@@ -224,6 +226,191 @@ test('P1/P6 supervised non-writing owner delegates the sole writer and pins exac
   await assert.rejects(f.worker.spawn({ ...task, key: 'second', task: 'A second writer' }),
     /Checkout already has a supervised worker|EEXIST/);
   assert.equal(f.effects.filter(effect => effect === 'task').length, 1);
+});
+
+test('P1/P7 explicit assignment targets a nested checkout without moving its planning pane', async t => {
+  const f = await fixture(t, { targetCwd: 'risk-analytics' });
+  const target = join(f.root, 'risk-analytics');
+  await mkdir(target);
+  execFileSync('git', ['init', '--quiet', target]);
+  await f.worker.command('start-implementation', `Implement W123-D04 in ${target}; run its tests.`);
+  assert.equal(f.children[0].agent.cwd, target);
+  assert.equal(f.worker.ctx.cwd, f.root);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  const writer = (await f.children[0].native.spawn(task)).details;
+  assert.equal(f.children[1].agent.cwd, target);
+  assert.equal((await f.state()).workers[writer.workerId].cwd, target);
+});
+
+test('P1 a named nested checkout is selected without a path or a second prompt', async t => {
+  const f = await fixture(t, { targetCwd: 'risk-analytics' });
+  const target = join(f.root, 'risk-analytics');
+  await mkdir(target);
+  execFileSync('git', ['init', '--quiet', target]);
+  await f.worker.command('start-implementation', 'Implement the risk-analytics.');
+  assert.equal(f.children[0].cwd, target);
+  assert.equal(f.worker.confirmations.length, 0);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P1 bare launch chooses its agreed target, not a checkout mentioned only in earlier constraints', async t => {
+  const f = await fixture(t, { targetCwd: 'risk-analytics' });
+  const target = join(f.root, 'risk-analytics');
+  const excluded = join(f.root, 'pi-continuation');
+  for (const path of [target, excluded]) {
+    await mkdir(path);
+    execFileSync('git', ['init', '--quiet', path]);
+  }
+  f.worker.user(`Do not change ${excluded}.`);
+  f.worker.assistant('Implement the risk-analytics assignment.');
+  f.worker.user('Yes, implement that plan.');
+  f.worker.ctx.model = {};
+  f.worker.ctx.modelRegistry = { complete: async () => ({ stopReason: 'stop', content: [{ type: 'text',
+    text: JSON.stringify({ agreement: { turn: 2, quote: 'Yes, implement that plan.' },
+      plan: [{ turn: 1, quote: 'Implement the risk-analytics assignment.' }],
+      earlierConstraints: [{ turn: 0, quote: `Do not change ${excluded}.` }] }),
+  }] }) };
+  await f.worker.command('start-implementation', '');
+  assert.equal(f.children[0].cwd, target);
+  assert.match(f.children[0].task, /Do not change/);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P1 explicit scope does not silently prefer a negative path over its named target', async t => {
+  const f = await fixture(t, { targetCwd: 'risk-analytics' });
+  const target = join(f.root, 'risk-analytics');
+  const excluded = join(f.root, 'pi-continuation');
+  for (const path of [target, excluded]) {
+    await mkdir(path);
+    execFileSync('git', ['init', '--quiet', path]);
+  }
+  const scope = `Implement risk-analytics; do not change ${excluded}.`;
+  let choices;
+  f.worker.select((_title, options) => { choices = options; return undefined; });
+  await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
+  assert.deepEqual(choices, [target, excluded]);
+  assert.deepEqual(f.effects, []);
+  f.worker.select(() => target);
+  await f.worker.command('start-implementation', scope);
+  assert.equal(f.children[0].cwd, target);
+});
+
+test('P1 an unavailable absolute checkout refuses before pane creation', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.worker.command('start-implementation', `Implement in ${join(f.root, 'missing-checkout')}.`),
+    /checkout path cannot be verified/i);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(await f.attempts(), []);
+});
+
+test('P1 checkout ambiguity uses one native choice; cancellation has no launch effects', async t => {
+  const f = await fixture(t, { targetCwd: 'beta' });
+  for (const name of ['alpha', 'beta']) {
+    await mkdir(join(f.root, name));
+    execFileSync('git', ['init', '--quiet', join(f.root, name)]);
+  }
+  const scope = 'Update alpha and beta according to the agreed assignment.';
+  let choices;
+  f.worker.select((_title, options) => { choices = options; return undefined; });
+  await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
+  assert.deepEqual(choices, [join(f.root, 'alpha'), join(f.root, 'beta')]);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(await f.attempts(), []);
+  f.worker.select((_title, options) => options[1]);
+  await f.worker.command('start-implementation', scope);
+  assert.equal(f.children[0].cwd, join(f.root, 'beta'));
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P1/P7 one planning pane launches independent repositories and keeps distinct writers', async t => {
+  const targets = ['alpha', 'beta'];
+  const f = await fixture(t, { onSplit: params => assert.ok(targets.some(name =>
+    params.cwd === join(f.root, name))) });
+  for (const name of targets) {
+    await mkdir(join(f.root, name));
+    execFileSync('git', ['init', '--quiet', join(f.root, name)]);
+    await f.worker.command('start-implementation', `Implement ${name} in ${join(f.root, name)}.`);
+    const owner = f.children.find(c => c.cwd === join(f.root, name));
+    assert.equal((await owner.native.spawn({ ...task, key: name, task: `Implement ${name}` })).details.status, 'dispatched');
+  }
+  assert.equal(f.worker.ctx.cwd, f.root);
+  assert.deepEqual(f.children.map(c => c.agent.cwd), [join(f.root, 'alpha'), join(f.root, 'alpha'),
+    join(f.root, 'beta'), join(f.root, 'beta')]);
+});
+
+test('P7 independent non-writing owners coexist; their writers still exclude each other', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Implement the first agreed task.');
+  await f.worker.command('start-implementation', 'Implement the second agreed task.');
+  assert.equal(f.children.length, 2);
+  assert.deepEqual(Object.values((await f.state()).workers).map(w => w.role), ['owner', 'owner']);
+  await f.children[0].native.spawn(task);
+  await assert.rejects(f.children[1].native.spawn({ ...task, key: 'other', task: 'Second writer' }),
+    /Checkout already has a supervised worker|writer claim/);
+  assert.equal(f.effects.filter(effect => effect === 'task').length, 3);
+});
+
+test('P7 an already-existing linked tree has independent writer ownership', async t => {
+  const f = await fixture(t, { onSplit: params => assert.ok(params.cwd === f.root || params.cwd === alternate) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const alternate = `${f.root}-linked`;
+  execFileSync('git', ['-C', f.root, 'worktree', 'add', '--quiet', '-b', 'linked-fixture', alternate]);
+  try {
+    const existing = f.native('w:p2');
+    f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+      agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+    await existing.emit('session_start', { reason: 'startup' });
+    await existing.command('continuation-worker', 'start');
+    await f.worker.command('start-implementation', `Implement W123-D04 in ${alternate}.`);
+    const writer = (await f.children[0].native.spawn(task)).details;
+    assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+  } finally {
+    execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
+});
+
+test('P1/P7 a live writer offers a confirmed alternate tree, leaving the original unchanged', async t => {
+  const f = await fixture(t, { onSplit: params => assert.match(params.cwd, /-w123-d04-[a-f0-9]{8}$/) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const existing = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+    workspace_id: 'other', tab_id: 'other:t1',
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  const original = Object.values((await f.state()).workers).find(w => w.sessionId === existing.id);
+  const scope = 'Implement W123-D04 here.';
+  f.worker.select(() => undefined);
+  await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
+  assert.deepEqual(f.effects, []);
+  f.worker.select((_title, choices) => choices[0]);
+  f.worker.confirm(false);
+  await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
+  assert.deepEqual(f.effects, []);
+  f.worker.confirm(async () => {
+    await f.worker.emit('ui_prompt_start');
+    f.worker.raw('\r');
+    await f.worker.emit('ui_prompt_end');
+    return true;
+  });
+  await f.worker.command('start-implementation', scope);
+  const alternate = f.children[0].cwd;
+  try {
+    assert.equal(f.children[0].agent.cwd, alternate);
+    assert.deepEqual((await f.state()).workers[original.workerId], original);
+    assert.equal(f.worker.ctx.cwd, f.root);
+    const writer = (await f.children[0].native.spawn(task)).details;
+    assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
+    assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+    await assert.rejects(f.worker.command('start-implementation', scope), /Prior worktree intent/);
+    assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+  } finally {
+    execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
 });
 
 test('P1/P6 native launch needs no child confirmations and delegates only through the new owner', async t => {
@@ -440,7 +627,7 @@ for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient',
     if (blocker === 'receipt') await atomicJson(join(f.root, `receipt-${ids[0]}.json`), { status: 'sent' });
     if (blocker === 'writer claim') {
       const { createHash } = await import('node:crypto');
-      const pathHash = createHash('sha256').update(join(f.root, '.git')).digest('hex');
+      const pathHash = createHash('sha256').update(f.root).digest('hex');
       await atomicJson(join(f.root, `delegation-writer-${pathHash}.json`), { id: workerId });
     }
     await f.supervisor.emit('session_shutdown');
@@ -734,7 +921,7 @@ test('P7 writer claims follow verified Git checkout identity, not a parent cwd s
     agent_session: { ...f.agents[0].agent_session, value: parent.file } });
   await parent.emit('session_start', { reason: 'startup' });
   await parent.command('continuation-delegate', 'writer Implement another part of the same checkout.');
-  await assert.rejects(parent.spawn({ ...task, key: 'another-parent', task: 'A different writer assignment' }), /held for inspection.*EEXIST/);
+  await assert.rejects(parent.spawn({ ...task, key: 'another-parent', task: 'A different writer assignment' }), /held for inspection.*writer claim/);
   assert.deepEqual(f.effects, ['split'], 'ambiguous original writer retains checkout ownership');
   assert.equal((await readdir(f.root)).filter(p => p.startsWith('delegation-writer-')).length, 1);
 });
