@@ -165,7 +165,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           binding.failure = report.last;
         }
       }
-      if (!reason) continue;
+      if (!reason || binding.paused) continue;
       binding.paused = true;
       binding.reason = reason;
       changed = true;
@@ -312,7 +312,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           finalReply: stop.finalReply, statusEvidence: stop.statusEvidence,
           checkpoint: reportText.slice(0, 4096) });
       } catch (error) {
-        state.workers[id].paused = true;
+        if (!state.workers[id].paused) {
+          state.workers[id].paused = true;
+          state.workers[id].reason = 'Worker checkpoint unavailable';
+        }
         report('read attention checkpoint', error, ctx);
         state.workers[id].failure = report.last;
       }
@@ -378,6 +381,41 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       onError: error => annotationReport('publish display', error, ctx) });
     void annotations.refresh();
   };
+
+  const acceptCheckpointRecovery = (request, ctx) => queue(async () => {
+    const binding = state.workers[request.workerId];
+    if (!active() || !subscriptionLive || !binding || binding.stopped ||
+        binding.sessionId !== request.sessionId || binding.sessionFile !== request.sessionFile ||
+        !request.stop || state.inflight[request.workerId] ||
+        Object.values(state.notices).some(notice => notice.workerId === request.workerId &&
+          ['pending', 'sending', 'uncertain'].includes(notice.status)) ||
+        ['pause', 'blocker', 'decision'].includes(state.dispositions[request.workerId]?.action))
+      return { accepted: false };
+    try {
+      const live = await snapshot(socketPath);
+      const agent = live.agents.find(candidate => candidate.pane_id === binding.paneId);
+      if (!sameOccupant(agent, binding) || !isSettled(agent)) return { accepted: false };
+      const observed = await readObservation(root, request.workerId);
+      if (observed.hold || observed.outcome !== 'completed' || observed.stop !== request.stop ||
+          observed.session.id !== binding.sessionId || observed.session.file !== binding.sessionFile ||
+          checkpointHash(await readFile(await checkpointPath(request.workerId), 'utf8')) !== request.reportHash)
+        return { accepted: false };
+    } catch (error) {
+      report('verify recovered checkpoint', error, ctx);
+      return { accepted: false };
+    }
+    if (binding.paused) {
+      if (binding.reason !== 'Worker checkpoint unavailable') return { accepted: false };
+      // Only undo this exact automated failure pause; never clear an explicit
+      // worker/route/global pause, disposition, receipt or delivery history.
+      binding.paused = false;
+      delete binding.reason;
+      delete binding.failure;
+      await commit();
+    }
+    await wake(ctx);
+    return { accepted: true };
+  });
 
   const acceptWorkerStart = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive || !allowExperimentalActivation)
@@ -541,7 +579,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         try {
           closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) : acceptWorkerStart(request, ctx));
+              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);

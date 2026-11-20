@@ -43,6 +43,15 @@ Cause-specific labels/details are display-only, with unknown legacy causes left
 unclassified. This amends P2/P3/P7 within the existing seven scenarios, not a new
 acceptance set. Published v0.3.2 retains its intermediate-tool-error holds.
 
+A managed checkpoint-write failure may retain the exact successful settled report
+for recovery. On session restore, only an unchanged native report and a fresh,
+successful write of its identical checkpoint allow that same stop to be reassessed.
+The supervisor can undo only its own matching checkpoint-unavailable pause after
+rechecking the exact session and checkpoint; explicit worker, route and global
+pauses, decisions, unresolved effects and failed runs remain protected. An absent
+or changed report, an unwritable checkpoint or legacy failure without retained
+proof remains held. This is P3/P4/P7 recovery, not replay or a new acceptance set.
+
 ### User-approved confirmed replacement amendment (since v0.3.0)
 
 When a pane now hosts a different saved Pi session, worker `start` may offer an

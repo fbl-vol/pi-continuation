@@ -165,6 +165,20 @@ export function decodeObservation(record) {
     if (!object(error) || !['run', 'checkpoint'].includes(error.kind) ||
         typeof error.at !== 'string' || !Number.isFinite(Date.parse(error.at))) invalid();
   }
+  if (record.checkpointRecovery !== undefined) {
+    const recovery = record.checkpointRecovery;
+    const original = recovery?.report;
+    if (version !== 1 || record.outcome !== 'error' || record.stop !== null ||
+        record.hold !== true || record.holdError?.kind !== 'checkpoint' ||
+        !object(recovery) || !/^[a-f0-9]{64}$/.test(recovery.hash) ||
+        !object(original) || original.checkpointRecovery !== undefined ||
+        original.schemaVersion !== SCHEMA_VERSION || original.outcome !== 'completed' ||
+        original.hold !== false || !isId(original.stop) ||
+        typeof original.finalReply !== 'string' || !original.finalReply.trim() ||
+        original.version !== record.version || original.session?.id !== record.session.id ||
+        original.session?.file !== record.session.file || original.session?.leaf !== record.session.leaf ||
+        decodeObservation(original).hold) invalid();
+  }
   if (record.parkedReport !== undefined) {
     const parked = record.parkedReport;
     if (version !== 1 || !object(parked) || parked.parkedReport !== undefined ||

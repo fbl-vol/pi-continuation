@@ -100,6 +100,7 @@ export function setScopePaused(state, kind, id, paused) {
     if (disposition && disposition.stop === state.handled[id] &&
         ['pause', 'blocker', 'decision'].includes(disposition.action)) delete state.handled[id];
   }
+  if (paused && kind === 'worker') target.reason = 'Explicit worker pause';
   target.paused = paused;
 }
 

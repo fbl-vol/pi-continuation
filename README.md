@@ -111,7 +111,12 @@ a successful tool alone never clears a hold. Newly recorded failed turns display
 Details shows the cause, when the hold was recorded and the confirmed recovery
 control. Existing unclassified holds remain `Held: error` until explicitly resolved;
 no automatic migration, hold clearing or live-worker upgrade is included.
-Published v0.3.2 retains its earlier tool-error holds.
+Published v0.3.2 retains its earlier tool-error holds. In unreleased source,
+a managed checkpoint-write failure with an otherwise successful, unchanged
+settled report can recover on session restore after a fresh successful write of
+the identical checkpoint. The supervisor lifts only its matching automatic
+checkpoint-unavailable pause; explicit pauses and other holds remain. Installed
+v0.5.0 still requires confirmed manual recovery for this case.
 
 ## Supervised delegation (since v0.3.0)
 

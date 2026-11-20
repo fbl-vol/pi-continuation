@@ -43,7 +43,8 @@ class Model(BaseHTTPRequestHandler):
             tool = ('continuation_owner_wait', dict(kind='child', children=[worker]))
         # Keep the writer working while the owner settles; keep the existing
         # pre-response assertion of the exact owner startup receipt as well.
-        gate = self.server.allow_writer if writer else self.server.allow_response
+        gate = (self.server.allow_recovery if 'Recovery fixture task' in json.dumps(last) else
+                self.server.allow_writer if writer else self.server.allow_response)
         if not gate.wait(55):
             self.send_error(504)
             return
@@ -110,7 +111,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
                 os.waitpid(pid, 0)
 
 
-def run(root, model, package, baseline, evidence, nested):
+def run(root, model, package, baseline, evidence, nested, checkpoint_recovery):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -270,7 +271,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     cli('server', 'reload-config')
                 capture_sidebar(herdr, work, env, resize, evidence)
                 (evidence/'presentation.json').write_text(json.dumps(seen, ensure_ascii=False, indent=2))
-            if not baseline:
+            if not baseline and not checkpoint_recovery:
                 manual_label = 'Manual owner label'
                 cli('pane', 'rename', owner['paneId'], manual_label)
                 renamed_at = time.monotonic()
@@ -287,6 +288,52 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 print('Post-rename metadata renewal: ' + json.dumps(renewal, ensure_ascii=False), flush=True)
                 if evidence:
                     (evidence/'manual-rename-renewal.json').write_text(json.dumps(renewal, ensure_ascii=False, indent=2))
+            if checkpoint_recovery:
+                recovery_pane = cli('pane', 'split', planner, '--direction', 'down', '--cwd', str(work))['pane']['pane_id']
+                panes.append(recovery_pane)
+                until('recovery shell', lambda: shell_alone(recovery_pane))
+                cli('agent', 'start', 'recovery-worker', '--kind', 'pi', '--pane', recovery_pane)
+                cli('agent', 'prompt', recovery_pane, '/continuation-worker start')
+                until('recovery worker confirmation', lambda: 'Start worker supervision?' in visible(recovery_pane))
+                cli('agent', 'send-keys', recovery_pane, 'enter')
+                def recovery_binding():
+                    state = json.loads(state_path.read_text())
+                    return next((binding for binding in state['workers'].values()
+                                 if binding['paneId'] == recovery_pane), None)
+                binding = until('managed recovery worker enrolled', recovery_binding)
+                worker_id = binding['workerId']
+                # Keep unrelated supervisor judgment out of this bounded recovery
+                # probe. The independent global pause must survive the repair.
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('global pause', lambda: json.loads(state_path.read_text())['paused'])
+                observation_path = state_dir/f'observation-{worker_id}.json'
+                cli('agent', 'prompt', recovery_pane, 'Recovery fixture task: report one sentence.')
+                until('recovery worker running', lambda: observation_path.exists() and
+                      json.loads(observation_path.read_text())['outcome'] == 'working')
+                checkpoint = Path(binding['checkpoint'])
+                checkpoint.unlink()
+                checkpoint.mkdir()
+                model.allow_recovery.set()
+                def failed_report():
+                    observation = json.loads(observation_path.read_text())
+                    return observation if observation.get('checkpointRecovery') else None
+                failed = until('held managed checkpoint write', failed_report)
+                assert failed['hold'] and failed['holdError']['kind'] == 'checkpoint', failed
+                checkpoint.rmdir()
+                cli('agent', 'prompt', recovery_pane, '/reload')
+                def restored():
+                    observation = json.loads(observation_path.read_text())
+                    current = json.loads(state_path.read_text())['workers'][worker_id]
+                    return observation if (observation['outcome'] == 'completed' and not observation['hold'] and
+                                           observation['stop'] == failed['checkpointRecovery']['report']['stop'] and
+                                           not current['paused']) else None
+                restored_report = until('same native stop automatically reassessed', restored, 25)
+                assert restored_report['finalReply'] == ANSWER
+                assert json.loads(state_path.read_text())['paused'], 'Global pause must survive recovery'
+                assert ANSWER in checkpoint.read_text()
+                print('Native checkpoint recovery passed: unchanged report, fresh checkpoint write, no Return/Clear hold')
             print('Native launch passed: slow Bash startup, exact owner/writer enrollment, and independent activity and display')
         except Exception:
             for pane in panes:
@@ -300,6 +347,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
         finally:
             model.allow_response.set()
             model.allow_writer.set()
+            model.allow_recovery.set()
             if server.poll() is None:
                 try:
                     cli('server', 'stop')
@@ -316,6 +364,7 @@ if __name__ == '__main__':
     parser.add_argument('--baseline', action='store_true', help='expect no delegated display labels')
     parser.add_argument('--evidence', type=Path, help='directory for disposable native sidebar captures')
     parser.add_argument('--nested', action='store_true', help='launch owner and writer in a nested checkout')
+    parser.add_argument('--checkpoint-recovery', action='store_true', help='exercise a managed write failure and native reload')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -323,8 +372,10 @@ if __name__ == '__main__':
             ThreadingHTTPServer(('127.0.0.1', 0), Model) as model:
         model.allow_response = threading.Event()
         model.allow_writer = threading.Event()
+        model.allow_recovery = threading.Event()
         threading.Thread(target=model.serve_forever, daemon=True).start()
         try:
-            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence, args.nested)
+            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
+                args.nested, args.checkpoint_recovery)
         finally:
             model.shutdown()

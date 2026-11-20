@@ -6,6 +6,7 @@ import { delegatedStart, delegationAuthority, requireDelegationParent, spawnPath
 import { sameOccupant, isSettled, snapshot } from './herdr.mjs';
 import { ownerAlive, sendAction } from './ipc.mjs';
 import { managedCheckpointPath, managedCheckpointText } from './checkpoint.mjs';
+import { checkpointHash } from './policy.mjs';
 import { receive } from './receiver.mjs';
 import { currentSession } from './session.mjs';
 import { readyWorkerRegistration } from './bindings.mjs';
@@ -65,6 +66,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let parkedReport;
   let lastObserved;
   let stopVersion = 0;
+  let shutdownVersion;
   let previousAssistantId;
   const lastAssistantId = ctx => [...ctx.sessionManager.getBranch()].reverse().find(e =>
     e.type === 'message' && e.message?.role === 'assistant')?.id;
@@ -115,7 +117,11 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         holdReason = 'error';
         holdError = { kind: 'checkpoint', at: new Date().toISOString() };
         await atomicJson(`${root}/observation-${owner.workerId}.json`, {
-          ...saved, outcome: 'error', stop: null, hold: true, holdReason: 'error', holdError, parkedReport: undefined });
+          ...saved, outcome: 'error', stop: null, hold: true, holdReason: 'error', holdError, parkedReport: undefined,
+          ...(checkpoint !== undefined && saved.outcome === 'completed' && !saved.hold &&
+            saved.stop && saved.finalReply ?
+            { checkpointRecovery: { report: saved, hash: checkpointHash(checkpoint) } } : {}),
+        });
         throw error;
       }
       await atomicJson(`${root}/observation-${owner.workerId}.json`, saved);
@@ -127,6 +133,38 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         return false;
       });
     return pendingWrite;
+  };
+  const recoverCheckpoint = async (prior, ctx, restoringFromShutdown) => {
+    const recovery = prior.checkpointRecovery;
+    if (!recovery || prior.holdError?.kind !== 'checkpoint' || !ctx.isIdle() || prompts.blocked ||
+        !(prior.version === stopVersion || (restoringFromShutdown && prior.version === stopVersion - 1))) return;
+    const session = currentSession(ctx);
+    const report = currentHeldReport({ ...recovery.report, hold: true, outcome: 'approval' },
+      ctx, prior.version, session);
+    if (!report) return;
+    const checkpoint = managedCheckpointText(ctx);
+    if (checkpointHash(checkpoint) !== recovery.hash) return;
+    // This is fresh durable evidence for the unchanged native report, not a
+    // replay of its turn or permission to clear an independent supervisor pause.
+    const record = worker;
+    const version = stopVersion;
+    const recovered = { ...recovery.report, version: version + 1, hold: false };
+    const writing = pendingWrite.then(async () => {
+      await atomicText(record.checkpoint, checkpoint);
+      if (worker !== record || stopVersion !== version || prompts.blocked || !ctx.isIdle() ||
+          !currentHeldReport({ ...recovery.report, hold: true, outcome: 'approval' },
+            ctx, prior.version, currentSession(ctx))) return false;
+      await atomicJson(`${root}/observation-${record.workerId}.json`, recovered);
+      return true;
+    });
+    // An input arriving while the file is being replaced must persist *after*
+    // this candidate; it cannot be overwritten by the old stop.
+    pendingWrite = writing.then(() => true, () => false);
+    if (!await writing || worker !== record || stopVersion !== version) return;
+    stopVersion++;
+    hold = false; holdReason = undefined; holdError = undefined;
+    lastObserved = recovered;
+    return { stop: recovered.stop, reportHash: recovery.hash };
   };
   const captureExisting = async ctx => {
     if (!ctx.isIdle()) {
@@ -200,6 +238,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   });
 
   pi.on('session_start', async (_event, ctx) => {
+    const restoringFromShutdown = shutdownVersion === stopVersion;
+    shutdownVersion = undefined;
     if (preparing) preparing.interrupted = true;
     if (initialPending) { clearTimeout(initialPending.timer); initialPending = undefined; }
     stopTerminalInput?.();
@@ -242,6 +282,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           if (Number.isSafeInteger(prior.version) && prior.version >= 0)
             stopVersion = Math.max(stopVersion, prior.version);
         } catch (error) { hold = true; report('restore observation', error, ctx); }
+        const recovered = !promptInterrupted && await recoverCheckpoint(lastObserved, ctx, restoringFromShutdown);
         if (promptInterrupted) {
           // Before worker assignment the guard has no observation to update.
           // Invalidate the old eligible stop durably before exposing a receiver.
@@ -252,6 +293,13 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         if (!ctx.isIdle()) previousAssistantId = lastAssistantId(ctx);
         watchTerminalInput(ctx);
         await startReceiver(ctx);
+        if (recovered) {
+          try {
+            await sendAction(root, { type: 'checkpoint-recovered', workerId: worker.workerId,
+              sessionId: session.id, sessionFile: session.file, stop: recovered.stop,
+              reportHash: recovered.reportHash }, 'supervisor');
+          } catch (error) { report('request checkpoint reassessment', error, ctx); }
+        }
       }
     } catch (error) {
       worker = undefined;
@@ -659,6 +707,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     if (preparing) preparing.interrupted = true;
     if (initialPending) { clearTimeout(initialPending.timer); initialPending = undefined; }
     stopVersion++;
+    shutdownVersion = stopVersion;
     worker = undefined;
     stopTerminalInput?.();
     stopTerminalInput = undefined;
