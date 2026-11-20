@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0] - 2026-11-20
+
+- Select the assignment's named or absolute local checkout independently of the
+  planning pane's cwd. Bare launch uses the agreed assignment for selection while
+  retaining earlier constraints in the owner's task; ambiguous targets prompt
+  once and unverifiable paths refuse before launch.
+- Fence writers per canonical working tree, including alternate paths and Herdr
+  spaces. When an exact live writer occupies a tree, an explicitly confirmed new
+  linked worktree uses its own branch and path without retrying uncertain effects.
+  Retained Git-common-directory claims remain checked against their original tree.
+- Add disposable Linux Pi/Herdr nested-checkout launch verification and isolated
+  linked-worktree/ownership tests. No live or native Windows/macOS runtime
+  acceptance, automatic session reload, or migration is implied by installation.
+
 ## [0.4.6] - 2026-11-20
 
 - Show readable role labels in newly delegated Herdr panes and the Agents

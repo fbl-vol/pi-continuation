@@ -85,7 +85,7 @@ arriving during startup withholds the next effect. No paused scope is silently
 activated. New workers retain ordinary identity, ownership, holds, continuation
 bounds, receipts, history and material notices. Assignment keys, exact-task claims
 and cooperating writer claims survive rejection/crash. Published v0.4.6 allows one
-delegated writer per Git common directory; current source narrows this to one per
+delegated writer per Git common directory; v0.5.0 narrows this to one per
 verified working tree as described below. An existing supervised worker in that
 tree blocks a new writer; read-only delegates cannot create writers. This coordinates
 cooperating agents, not an OS sandbox or a proof that arbitrary prose tasks are
@@ -178,7 +178,7 @@ fixes. No timer, synthetic completion or automatic selection inference is added.
 Only isolated fake-session tests cover this amendment; installation, live enrollment,
 release and cross-platform runtime acceptance are separate.
 
-### User-approved checkout selection amendment (source only; not in v0.4.6)
+### User-approved checkout selection amendment (since v0.5.0)
 
 The native `/start-implementation` launch uses the checkout identified by the agreed
 assignment, not the planner's current working directory. An unambiguous named or

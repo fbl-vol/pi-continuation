@@ -2,7 +2,7 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Current release: `v0.4.6`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.4.6); npm publication remains disabled (`private: true`). The coordinating-owner workflow has isolated test coverage, not live end-to-end acceptance. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**Current release: `v0.5.0`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.5.0); npm publication remains disabled (`private: true`). The coordinating-owner workflow has isolated test coverage, not live end-to-end acceptance. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,22 +14,22 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install v0.4.6
+## Install v0.5.0
 
 Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
 
 ```sh
-pi install git:github.com/fbl-vol/pi-continuation@v0.4.6
+pi install git:github.com/fbl-vol/pi-continuation@v0.5.0
 ```
 
 Installation changes that profile's Pi settings; restart or reload the intended Pi session afterward. To upgrade an existing pinned installation, run the same install command with the new tag; `pi update --extensions` alone does not advance a pinned tag. Other running sessions keep their loaded code until individually restarted or reloaded. A full restart resolved a stale menu after `/reload` in a controlled trial; restart the intended session if reloading does not pick up the update. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
 
-Before using v0.4.6 against shared continuation state, restart or reload the participating supervisor and Pi sessions on the same version. Older versions cannot read supervisor state written in the new schema. Installing the release does not retry or clear a held launch.
+Before using v0.5.0's checkout selection and per-tree writer claims, restart or reload the participating supervisor, owners and Pi sessions on the same version. Installation alone does not update running sessions or retry or clear a held launch. Older versions cannot read supervisor state written in the v0.4.6 schema; downgrading the package does not restore older state.
 
 To remove this package from the same profile:
 
 ```sh
-pi remove git:github.com/fbl-vol/pi-continuation@v0.4.6
+pi remove git:github.com/fbl-vol/pi-continuation@v0.5.0
 ```
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
@@ -130,10 +130,10 @@ supervisor**, the planning session need not enroll in continuation:
    implementation to a writer.
 
 The grant pins the displayed supervisor session, cwd, scope and role ceiling.
-Published v0.4.6 writer grants require Git on PATH and pin the checkout's Git common directory;
-subdirectories cannot acquire separate writer claims for that same checkout. Current
-source instead pins each canonical working tree (see below); it retains legacy
-claims until their original tree can be verified.
+Writer grants require Git on PATH and pin the canonical working tree;
+subdirectories cannot acquire separate writer claims for that tree. Prior versions
+used the Git common directory; v0.5.0 retains legacy claims until their original
+tree can be verified.
 The native scope grant is deliberate authorization, not automatic interpretation
 of brainstorming or a model-controlled activation flag. Normal startup must load
 this extension in the child profile/project; no installation/settings/SDK launcher
@@ -174,14 +174,15 @@ pending delivery does not block a new writer solely because its history is still
 registered. Live or uncertain ownership and retained writer claims still block.
 Genuine user decisions still pause the owner.
 
-**Current source only (not installed v0.4.6):** a named or absolute local checkout
+**Since v0.5.0:** a named or absolute local checkout
 in the agreed assignment can be selected independently of the planning pane's cwd.
 Ambiguous targets prompt once; the planner stays put while the owner and writer
 start in the selected tree. When an exact live writer already owns it, the native
 command can offer a confirmed new linked worktree, showing its base, branch and
 path before creating and launching there. Cancelling leaves no worktree or owner;
 uncertain prior creation or ownership still requires inspection, not retry. These
-source/isolated tests do not claim live, Windows or macOS runtime acceptance.
+source/isolated tests and disposable Linux nested-checkout launch do not claim live,
+Windows or macOS runtime acceptance.
 
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register
