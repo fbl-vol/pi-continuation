@@ -129,6 +129,16 @@ refusal identifies the original attempt when available. Inspect its retained
 record and live pane/session before any recovery; no timeout, rephrasing, or
 restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
 
+**Unreleased source (W005-D09):** If no supervisor currently owns the private
+state, the same explicit launch first starts one through ordinary Pi loading in
+a dedicated Herdr space, then verifies its exact native session and endpoint
+before creating an owner. A gracefully stopped supervisor can be replaced while
+retaining worker, route, notice and pause state; an unresolved lock or ambiguous
+native space/start effect remains held, never retried as another supervisor.
+This is not automatic enrollment on package installation and does not waive
+user decisions, independent pauses or review holds. The v0.5.0 release still
+requires a running supervisor before owner launch.
+
 ### Chat-based owner launch (since v0.4.2)
 
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the

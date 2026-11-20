@@ -163,10 +163,14 @@ bounded protections and recovery limits.
 
 ## Coordinating-owner workflow (since v0.4.0)
 
-With the intended global supervisor already running, agree on a plan in the
-unsupervised brainstorming session in the target Git checkout, then enter
-`/start-implementation`. Since v0.4.2, the bare command asks the configured
-model to identify the agreed plan in recent chat text; if it cannot identify one,
+Agree on a plan in the unsupervised brainstorming session in the target Git
+checkout, then enter `/start-implementation`. Current unreleased source can start
+a dedicated supervisor space during that invocation if none is running; an
+ordinary global pause on a running supervisor resumes without another prompt.
+A retained ambiguous supervisor startup or unresolved owner lock remains held
+for inspection rather than creating a second supervisor. Released v0.5.0 still
+requires the intended global supervisor to be running before this command.
+Since v0.4.2, the bare command asks the configured model to identify the agreed plan in recent chat text; if it cannot identify one,
 no pane is created. There is no separate skill step. You can still specify the
 scope with `/start-implementation <agreed assignment>` (required in v0.4.1).
 This one invocation authorizes

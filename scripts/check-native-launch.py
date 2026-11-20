@@ -113,7 +113,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
-        worktree_choice, paused_supervisor):
+        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -202,15 +202,24 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             for name, pane in [('smoke-supervisor', supervisor), ('smoke-planner', planner)]:
                 until(f'{name} shell available', lambda: shell_alone(pane))
                 cli('agent', 'start', name, '--kind', 'pi', '--pane', pane)
-            cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
+            if not no_supervisor:
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
             def visible(pane):
                 return subprocess.check_output([herdr, 'pane', 'read', pane, '--source', 'visible'],
                                                cwd=work, env=env, text=True, timeout=8)
-            until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
-            cli('agent', 'send-keys', supervisor, 'enter')
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
-            until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if no_supervisor:
+                assert not state_path.exists()
+            else:
+                until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            previous_supervisor = None
+            if restart_supervisor:
+                previous_supervisor = json.loads(state_path.read_text())['ownerToken']
+                cli('agent', 'send-keys', supervisor, 'ctrl+d')
+                until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
             if paused_supervisor:
                 cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
                 until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
@@ -268,6 +277,17 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             if paused_supervisor:
                 assert not json.loads(state_path.read_text())['paused']
                 print('Native supervisor resume passed: one owner command, no second confirmation', flush=True)
+            if no_supervisor or restart_supervisor:
+                starts = list(state_dir.glob('supervisor-start-????????-????-????-????-????????????.json'))
+                assert len(starts) == 1 and json.loads(starts[0].read_text())['status'] == 'ready'
+                started = json.loads(starts[0].read_text())
+                assert started['pane']['workspace_id'] != cli('agent', 'get', planner)['agent']['workspace_id']
+                assert not (state_dir/'supervisor-start-pending.json').exists()
+                if previous_supervisor:
+                    assert json.loads(state_path.read_text())['ownerToken'] != previous_supervisor
+                panes.append(started['pane']['pane_id'])
+                scenario = 'retained-state restart' if previous_supervisor else 'fresh bootstrap'
+                print(f'Native supervisor {scenario} passed: dedicated space, one owner command', flush=True)
             if preflight_recovery:
                 assert attempt['id'] == refused['id']
                 assert len(list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))) == 1
@@ -431,6 +451,8 @@ if __name__ == '__main__':
     parser.add_argument('--new-space', action='store_true', help='launch owner and writer in a new isolated Herdr space')
     parser.add_argument('--worktree-choice', action='store_true', help='inspect and cancel the occupied-checkout selector')
     parser.add_argument('--paused-supervisor', action='store_true', help='resume ordinary global pause in owner launch')
+    parser.add_argument('--no-supervisor', action='store_true', help='bootstrap a new supervisor in the same invocation')
+    parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -443,6 +465,6 @@ if __name__ == '__main__':
         try:
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
-                args.worktree_choice, args.paused_supervisor)
+                args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor)
         finally:
             model.shutdown()

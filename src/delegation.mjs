@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
 import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
-import { isId, readObservation, readSupervisor } from './contracts.mjs';
+import { isId, newSupervisor, readObservation, readSupervisor } from './contracts.mjs';
 import { currentSession } from './session.mjs';
 import { agreedLaunchScope } from './checkpoint.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
@@ -790,6 +790,74 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     sessionFile: spawn.child.sessionFile, status: spawn.status };
 }
 
+async function startSupervisor(root, socketPath, ctx, parent, scope, allowed) {
+  await ensureRoot(root);
+  const id = randomUUID();
+  const pendingPath = join(root, 'supervisor-start-pending.json');
+  const path = join(root, `supervisor-start-${id}.json`);
+  if (!allowed() || !sameSession(currentSession(ctx), parent))
+    refuse('Planning session changed before supervisor creation');
+  try { await claim(pendingPath, { token: id, parent: parent.sessionId, scope }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const pending = await readJson(pendingPath);
+    refuse(`Supervisor startup ${pending.token} is unresolved; inspect before creating another space`);
+  }
+  const intent = { id, parent, scope, cwd: await realpath(ctx.cwd), status: 'workspace-requested' };
+  await claim(path, intent);
+  try {
+    if (!allowed() || !sameSession(currentSession(ctx), parent))
+      refuse('Planning session changed before supervisor creation');
+    const created = await request(socketPath, 'workspace.create', { cwd: intent.cwd,
+      label: 'Continuation Supervisor', focus: false,
+      env: { PI_CONTINUATION_SUPERVISOR_START: id, PI_CONTINUATION_ROOT: root } });
+    const pane = created.root_pane;
+    if (created.type !== 'workspace_created' || !pane?.pane_id || !pane.terminal_id ||
+        pane.workspace_id !== created.workspace?.workspace_id || pane.workspace_id === parent.workspaceId)
+      refuse('Supervisor space creation identity uncertain');
+    await atomicJson(path, { ...intent, status: 'start-requested', pane });
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      const deadline = performance.now() + 10000;
+      while (true) {
+        const result = await request(socketPath, 'pane.process_info', { pane_id: pane.pane_id });
+        const info = result.process_info;
+        if (result.type !== 'pane_process_info' || info?.pane_id !== pane.pane_id)
+          refuse('Supervisor shell readiness unavailable');
+        if (info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid &&
+            info.foreground_processes?.length === 1 && info.foreground_processes[0].pid === info.shell_pid) break;
+        if (performance.now() >= deadline) refuse('Supervisor shell did not become ready');
+        await delay(150);
+      }
+    }
+    const name = `pcs-${BigInt(`0x${id.replaceAll('-', '')}`).toString(36)}`;
+    const started = await request(socketPath, 'agent.start', { name, kind: 'pi',
+      pane_id: pane.pane_id, args: [], timeout_ms: 30000 }, { timeoutMs: 35000 });
+    if (started.type !== 'agent_started') refuse('Supervisor Pi startup was not acknowledged');
+    const deadline = performance.now() + 30000;
+    while (performance.now() < deadline) {
+      const attempt = await readJson(path);
+      if (attempt.status === 'held') refuse(attempt.failure);
+      if (attempt.status === 'ready') {
+        const state = await readSupervisor(root);
+        const live = await snapshot(socketPath);
+        const binding = { paneId: pane.pane_id, terminalId: pane.terminal_id,
+          workspaceId: pane.workspace_id, tabId: pane.tab_id, cwd: intent.cwd,
+          sessionKind: 'path', sessionValue: attempt.sessionFile };
+        if (state.supervisorSession === attempt.sessionId && state.acceptStarts && !state.paused &&
+            sameOccupant(live.agents.find(agent => agent.pane_id === pane.pane_id), binding) &&
+            await ownerAlive(root, state.ownerToken)) {
+          await release(pendingPath, id);
+          return state;
+        }
+      }
+      await delay(150);
+    }
+    refuse('Supervisor identity or readiness could not be verified');
+  } catch (error) {
+    throw new Error(`Supervisor startup ${id} held for inspection (${error.message}); do not retry under another scope`);
+  }
+}
+
 export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN, registerOwner } = {}) {
   let closeBootstrap;
@@ -811,14 +879,28 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
       currentSession(ctx).leaf === session.leaf;
     const cwd = await realpath(ctx.cwd);
-    let state = await readSupervisor(root);
-    if (!state.ownerToken || !await ownerAlive(root, state.ownerToken))
-      refuse('Supervisor ownership unavailable; no owner or worktree launched');
+    let state;
+    try { state = await readSupervisor(root); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; state = newSupervisor(); }
+    let ownerLive = !!state.ownerToken && await ownerAlive(root, state.ownerToken);
+    if (!ownerLive) {
+      let lock;
+      try { lock = await readJson(join(root, 'supervisor.lock')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (lock) refuse('Retained supervisor lock needs exact ownership reconciliation before replacement');
+    }
     if (state.paused && (state.failure ||
         (state.acceptStarts && state.reason !== 'Explicit global pause') ||
         (!state.acceptStarts && state.reason && state.reason !== 'Explicit global pause')))
       refuse('Supervisor fault or unknown pause requires inspection before launch');
     const activateForLaunch = async () => {
+      if (!ownerLive) {
+        state = await startSupervisor(root, socketPath, ctx, grant.parent, scope, allowed);
+        ownerLive = true;
+        grant.ownerToken = state.ownerToken;
+        grant.supervisorSession = state.supervisorSession;
+        return;
+      }
       if (!state.paused && state.acceptStarts) return;
       const activation = await sendAction(root, { type: 'launch-activate', ownerToken: state.ownerToken },
         'supervisor');

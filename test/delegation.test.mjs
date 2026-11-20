@@ -52,6 +52,11 @@ async function fixture(t, options = {}) {
     if (method === 'session.snapshot' && options.historicalPanes)
       return { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents,
         panes: [...f.agents, ...options.historicalPanes] } };
+    if (method === 'workspace.create' && params.label === 'Continuation Supervisor') {
+      effects.push('supervisor-workspace');
+      if (options.supervisorWorkspaceLost) throw new Error('lost supervisor workspace response');
+      assert.fail('This fixture only exercises a lost supervisor workspace response');
+    }
     if (method === 'workspace.create') {
       effects.push('workspace');
       const pane = { pane_id: 'w-new:p1', terminal_id: 'terminal-w-new:p1',
@@ -507,6 +512,37 @@ test('P1/P7 an exact authorized worktree skips the selector and second confirmat
   } finally {
     if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
   }
+});
+
+test('P1/P4 a lost supervisor space response remains held and does not create another space', async t => {
+  const f = await fixture(t, { supervisorWorkspaceLost: true });
+  await f.supervisor.emit('session_shutdown');
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor startup .* held for inspection/);
+  const pending = await readJson(join(f.root, 'supervisor-start-pending.json'));
+  assert.ok(pending.token);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor startup .* is unresolved/);
+  assert.deepEqual(f.effects, ['supervisor-workspace']);
+});
+
+test('P1/P4 an existing supervisor lock still prevents startup if its state is missing', async t => {
+  const f = await fixture(t);
+  await rm(join(f.root, 'supervisor.json'));
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Retained supervisor lock/);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P4 an unresolved retained supervisor lock prevents a competing owner', async t => {
+  const f = await fixture(t);
+  const state = await f.state();
+  await f.supervisor.emit('session_shutdown');
+  await writeFile(join(f.root, 'supervisor.lock'), JSON.stringify({ token: state.ownerToken,
+    sessionId: state.supervisorSession }) + '\n');
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Retained supervisor lock/);
+  assert.deepEqual(f.effects, []);
 });
 
 test('P1/P4 one start resumes an ordinarily paused supervisor without a second confirmation', async t => {
