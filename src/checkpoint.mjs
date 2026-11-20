@@ -55,7 +55,7 @@ export async function agreedLaunchScope(ctx, signal) {
   const priorTurns = [...new Set(constraints.map(item => item.turn))].sort((a, b) => a - b);
   const scope = priorTurns.length ? `${agreedPlan}\n\nEarlier user constraints and checks (apply only to this agreed plan; do not expand its scope):\n${
     priorTurns.map(index => turns[index].text).join('\n\n')}` : agreedPlan;
-  if (Buffer.byteLength(scope) <= 8000) return scope;
+  if (Buffer.byteLength(scope) <= 8000) return { scope, assignment: agreedPlan };
 }
 
 /** Native projection owns compaction, context edits and the current branch.

@@ -32,7 +32,7 @@ class Model(BaseHTTPRequestHandler):
         writer = WRITER_TASK in json.dumps(messages[-1])
         last = messages[-1]
         tool = None
-        if last['role'] == 'user' and TASK in json.dumps(last):
+        if last['role'] == 'user' and self.server.task in json.dumps(last):
             tool = ('continuation_spawn', dict(key='native-writer', task=WRITER_TASK, role='writer'))
         elif last['role'] == 'tool' and last.get('tool_call_id') == 'fixture-continuation_spawn':
             try:
@@ -110,7 +110,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
                 os.waitpid(pid, 0)
 
 
-def run(root, model, package, baseline, evidence):
+def run(root, model, package, baseline, evidence, nested):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -136,6 +136,11 @@ def run(root, model, package, baseline, evidence):
         if version.split()[-1] != expected:
             raise RuntimeError(f'Expected {expected} for {binary}; got {version}')
     subprocess.run(['git', 'init', '-q'], cwd=work, env=env, check=True)
+    target = work/'risk-analytics' if nested else work
+    if nested:
+        target.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=target, env=env, check=True)
+    model.task = TASK + (' in risk-analytics.' if nested else '')
     (profile/'settings.json').write_text(json.dumps(dict(packages=[str(package)], defaultProvider='fixture',
                                                        defaultModel='fixture', defaultThinkingLevel='off')))
     (profile/'models.json').write_text(json.dumps({'providers': {'fixture': {
@@ -200,7 +205,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
-            cli('agent', 'prompt', planner, f'/start-implementation {TASK}')
+            cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
 
             def dispatched(role):
                 for f in state_dir.glob('spawn-????????-????-????-????-????????????.json'):
@@ -218,6 +223,8 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             assert list(state['workers']) == [attempt['workerId']], state['workers']
             owner = state['workers'][attempt['workerId']]
             assert owner['role'] == 'owner' and owner['paneId'] == attempt['paneId']
+            assert owner['cwd'] == str(target) and attempt['child']['cwd'] == str(target), owner
+            assert cli('agent', 'get', planner)['agent']['cwd'] == str(work)
             assert owner['sessionId'] == attempt['child']['sessionId'] and not owner['paused'], owner
             receipt = json.loads((state_dir/f"spawn-receipt-{attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -227,6 +234,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             panes.append(writer)
             writer_binding = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
             assert writer_binding['paneId'] == writer and writer_binding['sessionId'] == writer_attempt['child']['sessionId']
+            assert writer_binding['cwd'] == str(target) and writer_attempt['child']['cwd'] == str(target)
             assert writer_binding['recipient']['sessionId'] == owner['sessionId'] and not writer_binding['paused']
             receipt = json.loads((state_dir/f"spawn-receipt-{writer_attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -239,7 +247,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 'kind': 'child', 'children': [writer_attempt['workerId']]}, settled_owner
             turns = [json.loads(line) for line in Path(owner['sessionFile']).read_text().splitlines()]
             users = [turn for turn in turns if turn.get('message', {}).get('role') == 'user']
-            assert len(users) == 1 and TASK in json.dumps(users[0]), users
+            assert len(users) == 1 and model.task in json.dumps(users[0]), users
             def displayed(pane, activity, role):
                 agent = cli('agent', 'get', pane)['agent']
                 info = cli('pane', 'get', pane)['pane']
@@ -307,6 +315,7 @@ if __name__ == '__main__':
     parser.add_argument('--package', type=Path, default=REPO, help='source package to load in disposable Pi')
     parser.add_argument('--baseline', action='store_true', help='expect no delegated display labels')
     parser.add_argument('--evidence', type=Path, help='directory for disposable native sidebar captures')
+    parser.add_argument('--nested', action='store_true', help='launch owner and writer in a nested checkout')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -316,6 +325,6 @@ if __name__ == '__main__':
         model.allow_writer = threading.Event()
         threading.Thread(target=model.serve_forever, daemon=True).start()
         try:
-            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence)
+            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence, args.nested)
         finally:
             model.shutdown()
