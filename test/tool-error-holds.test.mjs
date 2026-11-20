@@ -163,7 +163,12 @@ test('P3/P4 an explicit worker pause after a checkpoint failure survives a succe
   await f.worker.emit('session_start', { reason: 'reload' });
   assert.equal((await f.observation()).hold, false, 'The exact checkpoint is durable again');
   assert.equal((await f.state()).workers[f.workerId()].paused, true);
-  assert.equal((await f.state()).workers[f.workerId()].reason, 'Explicit worker pause');
+  const state = await f.state();
+  assert.equal(state.workers[f.workerId()].reason, 'Explicit worker pause');
+  const observation = await f.observation();
+  assert.equal(workerStatus(state, { ...state.workers[f.workerId()],
+    failure: { operation: 'read checkpoint' } }, f.agents[0], observation).label, 'Paused',
+    'A retained supervisor checkpoint diagnostic cannot override a healthy report and explicit pause');
   assert.equal(await status(f), 'Paused');
   assert.equal(f.worker.messages.length, 0);
 });

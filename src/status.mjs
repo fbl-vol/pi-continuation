@@ -14,7 +14,8 @@ export function workerStatus(state, binding, agent, observation) {
   if (binding.paused && disposition?.action === 'decision' && disposition.stop === observation.stop)
     return status('Held: decision', 'held');
   if (agent.agent_status === 'blocked') return status('Held: prompt', 'held');
-  if (observation.hold || (binding.paused && binding.failure)) {
+  if (observation.hold || (binding.paused && binding.failure &&
+      binding.reason !== 'Explicit worker pause')) {
     if (observation.hold && observation.holdError?.kind === 'run') return status('Held: run failed', 'held');
     if (observation.hold && observation.holdError?.kind === 'checkpoint') return status('Held: checkpoint', 'held');
     if (binding.failure) return status('Held: error', 'held');
