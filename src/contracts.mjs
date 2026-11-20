@@ -42,17 +42,17 @@ export const isId = value => typeof value === 'string' && /^[a-f0-9-]{36}$/.test
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const invalid = () => { throw Object.assign(new Error('Invalid continuation record'), { code: 'INVALID_RECORD' }); };
 
-function format(record) {
+function format(record, supervisor = false) {
   if (!object(record)) invalid();
   if (record.schemaVersion === undefined) return 0; // Original unversioned format.
-  if (record.schemaVersion !== SCHEMA_VERSION)
+  if (record.schemaVersion !== SCHEMA_VERSION && !(supervisor && record.schemaVersion === 2))
     throw Object.assign(new Error('Unsupported continuation record version'), { code: 'UNSUPPORTED_FORMAT' });
-  return SCHEMA_VERSION;
+  return record.schemaVersion;
 }
 
 /** Normalize known legacy records without mutating the caller's retained snapshot. */
 export function decodeSupervisor(record) {
-  const version = format(record);
+  const version = format(record, true);
   const state = structuredClone(record);
   if (typeof state.paused !== 'boolean' || !object(state.routes) || !object(state.workers)) invalid();
   if (state.acceptStarts !== undefined && typeof state.acceptStarts !== 'boolean') invalid();
@@ -130,9 +130,14 @@ export function decodeSupervisor(record) {
         (notice.recipient !== undefined && (!object(notice.recipient) || !isId(notice.recipient.id) ||
           notice.recipient.role !== 'owner' || !isId(notice.recipient.sessionId))) ||
         !['completion', 'blocker', 'decision'].includes(notice.kind) ||
-        !['pending', 'sending', 'sent', 'stale', 'uncertain', 'resolved'].includes(notice.status)) invalid();
+        !['pending', 'sending', 'sent', 'stale', 'uncertain', 'resolved', 'archived'].includes(notice.status)) invalid();
+    if (notice.unsentRecipient !== undefined && (version !== 2 || notice.kind !== 'blocker' ||
+        notice.status !== 'pending' || !object(notice.unsentRecipient) || !isId(notice.unsentRecipient.id))) invalid();
+    if (notice.status === 'archived' && (version !== 2 || notice.kind !== 'blocker' || !object(notice.archive) ||
+        notice.archive.reason !== 'orphaned-before-send' || !Number.isFinite(Date.parse(notice.archive.at)) ||
+        !object(notice.archive.recipient) || !isId(notice.archive.recipient.id) || !isId(notice.archive.launchId))) invalid();
   }
-  state.schemaVersion = SCHEMA_VERSION;
+  state.schemaVersion = version || SCHEMA_VERSION;
   return state;
 }
 

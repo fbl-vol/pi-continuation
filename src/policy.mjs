@@ -58,6 +58,13 @@ export function addNotice(state, notice) {
   if (existing) return existing;
   const saved = { ...notice, ...(state.workers[notice.workerId]?.recipient ?
     { recipient: state.workers[notice.workerId].recipient } : {}), status: 'pending' };
+  const recipient = recipientFor(state, notice.workerId);
+  if (saved.kind === 'blocker' && recipient) {
+    // Older owners could defer a send without consuming this proof. Refuse
+    // rollback against the upgraded supervisor snapshot instead.
+    state.schemaVersion = 2;
+    saved.unsentRecipient = structuredClone(recipient);
+  }
   state.notices[notice.id] = saved;
   return saved;
 }

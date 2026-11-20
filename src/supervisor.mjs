@@ -4,12 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { ensureRoot, defaultRoot, readJson, atomicJson, claim, release } from './store.mjs';
-import { sameOccupant, snapshot, isSettled } from './herdr.mjs';
+import { sameOccupant, snapshot, isSettled, request as herdrRequest } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
-import { spawnPath } from './delegation.mjs';
+import { archiveLaunchNotices, spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -250,6 +250,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           continue;
         }
       }
+      delete notice.unsentRecipient;
       notice.status = 'sending';
       await commit();
       try {
@@ -488,6 +489,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  const acceptLaunchArchive = request => queue(async () => {
+    const version = inputVersion;
+    const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
+      version === inputVersion && state.acceptStarts && request.ownerToken === state.ownerToken;
+    if (!uuid(request.id) || !stillCurrent()) return { accepted: false, message: 'Supervisor unavailable for notice disposition' };
+    try {
+      const archived = await archiveLaunchNotices(root, request, state,
+        id => herdrRequest(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), stillCurrent, commit);
+      return { accepted: true, id: request.id, archived };
+    } catch (error) {
+      // Expected/refused archival is not a global continuation failure.
+      return { accepted: false, message: error.code ? 'Historical notice evidence unavailable; inspect supervisor status' : error.message };
+    }
+  });
+
   const command = async (args, ctx) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
@@ -525,7 +541,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         try {
           closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : acceptWorkerStart(request, ctx));
+              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
