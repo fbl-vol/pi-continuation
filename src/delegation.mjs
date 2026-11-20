@@ -806,10 +806,15 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
       currentSession(ctx).leaf === session.leaf;
     const cwd = await realpath(ctx.cwd);
-    const state = await readSupervisor(root);
+    let state = await readSupervisor(root);
+    if (!state.ownerToken || !await ownerAlive(root, state.ownerToken))
+      refuse('Supervisor ownership unavailable; no owner or worktree launched');
+    if (state.paused && (state.failure ||
+        (state.acceptStarts && state.reason !== 'Explicit global pause') ||
+        (!state.acceptStarts && state.reason && state.reason !== 'Explicit global pause')))
+      refuse('Supervisor fault or unknown pause requires inspection before launch');
     const grant = { id: randomUUID(), cwd, originCwd: cwd, role: 'writer', ownerLaunch: true,
       ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
-    await delegationOwner(root, grant);
     const live = await snapshot(socketPath);
     grant.parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent) || state.supervisorSession === session.id ||
@@ -846,6 +851,14 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     grant.checkout = await checkoutIdentity(grant.cwd);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
       refuse('Planning session changed while choosing checkout; no owner launched');
+    if (state.paused || !state.acceptStarts) {
+      const activation = await sendAction(root, { type: 'launch-activate', ownerToken: state.ownerToken },
+        'supervisor');
+      if (!activation.accepted || activation.ownerToken !== state.ownerToken)
+        refuse(activation.message ?? 'Supervisor could not resume for this implementation');
+      state = await readSupervisor(root);
+    }
+    await delegationOwner(root, grant);
     const scopePath = join(root, `owner-launch-${digest(`${grant.checkout}\n${scope}`)}.json`);
     try {
       await claim(scopePath, { grantId: grant.id });

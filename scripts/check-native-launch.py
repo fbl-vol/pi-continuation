@@ -113,7 +113,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
-        worktree_choice):
+        worktree_choice, paused_supervisor):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -211,6 +211,11 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if paused_supervisor:
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('global pause persisted', lambda: json.loads(state_path.read_text())['paused'])
             placement = '--new-space -- ' if new_space else ''
             if worktree_choice:
                 occupied = cli('pane', 'split', planner, '--direction', 'right', '--cwd', str(target))['pane']['pane_id']
@@ -260,6 +265,9 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     if attempt['status'] == 'dispatched':
                         return attempt
             attempt = until('owner assignment dispatched', lambda: dispatched('owner'), 50)
+            if paused_supervisor:
+                assert not json.loads(state_path.read_text())['paused']
+                print('Native supervisor resume passed: one owner command, no second confirmation', flush=True)
             if preflight_recovery:
                 assert attempt['id'] == refused['id']
                 assert len(list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))) == 1
@@ -422,6 +430,7 @@ if __name__ == '__main__':
     parser.add_argument('--preflight-recovery', action='store_true', help='correct a proved pre-split refusal after reload')
     parser.add_argument('--new-space', action='store_true', help='launch owner and writer in a new isolated Herdr space')
     parser.add_argument('--worktree-choice', action='store_true', help='inspect and cancel the occupied-checkout selector')
+    parser.add_argument('--paused-supervisor', action='store_true', help='resume ordinary global pause in owner launch')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -434,6 +443,6 @@ if __name__ == '__main__':
         try:
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
-                args.worktree_choice)
+                args.worktree_choice, args.paused_supervisor)
         finally:
             model.shutdown()

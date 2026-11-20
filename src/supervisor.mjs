@@ -527,6 +527,23 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  const acceptLaunchActivate = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || request.ownerToken !== state.ownerToken)
+      return { accepted: false, message: 'Supervisor ownership unavailable' };
+    if (state.paused && (state.failure || persistenceFailed ||
+        (state.acceptStarts && state.reason !== 'Explicit global pause') ||
+        (!state.acceptStarts && state.reason && state.reason !== 'Explicit global pause')))
+      return { accepted: false, message: 'Supervisor fault or unknown pause requires inspection before activation' };
+    if (!state.acceptStarts || state.paused) {
+      state.acceptStarts = true;
+      setScopePaused(state, 'global', undefined, false);
+      await commit();
+      lastSnapshot = await snapshot(socketPath);
+      await wake(ctx);
+    }
+    return { accepted: true, ownerToken: state.ownerToken };
+  });
+
   const acceptLaunchArchive = request => queue(async () => {
     const version = inputVersion;
     const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
@@ -578,7 +595,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
           closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
-            acceptManagement(request, ctx) : request?.type === 'owner-wait' ?
+            acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
+              acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
               acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
               request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
@@ -919,6 +937,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!active()) return;
     if (event.aborted) {
       state.paused = true;
+      state.reason = 'Supervisor turn aborted; inspect before activation';
       attentionTurn = [];
       return queue(() => commit());
     }

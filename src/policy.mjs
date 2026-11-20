@@ -101,6 +101,10 @@ export function setScopePaused(state, kind, id, paused) {
         ['pause', 'blocker', 'decision'].includes(disposition.action)) delete state.handled[id];
   }
   if (paused && kind === 'worker') target.reason = 'Explicit worker pause';
+  if (kind === 'global') {
+    if (paused && !target.reason && !target.failure) target.reason = 'Explicit global pause';
+    if (!paused && target.reason === 'Explicit global pause') delete target.reason;
+  }
   target.paused = paused;
 }
 

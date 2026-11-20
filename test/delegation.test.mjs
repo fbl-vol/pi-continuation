@@ -476,6 +476,59 @@ test('P1/P7 an exact authorized worktree skips the selector and second confirmat
   }
 });
 
+test('P1/P4 one start resumes an ordinarily paused supervisor without a second confirmation', async t => {
+  const f = await fixture(t);
+  const other = join(f.root, 'other');
+  await mkdir(other);
+  execFileSync('git', ['init', '--quiet', other]);
+  const existing = f.native('w:p2');
+  existing.ctx.cwd = other;
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'independent-terminal',
+    workspace_id: 'other', tab_id: 'other:t1', cwd: other, foreground_cwd: other,
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  const workerId = existing.entries.find(e => e.customType === 'pi-continuation-worker').data.workerId;
+  await f.supervisorCommand(`pause worker ${workerId}`);
+  await f.supervisorCommand('pause route other');
+  await f.supervisorCommand('pause global');
+  assert.equal((await f.state()).paused, true);
+  const beforeConfirmations = f.supervisor.confirmations.length;
+  await f.worker.command('start-implementation', 'Implement W123-D04.');
+  const state = await f.state();
+  assert.equal(state.paused, false);
+  assert.equal(state.acceptStarts, true);
+  assert.equal(state.workers[workerId].paused, true);
+  assert.equal(state.routes.other.paused, true);
+  assert.equal(f.supervisor.confirmations.length, beforeConfirmations);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P4 an aborted supervisor turn is not treated as an ordinary launch pause', async t => {
+  const f = await fixture(t);
+  await f.supervisor.emit('agent_settled', { aborted: true });
+  assert.match((await f.state()).reason, /Supervisor turn aborted/);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor fault or unknown pause/);
+  assert.equal((await f.state()).paused, true);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P4 cancelling checkout selection does not resume a paused supervisor', async t => {
+  const f = await fixture(t);
+  for (const name of ['alpha', 'beta']) {
+    const path = join(f.root, name);
+    await mkdir(path);
+    execFileSync('git', ['init', '--quiet', path]);
+  }
+  await f.supervisorCommand('pause global');
+  f.worker.select(() => undefined);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement alpha and beta.'),
+    /Checkout selection cancelled/);
+  assert.equal((await f.state()).paused, true);
+  assert.deepEqual(f.effects, []);
+});
+
 test('P1/P7 an explicit new space starts the owner and writer there without moving the planner', async t => {
   const f = await fixture(t);
   f.worker.select(() => assert.fail('Explicit space placement must not prompt'));
@@ -814,10 +867,8 @@ test('P1/P7 a proved pre-split refusal resumes the same scope/key after correcti
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
   const f = await fixture(t, { splitLost: true });
   await f.supervisorCommand('pause global');
-  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /Global continuation is paused/);
-  assert.deepEqual(f.effects, []);
-  await f.supervisorCommand('activate global');
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /held for inspection.*disconnected before response/);
+  assert.equal((await f.state()).paused, false);
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /no proved pre-effect refusal/);
   const attempt = await f.attempt();
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope.'), error =>
