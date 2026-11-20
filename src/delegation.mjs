@@ -397,8 +397,9 @@ async function historicalWorkerBlocker(root, worker, state, live, readPane, read
     const observed = await readObservation(root, id).catch(error => {
       if (error.code !== 'ENOENT') throw error;
     });
-    if (observed && (!sameSession(observed.session, worker) || observed.bootstrapPending || observed.outcome === 'approval'))
-      return 'unverified observation, unresolved startup, or approval';
+    if (observed && !sameSession(observed.session, worker)) return 'observation mismatch';
+    if (observed?.bootstrapPending) return 'unfinished startup';
+    if (observed?.outcome === 'approval') return 'saved approval remains unanswered';
     if (!await absentSession(worker, live, readPane, readSnapshot)) return 'exact session live or absence unverified';
   } catch { return 'historical binding evidence unavailable'; }
   for (const notice of notices) pending.set(notice.id, notice);

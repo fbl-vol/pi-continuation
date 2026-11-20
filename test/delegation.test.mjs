@@ -811,10 +811,11 @@ test('P1 bare launch preserves earlier user constraints without reintroducing ol
 });
 
 for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane exists', 'session moved',
-  'live exact session', 'unresolved', 'decision', 'pending notices']) {
+  'live exact session', 'unresolved', 'decision', 'pending notices', 'saved approval', 'observation mismatch', 'unfinished startup']) {
   test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
     const f = await fixture(t, {
-      closedPanes: ['closed', 'session moved', 'unresolved', 'decision', 'pending notices'].includes(condition) ? ['w:old'] : [],
+      closedPanes: ['closed', 'session moved', 'unresolved', 'decision', 'pending notices', 'saved approval',
+        'observation mismatch', 'unfinished startup'].includes(condition) ? ['w:old'] : [],
       historicalPanes: condition === 'pane exists' ? [{ pane_id: 'w:old' }] : [],
       historicalPanePatch: condition === 'conflicting replacement' ? { terminal_id: 'changed-terminal' } : {},
     });
@@ -829,6 +830,12 @@ for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane 
     await atomicJson(join(f.root, `worker-${id}.json`), old);
     if (condition === 'unresolved') state.inflight[id] = { id, stop: id };
     if (condition === 'decision') state.dispositions[id] = { stop: id, action: 'decision' };
+    if (['saved approval', 'observation mismatch', 'unfinished startup'].includes(condition))
+      await atomicJson(join(f.root, `observation-${id}.json`), {
+        session: { id: condition === 'observation mismatch' ? 'other-session' : old.sessionId, file: old.sessionFile },
+        stop: id, outcome: condition === 'saved approval' ? 'approval' : 'completed',
+        bootstrapPending: condition === 'unfinished startup', hold: condition === 'saved approval',
+      });
     const noticeIds = ['11111111-1111-4111-8111-111111111112', '11111111-1111-4111-8111-111111111113'];
     if (condition === 'pending notices') {
       state.routes.w = { paused: false, coordinator: null };
@@ -855,7 +862,10 @@ for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane 
     } else {
       await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), ({ message }) =>
         message.includes('no agent started') && message.includes(`supervised worker ${id}`) &&
-        (condition !== 'pending notices' || noticeIds.every(noticeId => message.includes(noticeId))));
+        (condition !== 'pending notices' || noticeIds.every(noticeId => message.includes(noticeId))) &&
+        (condition !== 'saved approval' || message.includes('saved approval')) &&
+        (condition !== 'observation mismatch' || message.includes('observation mismatch')) &&
+        (condition !== 'unfinished startup' || message.includes('unfinished startup')));
       assert.deepEqual(f.effects, []);
     }
   });
