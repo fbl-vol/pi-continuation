@@ -112,7 +112,8 @@ def capture_sidebar(herdr, work, env, resize, evidence):
                 os.waitpid(pid, 0)
 
 
-def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery):
+def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
+        worktree_choice):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -142,6 +143,9 @@ def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, p
     if nested:
         target.mkdir()
         subprocess.run(['git', 'init', '-q'], cwd=target, env=env, check=True)
+    if worktree_choice:
+        subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                        'commit', '-q', '--allow-empty', '-m', 'Native fixture base'], cwd=target, env=env, check=True)
     model.task = TASK + (' in risk-analytics.' if nested else '')
     (profile/'settings.json').write_text(json.dumps(dict(packages=[str(package)], defaultProvider='fixture',
                                                        defaultModel='fixture', defaultThinkingLevel='off')))
@@ -207,10 +211,31 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            placement = '--new-space -- ' if new_space else ''
+            if worktree_choice:
+                occupied = cli('pane', 'split', planner, '--direction', 'right', '--cwd', str(target))['pane']['pane_id']
+                panes.append(occupied)
+                until('occupied checkout shell', lambda: shell_alone(occupied))
+                cli('agent', 'start', 'smoke-existing', '--kind', 'pi', '--pane', occupied)
+                cli('agent', 'prompt', occupied, '/continuation-worker start')
+                until('independent worker confirmation', lambda: 'Start worker supervision?' in visible(occupied))
+                cli('agent', 'send-keys', occupied, 'enter')
+                until('independent live writer', lambda: len(json.loads(state_path.read_text())['workers']) == 1)
+                cli('agent', 'prompt', planner, f'/start-implementation Implement W123-D05 in {target}.')
+                screen = until('one exact worktree selection', lambda: visible(planner) if
+                    'Create in current space' in visible(planner) else None)
+                assert 'Repository:' in screen and 'Base:' in screen and 'Branch:' in screen and 'Path:' in screen
+                assert 'Create in new space' in screen and 'Cancel' in screen
+                cli('agent', 'send-keys', planner, 'esc')
+                until('cancelled worktree choice', lambda: 'Worktree choice cancelled' in visible(planner))
+                assert len(json.loads(state_path.read_text())['workers']) == 1
+                assert not list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))
+                print('Native worktree choice passed: one exact selector and no effects on cancel', flush=True)
+                return
             if preflight_recovery:
                 claim_path = state_dir/f'delegation-writer-{hashlib.sha256(str(target).encode()).hexdigest()}.json'
                 claim_path.write_text(json.dumps({'id': '11111111-1111-4111-8111-111111111111'}))
-                cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
+                cli('agent', 'prompt', planner, f'/start-implementation {placement}{model.task}')
                 def refused_attempt():
                     attempts = list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))
                     if not attempts: return None
@@ -223,7 +248,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 cli('agent', 'prompt', planner, '/reload')
                 until('planner reload completed', lambda: 'Reloaded keybindings' in visible(planner))
                 until('planner idle after reload', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
-            cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
+            cli('agent', 'prompt', planner, f'/start-implementation {placement}{model.task}')
 
             def dispatched(role):
                 for f in state_dir.glob('spawn-????????-????-????-????-????????????.json'):
@@ -246,7 +271,14 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             owner = state['workers'][attempt['workerId']]
             assert owner['role'] == 'owner' and owner['paneId'] == attempt['paneId']
             assert owner['cwd'] == str(target) and attempt['child']['cwd'] == str(target), owner
-            assert cli('agent', 'get', planner)['agent']['cwd'] == str(work)
+            planner_info = cli('agent', 'get', planner)['agent']
+            assert planner_info['cwd'] == str(work)
+            if new_space:
+                assert attempt['child']['workspaceId'] != planner_info['workspace_id']
+                assert attempt['child']['workspaceId'] == owner['workspaceId']
+                print('Native new-space owner passed: planner unchanged and target checkout preserved', flush=True)
+            else:
+                assert attempt['child']['workspaceId'] == planner_info['workspace_id']
             assert owner['sessionId'] == attempt['child']['sessionId'] and not owner['paused'], owner
             receipt = json.loads((state_dir/f"spawn-receipt-{attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -257,6 +289,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             writer_binding = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
             assert writer_binding['paneId'] == writer and writer_binding['sessionId'] == writer_attempt['child']['sessionId']
             assert writer_binding['cwd'] == str(target) and writer_attempt['child']['cwd'] == str(target)
+            assert writer_binding['workspaceId'] == owner['workspaceId']
             assert writer_binding['recipient']['sessionId'] == owner['sessionId'] and not writer_binding['paused']
             receipt = json.loads((state_dir/f"spawn-receipt-{writer_attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -387,6 +420,8 @@ if __name__ == '__main__':
     parser.add_argument('--nested', action='store_true', help='launch owner and writer in a nested checkout')
     parser.add_argument('--checkpoint-recovery', action='store_true', help='exercise a managed write failure and native reload')
     parser.add_argument('--preflight-recovery', action='store_true', help='correct a proved pre-split refusal after reload')
+    parser.add_argument('--new-space', action='store_true', help='launch owner and writer in a new isolated Herdr space')
+    parser.add_argument('--worktree-choice', action='store_true', help='inspect and cancel the occupied-checkout selector')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -398,6 +433,7 @@ if __name__ == '__main__':
         threading.Thread(target=model.serve_forever, daemon=True).start()
         try:
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
-                args.nested, args.checkpoint_recovery, args.preflight_recovery)
+                args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
+                args.worktree_choice)
         finally:
             model.shutdown()

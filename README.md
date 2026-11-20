@@ -192,6 +192,19 @@ uncertain prior creation or ownership still requires inspection, not retry. Thes
 source/isolated tests and disposable Linux nested-checkout launch do not claim live,
 Windows or macOS runtime acceptance.
 
+**Unreleased source:** `/start-implementation --new-space -- <agreed assignment>`
+(or bare `/start-implementation --new-space`) places the owner and writer together
+in a newly named Herdr space; the planner stays in its current space. The normal
+launch still uses the current space without prompting. Ambiguous checkout or
+new-worktree choices include current/new-space placement in the same selection.
+An occupied checkout offers one choice that displays the exact repository,
+base, branch and path before creating the worktree, not a second confirmation.
+When those exact details are already approved, use
+`/start-implementation --options {"worktree":{"repository":"/absolute/checkout","base":"<HEAD>","branch":"work/approved","path":"/absolute/new-tree"},"space":"new"} -- <agreed assignment>`
+to avoid another prompt; omit `space` for the no-prompt current-space default.
+The base must still match HEAD. Lost creation responses and changed details
+remain held, not retried under a different path or space.
+
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register
 `/continuation-coordinator owner`, then `/continuation-worker start`, then authorize

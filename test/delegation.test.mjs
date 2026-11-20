@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
@@ -52,11 +52,23 @@ async function fixture(t, options = {}) {
     if (method === 'session.snapshot' && options.historicalPanes)
       return { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents,
         panes: [...f.agents, ...options.historicalPanes] } };
+    if (method === 'workspace.create') {
+      effects.push('workspace');
+      const pane = { pane_id: 'w-new:p1', terminal_id: 'terminal-w-new:p1',
+        workspace_id: 'w-new', tab_id: 'w-new:t1' };
+      children.push({ pane, env: params.env, cwd: params.cwd });
+      assert.equal(params.focus, false);
+      assert.equal(params.label, 'Owner · W123-D04');
+      if (options.workspaceLost) throw new Error('lost workspace response after creation');
+      return { type: 'workspace_created', workspace: { workspace_id: 'w-new' }, root_pane: pane };
+    }
     if (method === 'pane.split') {
       effects.push('split');
       await options.beforeSplit?.(f);
       const id = `w:p${++serial + 10}`;
-      const pane = { pane_id: id, terminal_id: `terminal-${id}`, workspace_id: 'w', tab_id: 'w:t1' };
+      const source = f.agents.find(a => a.pane_id === params.target_pane_id);
+      const pane = { pane_id: id, terminal_id: `terminal-${id}`,
+        workspace_id: source.workspace_id, tab_id: source.tab_id };
       children.push({ pane, env: params.env, cwd: params.cwd });
       assert.equal(params.focus, false);
       if (options.onSplit) options.onSplit(params);
@@ -289,7 +301,8 @@ test('P1 explicit scope does not silently prefer a negative path over its named 
   let choices;
   f.worker.select((_title, options) => { choices = options; return undefined; });
   await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
-  assert.deepEqual(choices, [target, excluded]);
+  assert.deepEqual(choices, [target, `New space · ${target}`,
+    excluded, `New space · ${excluded}`]);
   assert.deepEqual(f.effects, []);
   f.worker.select(() => target);
   await f.worker.command('start-implementation', scope);
@@ -314,10 +327,11 @@ test('P1 checkout ambiguity uses one native choice; cancellation has no launch e
   let choices;
   f.worker.select((_title, options) => { choices = options; return undefined; });
   await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
-  assert.deepEqual(choices, [join(f.root, 'alpha'), join(f.root, 'beta')]);
+  assert.deepEqual(choices, [join(f.root, 'alpha'), `New space · ${join(f.root, 'alpha')}`,
+    join(f.root, 'beta'), `New space · ${join(f.root, 'beta')}`]);
   assert.deepEqual(f.effects, []);
   assert.deepEqual(await f.attempts(), []);
-  f.worker.select((_title, options) => options[1]);
+  f.worker.select((_title, options) => options[2]);
   await f.worker.command('start-implementation', scope);
   assert.equal(f.children[0].cwd, join(f.root, 'beta'));
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
@@ -388,15 +402,15 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
   f.worker.select(() => undefined);
   await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
   assert.deepEqual(f.effects, []);
-  f.worker.select((_title, choices) => choices[0]);
-  f.worker.confirm(false);
+  f.worker.select((_title, choices) => choices.at(-1));
   await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
   assert.deepEqual(f.effects, []);
-  f.worker.confirm(async () => {
+  f.worker.select(async (title, choices) => {
+    assert.match(title, /Repository: .*\nBase: [a-f0-9]{40}\nBranch: work\/w123-d04-[a-f0-9]{8}\nPath: /);
     await f.worker.emit('ui_prompt_start');
     f.worker.raw('\r');
     await f.worker.emit('ui_prompt_end');
-    return true;
+    return choices[0];
   });
   await f.worker.command('start-implementation', scope);
   const alternate = f.children[0].cwd;
@@ -404,6 +418,7 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
     assert.equal(f.children[0].agent.cwd, alternate);
     assert.deepEqual((await f.state()).workers[original.workerId], original);
     assert.equal(f.worker.ctx.cwd, f.root);
+    assert.equal(f.worker.confirmations.length, 0);
     const writer = (await f.children[0].native.spawn(task)).details;
     assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
     assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
@@ -412,6 +427,89 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
   } finally {
     execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
   }
+});
+
+test('P1/P7 one occupied-checkout choice creates the alternate tree in a new space', async t => {
+  const f = await fixture(t, { onSplit: params => assert.match(params.cwd, /-w123-d04-[a-f0-9]{8}$/) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const existing = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  let selections = 0;
+  f.worker.select((title, choices) => {
+    selections++;
+    assert.match(title, /Repository: .*\nBase: [a-f0-9]{40}\nBranch: .*\nPath: /);
+    assert.deepEqual(choices, ['Create in current space', 'Create in new space', 'Cancel']);
+    return choices[1];
+  });
+  await f.worker.command('start-implementation', 'Implement W123-D04 here.');
+  const alternate = f.children[0].cwd;
+  try {
+    assert.equal(selections, 1);
+    assert.equal(f.children[0].pane.workspace_id, 'w-new');
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.deepEqual(f.effects, ['workspace', 'start', 'task']);
+  } finally {
+    execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
+});
+
+test('P1/P7 an exact authorized worktree skips the selector and second confirmation', async t => {
+  const f = await fixture(t, { onSplit: params => assert.match(params.cwd, /-preauthorized$/) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const alternate = `${f.root}-preauthorized`;
+  const base = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const options = { worktree: { repository: f.root, base, branch: 'work/authorized', path: alternate } };
+  f.worker.select(() => assert.fail('Exact authorized placement must not prompt'));
+  try {
+    await f.worker.command('start-implementation',
+      `--options ${JSON.stringify(options)} -- Implement W123-D04 here.`);
+    assert.equal(f.children[0].cwd, alternate);
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  } finally {
+    if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
+});
+
+test('P1/P7 an explicit new space starts the owner and writer there without moving the planner', async t => {
+  const f = await fixture(t);
+  f.worker.select(() => assert.fail('Explicit space placement must not prompt'));
+  await f.worker.command('start-implementation', '--new-space -- Implement W123-D04.');
+  assert.equal(f.children[0].pane.workspace_id, 'w-new');
+  assert.equal(f.agents[0].workspace_id, 'w');
+  const writer = (await f.children[0].native.spawn(task)).details;
+  assert.equal((await f.state()).workers[writer.workerId].workspaceId, 'w-new');
+  assert.deepEqual(f.effects, ['workspace', 'start', 'task', 'split', 'start', 'task']);
+  assert.equal(f.worker.confirmations.length, 0);
+});
+
+test('P7 another space cannot bypass a live writer in the same checkout', async t => {
+  const f = await fixture(t);
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  await f.worker.command('start-implementation', '--new-space -- Implement W123-D04.');
+  await f.children[0].native.spawn(task);
+  f.worker.select((_title, choices) => {
+    assert.deepEqual(choices, ['Create this worktree', 'Cancel']);
+    return 'Cancel';
+  });
+  await assert.rejects(f.worker.command('start-implementation', '--new-space -- Implement W123-D05.'),
+    /Worktree choice cancelled/);
+  assert.deepEqual(f.effects, ['workspace', 'start', 'task', 'split', 'start', 'task']);
+});
+
+test('P1/P7 a lost new-space response remains fenced without a duplicate space', async t => {
+  const f = await fixture(t, { workspaceLost: true });
+  const scope = '--new-space -- Implement W123-D04.';
+  await assert.rejects(f.worker.command('start-implementation', scope), /held for inspection/);
+  assert.equal((await f.attempt()).status, 'held');
+  await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-effect refusal/);
+  assert.deepEqual(f.effects, ['workspace']);
 });
 
 test('P1/P6 native launch needs no child confirmations and delegates only through the new owner', async t => {

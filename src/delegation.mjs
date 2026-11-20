@@ -20,7 +20,7 @@ async function checkoutRoot(cwd) {
   return realpath(stdout.trim());
 }
 
-async function launchCheckout(ctx, scope, select) {
+async function launchCheckout(ctx, scope, select, explicitSpace) {
   const current = await checkoutRoot(ctx.cwd);
   const candidates = new Set([current]);
   const explicit = new Set();
@@ -51,10 +51,12 @@ async function launchCheckout(ctx, scope, select) {
   const named = [...candidates].filter(path => names.includes(basename(path).toLowerCase()));
   const choices = [...new Set([...named, ...explicit])];
   if (!choices.length) choices.push(current);
-  if (choices.length === 1) return choices[0];
-  const chosen = await select('Choose the assignment checkout', choices);
-  if (!chosen || !choices.includes(chosen)) refuse('Checkout selection cancelled; no owner launched');
-  return chosen;
+  if (choices.length === 1) return { checkout: choices[0], space: explicitSpace };
+  const offered = explicitSpace ? choices : choices.flatMap(path => [path, `New space · ${path}`]);
+  const chosen = await select('Choose the assignment checkout and space', offered);
+  if (!chosen || !offered.includes(chosen)) refuse('Checkout selection cancelled; no owner launched');
+  return { checkout: chosen.startsWith('New space · ') ? chosen.slice('New space · '.length) : chosen,
+    space: chosen.startsWith('New space · ') ? 'new' : explicitSpace ?? 'current' };
 }
 
 async function commonDirectory(cwd) {
@@ -110,7 +112,8 @@ export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
 const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
 
-async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed) {
+async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed,
+  authorizedWorktree, explicitSpace) {
   const common = await commonDirectory(target);
   const intent = join(root, `owner-worktree-${digest(`${parent.sessionId}\n${common}\n${scope}`)}.json`);
   try {
@@ -125,7 +128,7 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     if (sameOccupant(agent, binding) && ['idle', 'working', 'done', 'blocked'].includes(agent.agent_status))
       active.push(binding);
   }
-  if (!active.length) return target;
+  if (!active.length && !authorizedWorktree) return { cwd: target, space: explicitSpace ?? 'current' };
   for (const binding of Object.values(state.workers)) {
     if (active.includes(binding)) continue;
     let tree;
@@ -152,19 +155,26 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     if (!active.some(binding => binding.delegationId === claimRecord.id))
       refuse('Writer claim is not accounted for by the live writer; inspect before choosing another worktree');
   }
-  const option = 'Start in a new worktree';
-  if (await worker.selectManagement(ctx, `Live writer in ${target}`, [option, 'Cancel']) !== option)
-    refuse('Worktree choice cancelled; no owner launched');
   const base = (await exec('git', ['-C', target, 'rev-parse', '--verify', 'HEAD'],
     { timeout: 2500, maxBuffer: 8192, windowsHide: true })).stdout.trim();
   const code = scope.match(/(?<![\w-])W\d{3}(?:-D\d{2})?(?![\w-])/i)?.[0]?.toLowerCase() ?? 'assignment';
   const suffix = randomUUID().slice(0, 8);
-  const branch = `work/${code}-${suffix}`;
-  const path = join(dirname(target), `${basename(target)}-${code}-${suffix}`);
-  if (!await worker.confirmDelegation(ctx, 'Start in a new worktree?',
-    `Repository: ${target}\nBase: ${base}\nBranch: ${branch}\nPath: ${path}\n\n` +
-    'Create this worktree and launch the owner here. The current writer and its assignment remain unchanged.'))
-    refuse('Worktree choice cancelled; no owner launched');
+  const branch = authorizedWorktree?.branch ?? `work/${code}-${suffix}`;
+  const path = authorizedWorktree?.path ?? join(dirname(target), `${basename(target)}-${code}-${suffix}`);
+  let space = explicitSpace ?? 'current';
+  if (authorizedWorktree) {
+    if (authorizedWorktree.repository !== target || authorizedWorktree.base !== base ||
+        !isAbsolute(path) || !branch) refuse('Authorized worktree does not match the exact repository/base/path');
+  } else {
+    const title = `Create a separate worktree for this assignment?\nRepository: ${target}\n` +
+      `Base: ${base}\nBranch: ${branch}\nPath: ${path}`;
+    const choices = explicitSpace ? ['Create this worktree', 'Cancel'] :
+      ['Create in current space', 'Create in new space', 'Cancel'];
+    const choice = await worker.selectManagement(ctx, title, choices);
+    if (!choice?.startsWith('Create') || !choices.includes(choice))
+      refuse('Worktree choice cancelled; no owner launched');
+    if (choice === 'Create in new space') space = 'new';
+  }
   if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; no worktree created');
   requireDelegationParent(await snapshot(socketPath), parent);
   // Claim before the Git effect. A lost response must never create a second
@@ -180,7 +190,7 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
       { timeout: 30000, maxBuffer: 8192, windowsHide: true });
   } catch (error) { refuse(`Worktree creation uncertain at ${path} (${error.message}); inspect before retrying`); }
   if (await checkoutRoot(path) !== await realpath(path)) refuse(`New worktree identity changed at ${path}`);
-  return path;
+  return { cwd: path, space };
 }
 
 async function claimOwnerLaunch(path, id) {
@@ -193,6 +203,22 @@ async function claimOwnerLaunch(path, id) {
   }
 }
 const sameSession = (session, binding) => session.id === binding.sessionId && session.file === binding.sessionFile;
+
+function launchOptions(input) {
+  if (!input.startsWith('--options ')) return { assignment: input };
+  const end = input.indexOf(' -- ');
+  if (end < 0) refuse('Use --options <JSON> -- <agreed assignment>');
+  let options;
+  try { options = JSON.parse(input.slice('--options '.length, end)); }
+  catch { refuse('Invalid launch options JSON'); }
+  if (!options || typeof options !== 'object' || Array.isArray(options) ||
+      Object.keys(options).some(key => !['worktree', 'space'].includes(key)) ||
+      (options.space !== undefined && !['current', 'new'].includes(options.space)) ||
+      (options.worktree !== undefined && (!options.worktree ||
+        ['repository', 'base', 'branch', 'path'].some(key => typeof options.worktree[key] !== 'string'))))
+    refuse('Invalid launch placement options');
+  return { ...options, assignment: input.slice(end + 4).trim() };
+}
 
 function nativeBinding(agent, session, cwd) {
   const binding = { paneId: agent?.pane_id, terminalId: agent?.terminal_id,
@@ -637,16 +663,27 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     checkLocal();
     // From the first possible native effect until observed dispatch, retain the
     // checkout fence even if the response is lost or this process exits.
-    await save('split-requested');
+    await save(ownerLaunch && authority.grant.space === 'new' ? 'workspace-requested' : 'split-requested');
     splitRequested = true;
-    const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
-      cwd: authority.grant.cwd, focus: false,
-      env: { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root } });
+    const environment = { PI_CONTINUATION_SPAWN: id, PI_CONTINUATION_ROOT: root };
+    const created = ownerLaunch && authority.grant.space === 'new' ?
+      await transport(socketPath, 'workspace.create', {
+        cwd: authority.grant.cwd, label: delegatedDisplayLabel('owner', authority.grant),
+        focus: false, env: environment }) :
+      await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
+        cwd: authority.grant.cwd, focus: false, env: environment });
+    const split = created.type === 'workspace_created' ? { type: 'pane_info', pane: created.root_pane } : created;
     if (split.type !== 'pane_info' || !split.pane?.pane_id || split.pane.pane_id === paneId ||
-        live.agents.some(a => a.pane_id === split.pane.pane_id) || split.pane.workspace_id !== parent.workspaceId)
+        !split.pane.terminal_id || !split.pane.tab_id ||
+        live.agents.some(a => a.pane_id === split.pane.pane_id) ||
+        (ownerLaunch && authority.grant.space === 'new' ? created.type !== 'workspace_created' ||
+          created.workspace?.workspace_id !== split.pane.workspace_id ||
+          split.pane.workspace_id === parent.workspaceId : split.pane.workspace_id !== parent.workspaceId))
       refuse('Pane creation identity uncertain');
     spawn.paneId = split.pane.pane_id;
     spawn.terminalId = split.pane.terminal_id;
+    spawn.workspaceId = split.pane.workspace_id;
+    spawn.tabId = split.pane.tab_id;
     await check();
     await save('starting');
     // Unix Herdr rejects a shell with a foreground startup job. Wait for the
@@ -668,8 +705,8 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     await check();
     const target = await transport(socketPath, 'pane.get', { pane_id: spawn.paneId });
     if (target.type !== 'pane_info' || target.pane?.pane_id !== spawn.paneId || !spawn.terminalId ||
-        target.pane.terminal_id !== spawn.terminalId || target.pane.workspace_id !== parent.workspaceId ||
-        target.pane.tab_id !== parent.tabId || target.pane.agent || target.pane.agent_session)
+        target.pane.terminal_id !== spawn.terminalId || target.pane.workspace_id !== spawn.workspaceId ||
+        target.pane.tab_id !== spawn.tabId || target.pane.agent || target.pane.agent_session)
       refuse('New pane changed before Pi startup');
     checkLocal();
     // Herdr names are at most 32 characters; keep the full UUID in base 36.
@@ -756,7 +793,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
   const reference = ctx => ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
     e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
   async function launch(argument, ctx) {
-    let scope = argument.trim();
+    const input = argument.trim();
+    const explicitSpace = input === '--new-space' || input.startsWith('--new-space -- ') ? 'new' : undefined;
+    let scope = input === '--new-space' ? '' :
+      explicitSpace ? input.slice('--new-space -- '.length).trim() : input;
     let assignment = scope;
     if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !socketPath || !paneId || !ctx.isIdle() ||
         Buffer.byteLength(scope) > 8000)
@@ -790,9 +830,18 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         refuse('Planning session changed while reading the plan; no owner launched');
     }
     grant.scope = scope;
-    const target = await launchCheckout(ctx, assignment, (title, choices) => worker.selectManagement(ctx, title, choices));
-    grant.cwd = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
-      grant.parent, allowed);
+    const options = launchOptions(assignment);
+    if (explicitSpace && options.space && options.space !== explicitSpace)
+      refuse('Conflicting space placement options');
+    options.space = explicitSpace ?? options.space;
+    const checkout = await launchCheckout(ctx, options.worktree ?
+      `${options.assignment} ${options.worktree.repository}` : options.assignment,
+      (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
+    const target = checkout.checkout;
+    const placement = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
+      grant.parent, allowed, options.worktree, options.space ?? checkout.space);
+    grant.cwd = placement.cwd;
+    grant.space = placement.space;
     grant.worktreeCreated = grant.cwd !== target;
     grant.checkout = await checkoutIdentity(grant.cwd);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
@@ -811,7 +860,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       if (previous.scope !== scope || previous.checkout !== grant.checkout ||
           previous.cwd !== grant.cwd || previous.originCwd !== grant.originCwd ||
           previous.ownerToken !== grant.ownerToken || previous.worktreeCreated ||
-          !isDeepStrictEqual(previous.parent, grant.parent) ||
+          previous.space !== grant.space || !isDeepStrictEqual(previous.parent, grant.parent) ||
           attempt.status !== 'preflight-refused' || attempt.grantId !== previous.id)
         refuse('Prior owner launch has no proved pre-effect refusal; inspect before retrying');
       grant.id = previous.id;
