@@ -556,18 +556,39 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   await check();
   const attemptKey = digest(`${authority.grant.id}\n${key}`);
   const assignmentKey = digest(`${authority.grant.id}\n${task}`);
-  const id = randomUUID();
-  // Claims survive failures. Changing a key must not escape an identical task's claim.
-  await claim(join(root, `spawn-key-${attemptKey}.json`), { id });
-  await claim(join(root, `spawn-assignment-${assignmentKey}.json`), { id });
+  const keyPath = join(root, `spawn-key-${attemptKey}.json`);
+  const assignmentPath = join(root, `spawn-assignment-${assignmentKey}.json`);
+  let id = randomUUID();
+  let retry;
+  if (ownerLaunch) {
+    try {
+      const keyed = await readJson(keyPath);
+      const assigned = await readJson(assignmentPath);
+      const previous = await readJson(spawnPath(root, keyed.id));
+      if (assigned.id !== keyed.id || previous.id !== keyed.id ||
+          previous.status !== 'preflight-refused' || previous.grantId !== authority.grant.id ||
+          previous.key !== key || previous.task !== task || previous.role !== role ||
+          previous.ownerToken !== authority.grant.ownerToken ||
+          !isDeepStrictEqual(previous.parent, parent) || authority.grant.worktreeCreated)
+        refuse('Prior owner launch has no proved pre-effect refusal; inspect before retrying');
+      id = keyed.id;
+      retry = previous;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  // Claims survive all uncertain effects. Only this exact durable preflight
+  // refusal can reuse them, never an attempted pane split or another key.
+  if (!retry) {
+    await claim(keyPath, { id });
+    await claim(assignmentPath, { id });
+  }
   const parentWorker = Object.values(authority.state.workers).find(w => w.sessionId === parent.sessionId &&
     w.paneId === parent.paneId);
   const recipient = parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
     { id: parentWorker.coordinatorId } : undefined);
-  const spawn = { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
+  const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
     parent, role, key, task, status: 'prepared', at: new Date().toISOString(),
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
-  await claim(spawnPath(root, id), spawn);
+  if (!retry) await claim(spawnPath(root, id), spawn);
   const save = async status => { spawn.status = status; await atomicJson(spawnPath(root, id), spawn); };
   const launchFence = ownerLaunch || role === 'writer' ? ownerLaunchPath(root, authority.grant.checkout) : undefined;
   const readPane = id => transport(socketPath, 'pane.get', { pane_id: id });
@@ -580,6 +601,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       await claimOwnerLaunch(launchFence, id);
       fenceClaimed = true;
     }
+    if (retry) await save('prepared');
     if (role === 'writer' || ownerLaunch) {
       const { state: current, fresh } = await check();
       const pending = await inspectCheckout(root, authority.grant, parent, recipient, current, fresh, readPane, readLive, ownerLaunch);
@@ -615,6 +637,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     checkLocal();
     // From the first possible native effect until observed dispatch, retain the
     // checkout fence even if the response is lost or this process exits.
+    await save('split-requested');
     splitRequested = true;
     const split = await transport(socketPath, 'pane.split', { target_pane_id: paneId, direction: 'right',
       cwd: authority.grant.cwd, focus: false,
@@ -706,7 +729,11 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     dispatched = true;
   } catch (error) {
     spawn.failure = error.message;
-    await save('held');
+    if (ownerLaunch && !splitRequested && !authority.grant.worktreeCreated) {
+      spawn.preflightFailures = [...(spawn.preflightFailures ?? []),
+        { at: new Date().toISOString(), reason: error.message }];
+      await save('preflight-refused');
+    } else await save('held');
     if (ownerLaunch && !splitRequested)
       throw new Error(`Implementation start ${id} refused before pane creation; no agent started (${error.message}).`);
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
@@ -766,11 +793,29 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const target = await launchCheckout(ctx, assignment, (title, choices) => worker.selectManagement(ctx, title, choices));
     grant.cwd = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
       grant.parent, allowed);
+    grant.worktreeCreated = grant.cwd !== target;
     grant.checkout = await checkoutIdentity(grant.cwd);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent))
       refuse('Planning session changed while choosing checkout; no owner launched');
-    await claim(join(root, `owner-launch-${digest(`${grant.checkout}\n${scope}`)}.json`), { grantId: grant.id });
-    await claim(grantPath(root, grant.id), grant);
+    const scopePath = join(root, `owner-launch-${digest(`${grant.checkout}\n${scope}`)}.json`);
+    try {
+      await claim(scopePath, { grantId: grant.id });
+      await claim(grantPath(root, grant.id), grant);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const existing = await readJson(scopePath);
+      const previous = await readJson(grantPath(root, existing.grantId));
+      const key = digest(`${previous.id}\nassignment-owner`);
+      const keyed = await readJson(join(root, `spawn-key-${key}.json`));
+      const attempt = await readJson(spawnPath(root, keyed.id));
+      if (previous.scope !== scope || previous.checkout !== grant.checkout ||
+          previous.cwd !== grant.cwd || previous.originCwd !== grant.originCwd ||
+          previous.ownerToken !== grant.ownerToken || previous.worktreeCreated ||
+          !isDeepStrictEqual(previous.parent, grant.parent) ||
+          attempt.status !== 'preflight-refused' || attempt.grantId !== previous.id)
+        refuse('Prior owner launch has no proved pre-effect refusal; inspect before retrying');
+      grant.id = previous.id;
+    }
     const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
       task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });
     ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');

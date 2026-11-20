@@ -1,6 +1,7 @@
 """Exercise delegated startup with stock Linux Herdr and Pi, with a loopback-only model."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -111,7 +112,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
                 os.waitpid(pid, 0)
 
 
-def run(root, model, package, baseline, evidence, nested, checkpoint_recovery):
+def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -206,6 +207,22 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if preflight_recovery:
+                claim_path = state_dir/f'delegation-writer-{hashlib.sha256(str(target).encode()).hexdigest()}.json'
+                claim_path.write_text(json.dumps({'id': '11111111-1111-4111-8111-111111111111'}))
+                cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
+                def refused_attempt():
+                    attempts = list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))
+                    if not attempts: return None
+                    record = json.loads(attempts[0].read_text())
+                    return record if record['status'] == 'preflight-refused' else None
+                refused = until('proved no-split owner refusal', refused_attempt)
+                assert len(json.loads(state_path.read_text())['workers']) == 0
+                claim_path.unlink()
+                until('planner idle after refusal', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/reload')
+                until('planner reload completed', lambda: 'Reloaded keybindings' in visible(planner))
+                until('planner idle after reload', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
             cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
 
             def dispatched(role):
@@ -218,6 +235,10 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     if attempt['status'] == 'dispatched':
                         return attempt
             attempt = until('owner assignment dispatched', lambda: dispatched('owner'), 50)
+            if preflight_recovery:
+                assert attempt['id'] == refused['id']
+                assert len(list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))) == 1
+                print('Native preflight recovery passed: same scope/key after reload, one owner split', flush=True)
             panes.append(attempt['paneId'])
             assert (home/'slow-shell-ready').read_text().strip() == attempt['id']
             state = json.loads(state_path.read_text())
@@ -365,6 +386,7 @@ if __name__ == '__main__':
     parser.add_argument('--evidence', type=Path, help='directory for disposable native sidebar captures')
     parser.add_argument('--nested', action='store_true', help='launch owner and writer in a nested checkout')
     parser.add_argument('--checkpoint-recovery', action='store_true', help='exercise a managed write failure and native reload')
+    parser.add_argument('--preflight-recovery', action='store_true', help='correct a proved pre-split refusal after reload')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -376,6 +398,6 @@ if __name__ == '__main__':
         threading.Thread(target=model.serve_forever, daemon=True).start()
         try:
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
-                args.nested, args.checkpoint_recovery)
+                args.nested, args.checkpoint_recovery, args.preflight_recovery)
         finally:
             model.shutdown()

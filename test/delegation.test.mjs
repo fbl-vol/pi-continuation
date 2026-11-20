@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -428,7 +429,7 @@ test('P1/P6 native launch needs no child confirmations and delegates only throug
   assert.equal(ownerBinding.sessionId, owner.native.id);
   assert.equal((await readdir(f.root)).some(file => file.startsWith('owner-launch-pending-')), false,
     'observed owner dispatch releases the checkout fence');
-  await assert.rejects(f.worker.command('start-implementation', scope), /EEXIST/);
+  await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-effect refusal/);
   await assert.rejects(f.worker.spawn(task), /No scoped delegation grant/);
   const writer = (await owner.native.spawn(task)).details;
   const review = { role: 'read-only', key: 'review', task: 'Independently review the writer result.' };
@@ -688,6 +689,30 @@ for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient',
   });
 }
 
+test('P1/P7 a proved pre-split refusal resumes the same scope/key after correction and reload', async t => {
+  const f = await fixture(t);
+  const scope = 'Implement the agreed fixture change.';
+  const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
+  await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
+  const refused = await f.attempt();
+  assert.equal(refused.status, 'preflight-refused');
+  assert.deepEqual(f.effects, []);
+  await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
+  assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+  assert.equal((await f.attempt()).preflightFailures.length, 2);
+  assert.deepEqual(f.effects, []);
+
+  await rm(claimPath);
+  await f.worker.emit('session_shutdown');
+  await f.worker.emit('session_start', { reason: 'reload' });
+  await f.worker.command('start-implementation', scope);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+  assert.equal((await f.attempt()).status, 'dispatched');
+  assert.equal(Object.values((await f.state()).workers).filter(binding => binding.role === 'owner').length, 1);
+});
+
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
   const f = await fixture(t, { splitLost: true });
   await f.supervisorCommand('pause global');
@@ -695,7 +720,7 @@ test('P4/P5 native launch preserves pauses and never retries uncertain pane crea
   assert.deepEqual(f.effects, []);
   await f.supervisorCommand('activate global');
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /held for inspection.*disconnected before response/);
-  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /EEXIST/);
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /no proved pre-effect refusal/);
   const attempt = await f.attempt();
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope.'), error =>
     error.message.includes('Unresolved owner launch') && error.message.includes(attempt.id));

@@ -150,8 +150,12 @@ writer claim, decision, or unproven delivery: the command explains the blocker a
 creates no pane. In particular, v0.4.5 pending notices do not prove delivery was
 never attempted and remain blocking; the successful archive scenario uses proof
 recorded by the new supervisor before its first send attempt. A possibly effected
-launch stays held for inspection, not replay.
-See the [contract](contract.md) for the retained state and compatibility boundary.
+launch stays held for inspection, not replay. An owner start refused before any
+pane creation can reuse the exact retained scope, stable key and attempt after
+its prerequisite is corrected, including after a Pi reload; the earlier refusal
+remains in history. A write-ahead split-request marker fences even a lost response,
+and a prior created worktree is not a pre-effect retry. Legacy/uncertain attempts
+remain held. See the [contract](contract.md) for the retained state and compatibility boundary.
 
 ### Approved coordinating-owner amendment (since v0.4.0)
 

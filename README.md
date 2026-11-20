@@ -174,7 +174,10 @@ launching and enrolling a non-writing owner and giving it scoped delegation for
 one writer and read-only reviewers. Continue in the owner pane the command reports;
 there are no setup confirmations in that pane. A skill or ordinary model message
 cannot replace invocation. If launch is held or uncertain, inspect the attempt
-rather than retrying or rephrasing it. A verified closed, paused worker with no
+rather than retrying or rephrasing it. In unreleased source, an explicit
+pre-split refusal with retained no-effect proof can use the same command and
+scope after its prerequisite is fixed; a requested split or worktree effect
+still requires inspection. Installed v0.5.0 retains its original claim behavior. A verified closed, paused worker with no
 pending delivery does not block a new writer solely because its history is still
 registered. Live or uncertain ownership and retained writer claims still block.
 Genuine user decisions still pause the owner.
