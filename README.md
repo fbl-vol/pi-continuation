@@ -218,8 +218,9 @@ assignment. Automatic finding fixes can be saved but remain **Ask First** under
 the current human-selection contract. Preferences do not grant publication,
 replace independent review, override repository restrictions, or alter live
 supervision. The native 80/40-column settings view and assignment snapshot have
-only disposable Linux Pi/Herdr evidence; no private owner-skill integration,
-live settings or cross-platform acceptance is claimed.
+only disposable Linux Pi/Herdr evidence. Owner use of the choices has bounded
+fake Git/Herdr effect samples, not native end-to-end, live settings or
+cross-platform acceptance; the owner workflow is not part of this package.
 
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register
