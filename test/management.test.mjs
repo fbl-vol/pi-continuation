@@ -7,6 +7,7 @@ import { newSupervisor, decodeSupervisor } from '../src/contracts.mjs';
 import { stopWorker, returnStoppedWorker, checkpointHash } from '../src/policy.mjs';
 import { managementSnapshot } from '../src/management.mjs';
 import { atomicJson } from '../src/store.mjs';
+import { defaultDeliveryPreferences, readDeliveryPreferences } from '../src/preferences.mjs';
 import { sendAction } from '../src/ipc.mjs';
 
 async function started(t) {
@@ -47,6 +48,63 @@ async function resume(f) {
     action: 'resume', evidence: observation.finalReply,
     reportHash: checkpointHash(await readFile(binding.checkpoint, 'utf8')) });
 }
+
+test('delivery defaults save only the explicit draft and persist across menu openings', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  for (const ending of [undefined, 'Cancel']) {
+    let step = 0;
+    planner.select((_title, choices) => {
+      const answer = ['Delivery preferences', 'Push branch: Ask First', 'Automatic', ending][step++];
+      if (answer) assert.ok(choices.includes(answer), JSON.stringify(choices));
+      return answer;
+    });
+    await planner.command('continuation', '');
+    assert.deepEqual(await readDeliveryPreferences(f.root), defaultDeliveryPreferences());
+    assert.equal((await readdir(f.root)).includes('delivery-preferences.json'), false);
+  }
+  let step = 0;
+  planner.select((_title, choices) => {
+    const answer = ['Delivery preferences', 'Push branch: Ask First', 'Automatic', 'Save'][step++];
+    assert.ok(choices.includes(answer), JSON.stringify(choices));
+    return answer;
+  });
+  await planner.command('continuation', '');
+  assert.equal((await readDeliveryPreferences(f.root)).pushBranch, 'Automatic');
+  // Opening the saved view also works after another Pi session reads this root.
+  const other = f.native('w:p3');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p3', terminal_id: 'new-session-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: other.file } });
+  await other.emit('session_start');
+  let opened = 0;
+  other.select((_title, choices) => {
+    if (opened++ === 0) return 'Delivery preferences';
+    assert.ok(choices.includes('Push branch: Automatic'));
+    return undefined;
+  });
+  await other.command('continuation', '');
+});
+
+test('delivery menu distinguishes saved automatic fixes from effective Ask First in draft and after Save', async t => {
+  const f = await started(t);
+  const planner = await planningSession(f);
+  let step = 0;
+  planner.select((title, choices) => {
+    if (step === 3) assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    const answer = ['Delivery preferences', 'Fix review findings: Ask First', 'Automatically Fix', 'Save'][step++];
+    assert.ok(choices.includes(answer), JSON.stringify(choices));
+    return answer;
+  });
+  await planner.command('continuation', '');
+  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatically Fix');
+  step = 0;
+  planner.select((_title, choices) => {
+    if (step++ === 0) return 'Delivery preferences';
+    assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    return undefined;
+  });
+  await planner.command('continuation', '');
+});
 
 test('retained Stop withdraws the active row; own Return preserves identity, spent budget and consumed stop', async t => {
   const f = await started(t);
@@ -209,7 +267,7 @@ test('current pane labels are separate from retained closed and changed registra
   const answers = ['Previous / unavailable registrations (2)', '2. reused pane — Session changed', 'Details'];
   planner.select((title, choices) => { menus.push({ title, choices }); return answers[menus.length - 1]; });
   await planner.command('continuation', '');
-  assert.deepEqual(menus[0].choices, ['Join this session to supervision', '1. worker — Supervised',
+  assert.deepEqual(menus[0].choices, ['Delivery preferences', 'Join this session to supervision', '1. worker — Supervised',
     'Previous / unavailable registrations (2)', 'Close']);
   assert.match(menus[0].title, /Current workers \(1\)/);
   assert.equal(menus.length, 3);

@@ -100,6 +100,97 @@ test('P3 failed checkpoint persistence remains held and has a separate cause', a
   assert.equal(f.worker.messages.length, 0);
 });
 
+test('P3/P7 a managed checkpoint failure recovers on reload only after writing the same settled report', async t => {
+  const f = await start(t);
+  await f.worker.emit('agent_start');
+  const checkpoint = (await f.state()).workers[f.workerId()].checkpoint;
+  await rm(checkpoint);
+  await mkdir(checkpoint);
+  const reply = 'Stage one is complete. Stage two remains approved and unfinished.';
+  f.worker.assistant(reply);
+  await f.worker.emit('agent_settled', { aborted: false });
+  const failed = await f.observation();
+  assert.equal(failed.holdError.kind, 'checkpoint');
+  assert.equal(failed.hold, true);
+  assert.equal(f.worker.continuation.registered, false);
+  assert.equal(f.worker.messages.length, 0);
+
+  await f.worker.emit('session_shutdown');
+  await rm(checkpoint, { recursive: true });
+  await f.worker.emit('session_start', { reason: 'reload' });
+  const recovered = await f.observation();
+  assert.equal(recovered.hold, false);
+  assert.equal(recovered.outcome, 'completed');
+  assert.equal(recovered.stop, failed.checkpointRecovery.report.stop);
+  assert.equal(recovered.finalReply, reply);
+  assert.match(await readFile(checkpoint, 'utf8'), /Stage two remains approved/);
+  assert.equal(await status(f), 'Supervised');
+  assert.equal(f.worker.messages.length, 0, 'Recovery only enables reassessment');
+  assert.match((await resume(f, reply)).content[0].text, /Continuation delivered/);
+  assert.equal(f.worker.messages.length, 1);
+});
+
+test('P3/P7 a still-unwritable managed checkpoint never releases its report', async t => {
+  const f = await start(t);
+  await f.worker.emit('agent_start');
+  const checkpoint = (await f.state()).workers[f.workerId()].checkpoint;
+  await rm(checkpoint);
+  await mkdir(checkpoint);
+  f.worker.assistant('Stage two remains unfinished.');
+  await f.worker.emit('agent_settled', { aborted: false });
+  const failed = await f.observation();
+  await f.worker.emit('session_shutdown');
+  await f.worker.emit('session_start', { reason: 'reload' });
+  assert.equal((await f.observation()).hold, true);
+  assert.equal((await f.observation()).checkpointRecovery.report.stop, failed.checkpointRecovery.report.stop);
+  assert.equal(f.worker.continuation.registered, false);
+  assert.equal(f.worker.messages.length, 0);
+});
+
+test('P3/P4 an explicit worker pause after a checkpoint failure survives a successful rewrite', async t => {
+  const f = await start(t);
+  await f.worker.emit('agent_start');
+  const checkpoint = (await f.state()).workers[f.workerId()].checkpoint;
+  await rm(checkpoint);
+  await mkdir(checkpoint);
+  f.worker.assistant('Stage two remains approved and unfinished.');
+  await f.worker.emit('agent_settled', { aborted: false });
+  await f.supervisorCommand(`pause worker ${f.workerId()}`);
+  assert.equal((await f.state()).workers[f.workerId()].reason, 'Explicit worker pause');
+
+  await f.worker.emit('session_shutdown');
+  await rm(checkpoint, { recursive: true });
+  await f.worker.emit('session_start', { reason: 'reload' });
+  assert.equal((await f.observation()).hold, false, 'The exact checkpoint is durable again');
+  assert.equal((await f.state()).workers[f.workerId()].paused, true);
+  const state = await f.state();
+  assert.equal(state.workers[f.workerId()].reason, 'Explicit worker pause');
+  const observation = await f.observation();
+  assert.equal(workerStatus(state, { ...state.workers[f.workerId()],
+    failure: { operation: 'read checkpoint' } }, f.agents[0], observation).label, 'Paused',
+    'A retained supervisor checkpoint diagnostic cannot override a healthy report and explicit pause');
+  assert.equal(await status(f), 'Paused');
+  assert.equal(f.worker.messages.length, 0);
+});
+
+test('P3/P7 a changed native report cannot heal a retained checkpoint hold', async t => {
+  const f = await start(t);
+  await f.worker.emit('agent_start');
+  const checkpoint = (await f.state()).workers[f.workerId()].checkpoint;
+  await rm(checkpoint);
+  await mkdir(checkpoint);
+  f.worker.assistant('The approved work is unfinished.');
+  await f.worker.emit('agent_settled', { aborted: false });
+  await f.worker.emit('session_shutdown');
+  await rm(checkpoint, { recursive: true });
+  f.worker.assistant('A different report cannot authorize the old stop.');
+  await f.worker.emit('session_start', { reason: 'reload' });
+  assert.equal((await f.observation()).hold, true);
+  assert.equal((await f.observation()).holdError.kind, 'checkpoint');
+  assert.equal(await status(f), 'Held: checkpoint');
+  assert.equal(f.worker.messages.length, 0);
+});
+
 for (const originalCause of ['prompt', 'run', 'checkpoint', 'legacy']) {
   test(`P3/P7 a later failed turn preserves the original ${originalCause} hold in Details and reload`, async t => {
     const f = await start(t);

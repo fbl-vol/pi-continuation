@@ -27,6 +27,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
+  const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
   const report = diagnostics('supervisor');
@@ -165,7 +166,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           binding.failure = report.last;
         }
       }
-      if (!reason) continue;
+      if (!reason || binding.paused) continue;
       binding.paused = true;
       binding.reason = reason;
       changed = true;
@@ -312,7 +313,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           finalReply: stop.finalReply, statusEvidence: stop.statusEvidence,
           checkpoint: reportText.slice(0, 4096) });
       } catch (error) {
-        state.workers[id].paused = true;
+        if (!state.workers[id].paused) {
+          state.workers[id].paused = true;
+          state.workers[id].reason = 'Worker checkpoint unavailable';
+        }
         report('read attention checkpoint', error, ctx);
         state.workers[id].failure = report.last;
       }
@@ -378,6 +382,41 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       onError: error => annotationReport('publish display', error, ctx) });
     void annotations.refresh();
   };
+
+  const acceptCheckpointRecovery = (request, ctx) => queue(async () => {
+    const binding = state.workers[request.workerId];
+    if (!active() || !subscriptionLive || !binding || binding.stopped ||
+        binding.sessionId !== request.sessionId || binding.sessionFile !== request.sessionFile ||
+        !request.stop || state.inflight[request.workerId] ||
+        Object.values(state.notices).some(notice => notice.workerId === request.workerId &&
+          ['pending', 'sending', 'uncertain'].includes(notice.status)) ||
+        ['pause', 'blocker', 'decision'].includes(state.dispositions[request.workerId]?.action))
+      return { accepted: false };
+    try {
+      const live = await snapshot(socketPath);
+      const agent = live.agents.find(candidate => candidate.pane_id === binding.paneId);
+      if (!sameOccupant(agent, binding) || !isSettled(agent)) return { accepted: false };
+      const observed = await readObservation(root, request.workerId);
+      if (observed.hold || observed.outcome !== 'completed' || observed.stop !== request.stop ||
+          observed.session.id !== binding.sessionId || observed.session.file !== binding.sessionFile ||
+          checkpointHash(await readFile(await checkpointPath(request.workerId), 'utf8')) !== request.reportHash)
+        return { accepted: false };
+    } catch (error) {
+      report('verify recovered checkpoint', error, ctx);
+      return { accepted: false };
+    }
+    if (binding.paused) {
+      if (binding.reason !== 'Worker checkpoint unavailable') return { accepted: false };
+      // Only undo this exact automated failure pause; never clear an explicit
+      // worker/route/global pause, disposition, receipt or delivery history.
+      binding.paused = false;
+      delete binding.reason;
+      delete binding.failure;
+      await commit();
+    }
+    await wake(ctx);
+    return { accepted: true };
+  });
 
   const acceptWorkerStart = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive || !allowExperimentalActivation)
@@ -489,6 +528,23 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  const acceptLaunchActivate = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || request.ownerToken !== state.ownerToken)
+      return { accepted: false, message: 'Supervisor ownership unavailable' };
+    if (state.paused && (state.failure || persistenceFailed ||
+        (state.acceptStarts && state.reason !== 'Explicit global pause') ||
+        (!state.acceptStarts && state.reason && state.reason !== 'Explicit global pause')))
+      return { accepted: false, message: 'Supervisor fault or unknown pause requires inspection before activation' };
+    if (!state.acceptStarts || state.paused) {
+      state.acceptStarts = true;
+      setScopePaused(state, 'global', undefined, false);
+      await commit();
+      lastSnapshot = await snapshot(socketPath);
+      await wake(ctx);
+    }
+    return { accepted: true, ownerToken: state.ownerToken };
+  });
+
   const acceptLaunchArchive = request => queue(async () => {
     const version = inputVersion;
     const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
@@ -504,7 +560,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
-  const command = async (args, ctx) => {
+  const command = async (args, ctx, { bootstrap = false } = {}) => {
       diagnosticContext = ctx;
       if (ctx.mode !== 'tui' || !socketPath || process.env.HERDR_ENV !== '1') {
         notify(ctx, 'Herdr-managed Pi TUI required', 'error'); return;
@@ -517,7 +573,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           }
           if (!allowExperimentalActivation || !subscriptionLive)
             throw new Error('Supervisor unavailable; inspect before starting');
-          if (!await ctx.ui.confirm('Start continuation supervisor?',
+          if (!bootstrap && !await ctx.ui.confirm('Start continuation supervisor?',
             'Enable this supervisor and accept explicitly opted-in workers. Existing worker and route pauses remain unchanged.')) return;
           state.acceptStarts = true;
           setScopePaused(state, 'global', undefined, false);
@@ -532,7 +588,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           throw new Error('A worker or coordinator cannot become the supervisor');
         if (verb === 'start' && !allowExperimentalActivation)
           throw new Error('Start requires the ordinary extension profile');
-        if (!await ctx.ui.confirm('Start continuation supervisor?', verb === 'start' ?
+        if (!bootstrap && !await ctx.ui.confirm('Start continuation supervisor?', verb === 'start' ?
           'Enable this supervisor and accept only workers explicitly opting in with /continuation-worker start. Existing worker and route pauses remain unchanged.' :
           'Claim one supervisor owner; all new scopes remain paused.')) return;
         await ensureRoot(root);
@@ -540,8 +596,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
           closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
-            acceptManagement(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) : acceptWorkerStart(request, ctx));
+            acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
+              acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
+              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
             if (error.code !== 'ENOENT') throw report('restore state', error);
@@ -869,7 +927,33 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   });
   pi.on('ui_prompt_start', () => { promptActive = true; inputVersion++; });
   pi.on('ui_prompt_end', () => { promptActive = false; });
-  pi.on('session_start', (_event, ctx) => { if (active()) void reconcile(ctx); });
+  pi.on('session_start', async (event, ctx) => {
+    if (active()) { void reconcile(ctx); return; }
+    if (!bootstrapId || event.reason !== 'startup') return;
+    const path = join(root, `supervisor-start-${bootstrapId}.json`);
+    let intent;
+    try {
+      intent = await readJson(path);
+      const pending = await readJson(join(root, 'supervisor-start-pending.json'));
+      if (!uuid(bootstrapId) || pending.token !== bootstrapId || intent.id !== bootstrapId ||
+          intent.status !== 'start-requested' || intent.pane?.pane_id !== paneId ||
+          intent.cwd !== ctx.cwd || !ctx.sessionManager.getSessionFile())
+        throw new Error('Supervisor bootstrap identity or intent changed');
+      const activating = { ...intent, status: 'activating',
+        sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile() };
+      await atomicJson(path, activating);
+      intent = activating;
+      await command('start', ctx, { bootstrap: true });
+      if (!active() || state.supervisorSession !== ctx.sessionManager.getSessionId() ||
+          state.paused || !state.acceptStarts)
+        throw new Error('Supervisor bootstrap was not established');
+      await atomicJson(path, { ...intent, status: 'ready', sessionId: state.supervisorSession });
+    } catch (error) {
+      if (['start-requested', 'activating'].includes(intent?.status))
+        await atomicJson(path, { ...intent, status: 'held', failure: error.message });
+      throw error;
+    }
+  });
   pi.on('before_agent_start', event => {
     if (event.messageType !== 'custom' || event.message?.customType !== 'pi-continuation-attention') return;
     attentionTurn = queuedAttention;
@@ -880,6 +964,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!active()) return;
     if (event.aborted) {
       state.paused = true;
+      state.reason = 'Supervisor turn aborted; inspect before activation';
       attentionTurn = [];
       return queue(() => commit());
     }

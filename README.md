@@ -111,7 +111,12 @@ a successful tool alone never clears a hold. Newly recorded failed turns display
 Details shows the cause, when the hold was recorded and the confirmed recovery
 control. Existing unclassified holds remain `Held: error` until explicitly resolved;
 no automatic migration, hold clearing or live-worker upgrade is included.
-Published v0.3.2 retains its earlier tool-error holds.
+Published v0.3.2 retains its earlier tool-error holds. In unreleased source,
+a managed checkpoint-write failure with an otherwise successful, unchanged
+settled report can recover on session restore after a fresh successful write of
+the identical checkpoint. The supervisor lifts only its matching automatic
+checkpoint-unavailable pause; explicit pauses and other holds remain. Installed
+v0.5.0 still requires confirmed manual recovery for this case.
 
 ## Supervised delegation (since v0.3.0)
 
@@ -158,10 +163,14 @@ bounded protections and recovery limits.
 
 ## Coordinating-owner workflow (since v0.4.0)
 
-With the intended global supervisor already running, agree on a plan in the
-unsupervised brainstorming session in the target Git checkout, then enter
-`/start-implementation`. Since v0.4.2, the bare command asks the configured
-model to identify the agreed plan in recent chat text; if it cannot identify one,
+Agree on a plan in the unsupervised brainstorming session in the target Git
+checkout, then enter `/start-implementation`. Current unreleased source can start
+a dedicated supervisor space during that invocation if none is running; an
+ordinary global pause on a running supervisor resumes without another prompt.
+A retained ambiguous supervisor startup or unresolved owner lock remains held
+for inspection rather than creating a second supervisor. Released v0.5.0 still
+requires the intended global supervisor to be running before this command.
+Since v0.4.2, the bare command asks the configured model to identify the agreed plan in recent chat text; if it cannot identify one,
 no pane is created. There is no separate skill step. You can still specify the
 scope with `/start-implementation <agreed assignment>` (required in v0.4.1).
 This one invocation authorizes
@@ -169,7 +178,10 @@ launching and enrolling a non-writing owner and giving it scoped delegation for
 one writer and read-only reviewers. Continue in the owner pane the command reports;
 there are no setup confirmations in that pane. A skill or ordinary model message
 cannot replace invocation. If launch is held or uncertain, inspect the attempt
-rather than retrying or rephrasing it. A verified closed, paused worker with no
+rather than retrying or rephrasing it. In unreleased source, an explicit
+pre-split refusal with retained no-effect proof can use the same command and
+scope after its prerequisite is fixed; a requested split or worktree effect
+still requires inspection. Installed v0.5.0 retains its original claim behavior. A verified closed, paused worker with no
 pending delivery does not block a new writer solely because its history is still
 registered. Live or uncertain ownership and retained writer claims still block.
 Genuine user decisions still pause the owner.
@@ -183,6 +195,32 @@ path before creating and launching there. Cancelling leaves no worktree or owner
 uncertain prior creation or ownership still requires inspection, not retry. These
 source/isolated tests and disposable Linux nested-checkout launch do not claim live,
 Windows or macOS runtime acceptance.
+
+**Unreleased source:** `/start-implementation --new-space -- <agreed assignment>`
+(or bare `/start-implementation --new-space`) places the owner and writer together
+in a newly named Herdr space; the planner stays in its current space. The normal
+launch still uses the current space without prompting. Ambiguous checkout or
+new-worktree choices include current/new-space placement in the same selection.
+An occupied checkout offers one choice that displays the exact repository,
+base, branch and path before creating the worktree, not a second confirmation.
+When those exact details are already approved, use
+`/start-implementation --options {"worktree":{"repository":"/absolute/checkout","base":"<HEAD>","branch":"work/approved","path":"/absolute/new-tree"},"space":"new"} -- <agreed assignment>`
+to avoid another prompt; omit `space` for the no-prompt current-space default.
+The base must still match HEAD. Lost creation responses and changed details
+remain held, not retried under a different path or space.
+
+**Unreleased delivery preferences:** `/continuation` → `Delivery preferences`
+shows saved per-user defaults for new owner assignments, with Save or Escape/
+Cancel. An exact owner may view or explicitly override only that assignment via
+`This assignment: delivery`; `continuation_delivery_preferences` reads its
+current effective choices. Global edits never silently change an existing
+assignment. Automatic finding fixes can be saved but remain **Ask First** under
+the current human-selection contract. Preferences do not grant publication,
+replace independent review, override repository restrictions, or alter live
+supervision. The native 80/40-column settings view and assignment snapshot have
+only disposable Linux Pi/Herdr evidence. Owner use of the choices has bounded
+fake Git/Herdr effect samples, not native end-to-end, live settings or
+cross-platform acceptance; the owner workflow is not part of this package.
 
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register

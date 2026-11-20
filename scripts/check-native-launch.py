@@ -1,6 +1,7 @@
 """Exercise delegated startup with stock Linux Herdr and Pi, with a loopback-only model."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,7 +44,8 @@ class Model(BaseHTTPRequestHandler):
             tool = ('continuation_owner_wait', dict(kind='child', children=[worker]))
         # Keep the writer working while the owner settles; keep the existing
         # pre-response assertion of the exact owner startup receipt as well.
-        gate = self.server.allow_writer if writer else self.server.allow_response
+        gate = (self.server.allow_recovery if 'Recovery fixture task' in json.dumps(last) else
+                self.server.allow_writer if writer else self.server.allow_response)
         if not gate.wait(55):
             self.send_error(504)
             return
@@ -110,7 +112,8 @@ def capture_sidebar(herdr, work, env, resize, evidence):
                 os.waitpid(pid, 0)
 
 
-def run(root, model, package, baseline, evidence, nested):
+def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
+        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences):
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -140,6 +143,9 @@ def run(root, model, package, baseline, evidence, nested):
     if nested:
         target.mkdir()
         subprocess.run(['git', 'init', '-q'], cwd=target, env=env, check=True)
+    if worktree_choice:
+        subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                        'commit', '-q', '--allow-empty', '-m', 'Native fixture base'], cwd=target, env=env, check=True)
     model.task = TASK + (' in risk-analytics.' if nested else '')
     (profile/'settings.json').write_text(json.dumps(dict(packages=[str(package)], defaultProvider='fixture',
                                                        defaultModel='fixture', defaultThinkingLevel='off')))
@@ -196,16 +202,136 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             for name, pane in [('smoke-supervisor', supervisor), ('smoke-planner', planner)]:
                 until(f'{name} shell available', lambda: shell_alone(pane))
                 cli('agent', 'start', name, '--kind', 'pi', '--pane', pane)
-            cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
+            if not no_supervisor:
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
             def visible(pane):
                 return subprocess.check_output([herdr, 'pane', 'read', pane, '--source', 'visible'],
                                                cwd=work, env=env, text=True, timeout=8)
-            until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
-            cli('agent', 'send-keys', supervisor, 'enter')
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
-            until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
-            cli('agent', 'prompt', planner, f'/start-implementation {model.task}')
+            if no_supervisor:
+                assert not state_path.exists()
+            else:
+                until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if delivery_preferences:
+                cli('agent', 'prompt', planner, '/continuation')
+                until('delivery menu entry', lambda: 'Delivery preferences' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                screen = until('delivery preferences view', lambda: visible(planner) if
+                    'Push branch: Ask First' in visible(planner) else None)
+                assert 'Start review: Automatic' in screen and 'Close review panes: Off' in screen
+                if evidence: (evidence/'delivery-default-80.txt').write_text(screen)
+                cli('agent', 'send-keys', planner, 'esc')
+                assert not (state_dir/'delivery-preferences.json').exists()
+                until('planner idle after preference cancel', lambda:
+                    cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/continuation')
+                until('delivery menu reopened', lambda: 'Delivery preferences' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('default choices shown again', lambda: 'Push branch: Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'down', 'down', 'enter')
+                until('push preference choices', lambda: 'Push branch · Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('draft choice', lambda: 'Push branch: Automatic' in visible(planner))
+                cli('agent', 'send-keys', planner, 'down', 'enter')
+                until('fix preference choices', lambda: 'Fix review findings · Ask First' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('effective draft choice', lambda:
+                    'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(visible(planner).split()))
+                cli('agent', 'send-keys', planner, 'down', 'down', 'down', 'down', 'down', 'enter')
+                def saved():
+                    path = state_dir/'delivery-preferences.json'
+                    if not path.exists(): return False
+                    values = json.loads(path.read_text())['values']
+                    return values['pushBranch'] == 'Automatic' and values['fixReviewFindings'] == 'Automatically Fix'
+                until('delivery preference saved', saved)
+                # Native clients supply PTY dimensions; the fixture sidebar takes 42 columns.
+                for width in (80, 40):
+                    master, slave = pty.openpty()
+                    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                struct.pack('HHHH', 60, width + 42, 0, 0))
+                    client = subprocess.Popen([herdr], cwd=work, env=env, stdin=slave,
+                                              stdout=slave, stderr=slave, start_new_session=True,
+                                              preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+                    os.close(slave)
+                    try:
+                        until(f'{width}-column pane', lambda:
+                            cli('pane', 'layout', '--pane', planner)['layout']['area']['width'] == width)
+                        if width == 80:
+                            cli('pane', 'focus', '--pane', supervisor, '--direction', 'down')
+                            until('planner idle after preference save', lambda:
+                                cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                            cli('agent', 'prompt', planner, '/continuation')
+                            until('delivery menu at 80 columns', lambda: '→ Delivery preferences' in visible(planner))
+                            cli('agent', 'send-keys', planner, 'enter')
+                        screen = until(f'saved choices at {width} columns', lambda: visible(planner) if
+                            'Push branch: Automatic' in visible(planner) else None)
+                        assert 'Close review panes: Off' in screen
+                        assert 'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(screen.split())
+                        if evidence: (evidence/f'delivery-saved-{width}.txt').write_text(screen)
+                        if width == 40: cli('agent', 'send-keys', planner, 'esc')
+                    finally:
+                        client.terminate()
+                        try: client.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            client.kill()
+                            client.wait(timeout=5)
+                        os.close(master)
+                print('Native delivery menu passed: defaults, Escape, Save and 80/40-column views', flush=True)
+                return
+            previous_supervisor = None
+            if restart_supervisor:
+                previous_supervisor = json.loads(state_path.read_text())['ownerToken']
+                cli('agent', 'send-keys', supervisor, 'ctrl+d')
+                until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
+                retained = json.loads(state_path.read_text())
+                retained['routes']['fixture-held-route'] = {'paused': True, 'reason': 'Independent test route pause'}
+                state_path.write_text(json.dumps(retained) + '\n')
+            if paused_supervisor:
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('global pause persisted', lambda: json.loads(state_path.read_text())['paused'])
+            placement = '--new-space -- ' if new_space else ''
+            if worktree_choice:
+                occupied = cli('pane', 'split', planner, '--direction', 'right', '--cwd', str(target))['pane']['pane_id']
+                panes.append(occupied)
+                until('occupied checkout shell', lambda: shell_alone(occupied))
+                cli('agent', 'start', 'smoke-existing', '--kind', 'pi', '--pane', occupied)
+                cli('agent', 'prompt', occupied, '/continuation-worker start')
+                until('independent worker confirmation', lambda: 'Start worker supervision?' in visible(occupied))
+                cli('agent', 'send-keys', occupied, 'enter')
+                until('independent live writer', lambda: len(json.loads(state_path.read_text())['workers']) == 1)
+                cli('agent', 'prompt', planner, f'/start-implementation Implement W123-D05 in {target}.')
+                screen = until('one exact worktree selection', lambda: visible(planner) if
+                    'Create in current space' in visible(planner) else None)
+                assert 'Repository:' in screen and 'Base:' in screen and 'Branch:' in screen and 'Path:' in screen
+                assert 'Create in new space' in screen and 'Cancel' in screen
+                cli('agent', 'send-keys', planner, 'esc')
+                until('cancelled worktree choice', lambda: 'Worktree choice cancelled' in visible(planner))
+                assert len(json.loads(state_path.read_text())['workers']) == 1
+                assert not list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))
+                print('Native worktree choice passed: one exact selector and no effects on cancel', flush=True)
+                return
+            if preflight_recovery:
+                claim_path = state_dir/f'delegation-writer-{hashlib.sha256(str(target).encode()).hexdigest()}.json'
+                claim_path.write_text(json.dumps({'id': '11111111-1111-4111-8111-111111111111'}))
+                cli('agent', 'prompt', planner, f'/start-implementation {placement}{model.task}')
+                def refused_attempt():
+                    attempts = list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))
+                    if not attempts: return None
+                    record = json.loads(attempts[0].read_text())
+                    return record if record['status'] == 'preflight-refused' else None
+                refused = until('proved no-split owner refusal', refused_attempt)
+                assert len(json.loads(state_path.read_text())['workers']) == 0
+                claim_path.unlink()
+                until('planner idle after refusal', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/reload')
+                until('planner reload completed', lambda: 'Reloaded keybindings' in visible(planner))
+                until('planner idle after reload', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+            cli('agent', 'prompt', planner, f'/start-implementation {placement}{model.task}')
 
             def dispatched(role):
                 for f in state_dir.glob('spawn-????????-????-????-????-????????????.json'):
@@ -217,6 +343,27 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     if attempt['status'] == 'dispatched':
                         return attempt
             attempt = until('owner assignment dispatched', lambda: dispatched('owner'), 50)
+            if paused_supervisor:
+                assert not json.loads(state_path.read_text())['paused']
+                print('Native supervisor resume passed: one owner command, no second confirmation', flush=True)
+            if no_supervisor or restart_supervisor:
+                starts = list(state_dir.glob('supervisor-start-????????-????-????-????-????????????.json'))
+                assert len(starts) == 1 and json.loads(starts[0].read_text())['status'] == 'ready'
+                started = json.loads(starts[0].read_text())
+                assert started['pane']['workspace_id'] != cli('agent', 'get', planner)['agent']['workspace_id']
+                assert not (state_dir/'supervisor-start-pending.json').exists()
+                if previous_supervisor:
+                    state = json.loads(state_path.read_text())
+                    assert state['ownerToken'] != previous_supervisor
+                    assert state['routes']['fixture-held-route'] == {
+                        'paused': True, 'reason': 'Independent test route pause'}
+                panes.append(started['pane']['pane_id'])
+                scenario = 'retained-state restart' if previous_supervisor else 'fresh bootstrap'
+                print(f'Native supervisor {scenario} passed: dedicated space, one owner command', flush=True)
+            if preflight_recovery:
+                assert attempt['id'] == refused['id']
+                assert len(list(state_dir.glob('spawn-????????-????-????-????-????????????.json'))) == 1
+                print('Native preflight recovery passed: same scope/key after reload, one owner split', flush=True)
             panes.append(attempt['paneId'])
             assert (home/'slow-shell-ready').read_text().strip() == attempt['id']
             state = json.loads(state_path.read_text())
@@ -224,7 +371,14 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             owner = state['workers'][attempt['workerId']]
             assert owner['role'] == 'owner' and owner['paneId'] == attempt['paneId']
             assert owner['cwd'] == str(target) and attempt['child']['cwd'] == str(target), owner
-            assert cli('agent', 'get', planner)['agent']['cwd'] == str(work)
+            planner_info = cli('agent', 'get', planner)['agent']
+            assert planner_info['cwd'] == str(work)
+            if new_space:
+                assert attempt['child']['workspaceId'] != planner_info['workspace_id']
+                assert attempt['child']['workspaceId'] == owner['workspaceId']
+                print('Native new-space owner passed: planner unchanged and target checkout preserved', flush=True)
+            else:
+                assert attempt['child']['workspaceId'] == planner_info['workspace_id']
             assert owner['sessionId'] == attempt['child']['sessionId'] and not owner['paused'], owner
             receipt = json.loads((state_dir/f"spawn-receipt-{attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -235,6 +389,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             writer_binding = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
             assert writer_binding['paneId'] == writer and writer_binding['sessionId'] == writer_attempt['child']['sessionId']
             assert writer_binding['cwd'] == str(target) and writer_attempt['child']['cwd'] == str(target)
+            assert writer_binding['workspaceId'] == owner['workspaceId']
             assert writer_binding['recipient']['sessionId'] == owner['sessionId'] and not writer_binding['paused']
             receipt = json.loads((state_dir/f"spawn-receipt-{writer_attempt['id']}.json").read_text())
             assert receipt['status'] == 'sent', receipt
@@ -248,6 +403,10 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             turns = [json.loads(line) for line in Path(owner['sessionFile']).read_text().splitlines()]
             users = [turn for turn in turns if turn.get('message', {}).get('role') == 'user']
             assert len(users) == 1 and model.task in json.dumps(users[0]), users
+            grant = json.loads((state_dir/f"delegation-{attempt['grantId']}.json").read_text())
+            assert grant['deliveryPreferences']['startReview'] == 'Automatic'
+            assert 'Effective delivery preferences for this assignment:' in json.dumps(users[0])
+            assert 'Fix review findings: Ask First' in json.dumps(users[0])
             def displayed(pane, activity, role):
                 agent = cli('agent', 'get', pane)['agent']
                 info = cli('pane', 'get', pane)['pane']
@@ -270,7 +429,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     cli('server', 'reload-config')
                 capture_sidebar(herdr, work, env, resize, evidence)
                 (evidence/'presentation.json').write_text(json.dumps(seen, ensure_ascii=False, indent=2))
-            if not baseline:
+            if not baseline and not checkpoint_recovery:
                 manual_label = 'Manual owner label'
                 cli('pane', 'rename', owner['paneId'], manual_label)
                 renamed_at = time.monotonic()
@@ -287,6 +446,52 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 print('Post-rename metadata renewal: ' + json.dumps(renewal, ensure_ascii=False), flush=True)
                 if evidence:
                     (evidence/'manual-rename-renewal.json').write_text(json.dumps(renewal, ensure_ascii=False, indent=2))
+            if checkpoint_recovery:
+                recovery_pane = cli('pane', 'split', planner, '--direction', 'down', '--cwd', str(work))['pane']['pane_id']
+                panes.append(recovery_pane)
+                until('recovery shell', lambda: shell_alone(recovery_pane))
+                cli('agent', 'start', 'recovery-worker', '--kind', 'pi', '--pane', recovery_pane)
+                cli('agent', 'prompt', recovery_pane, '/continuation-worker start')
+                until('recovery worker confirmation', lambda: 'Start worker supervision?' in visible(recovery_pane))
+                cli('agent', 'send-keys', recovery_pane, 'enter')
+                def recovery_binding():
+                    state = json.loads(state_path.read_text())
+                    return next((binding for binding in state['workers'].values()
+                                 if binding['paneId'] == recovery_pane), None)
+                binding = until('managed recovery worker enrolled', recovery_binding)
+                worker_id = binding['workerId']
+                # Keep unrelated supervisor judgment out of this bounded recovery
+                # probe. The independent global pause must survive the repair.
+                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
+                cli('agent', 'send-keys', supervisor, 'enter')
+                until('global pause', lambda: json.loads(state_path.read_text())['paused'])
+                observation_path = state_dir/f'observation-{worker_id}.json'
+                cli('agent', 'prompt', recovery_pane, 'Recovery fixture task: report one sentence.')
+                until('recovery worker running', lambda: observation_path.exists() and
+                      json.loads(observation_path.read_text())['outcome'] == 'working')
+                checkpoint = Path(binding['checkpoint'])
+                checkpoint.unlink()
+                checkpoint.mkdir()
+                model.allow_recovery.set()
+                def failed_report():
+                    observation = json.loads(observation_path.read_text())
+                    return observation if observation.get('checkpointRecovery') else None
+                failed = until('held managed checkpoint write', failed_report)
+                assert failed['hold'] and failed['holdError']['kind'] == 'checkpoint', failed
+                checkpoint.rmdir()
+                cli('agent', 'prompt', recovery_pane, '/reload')
+                def restored():
+                    observation = json.loads(observation_path.read_text())
+                    current = json.loads(state_path.read_text())['workers'][worker_id]
+                    return observation if (observation['outcome'] == 'completed' and not observation['hold'] and
+                                           observation['stop'] == failed['checkpointRecovery']['report']['stop'] and
+                                           not current['paused']) else None
+                restored_report = until('same native stop automatically reassessed', restored, 25)
+                assert restored_report['finalReply'] == ANSWER
+                assert json.loads(state_path.read_text())['paused'], 'Global pause must survive recovery'
+                assert ANSWER in checkpoint.read_text()
+                print('Native checkpoint recovery passed: unchanged report, fresh checkpoint write, no Return/Clear hold')
             print('Native launch passed: slow Bash startup, exact owner/writer enrollment, and independent activity and display')
         except Exception:
             for pane in panes:
@@ -300,6 +505,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
         finally:
             model.allow_response.set()
             model.allow_writer.set()
+            model.allow_recovery.set()
             if server.poll() is None:
                 try:
                     cli('server', 'stop')
@@ -316,6 +522,14 @@ if __name__ == '__main__':
     parser.add_argument('--baseline', action='store_true', help='expect no delegated display labels')
     parser.add_argument('--evidence', type=Path, help='directory for disposable native sidebar captures')
     parser.add_argument('--nested', action='store_true', help='launch owner and writer in a nested checkout')
+    parser.add_argument('--checkpoint-recovery', action='store_true', help='exercise a managed write failure and native reload')
+    parser.add_argument('--preflight-recovery', action='store_true', help='correct a proved pre-split refusal after reload')
+    parser.add_argument('--new-space', action='store_true', help='launch owner and writer in a new isolated Herdr space')
+    parser.add_argument('--worktree-choice', action='store_true', help='inspect and cancel the occupied-checkout selector')
+    parser.add_argument('--paused-supervisor', action='store_true', help='resume ordinary global pause in owner launch')
+    parser.add_argument('--no-supervisor', action='store_true', help='bootstrap a new supervisor in the same invocation')
+    parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
+    parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -323,8 +537,12 @@ if __name__ == '__main__':
             ThreadingHTTPServer(('127.0.0.1', 0), Model) as model:
         model.allow_response = threading.Event()
         model.allow_writer = threading.Event()
+        model.allow_recovery = threading.Event()
         threading.Thread(target=model.serve_forever, daemon=True).start()
         try:
-            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence, args.nested)
+            run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
+                args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
+                args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
+                args.delivery_preferences)
         finally:
             model.shutdown()

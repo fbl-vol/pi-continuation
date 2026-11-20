@@ -43,6 +43,15 @@ Cause-specific labels/details are display-only, with unknown legacy causes left
 unclassified. This amends P2/P3/P7 within the existing seven scenarios, not a new
 acceptance set. Published v0.3.2 retains its intermediate-tool-error holds.
 
+A managed checkpoint-write failure may retain the exact successful settled report
+for recovery. On session restore, only an unchanged native report and a fresh,
+successful write of its identical checkpoint allow that same stop to be reassessed.
+The supervisor can undo only its own matching checkpoint-unavailable pause after
+rechecking the exact session and checkpoint; explicit worker, route and global
+pauses, decisions, unresolved effects and failed runs remain protected. An absent
+or changed report, an unwritable checkpoint or legacy failure without retained
+proof remains held. This is P3/P4/P7 recovery, not replay or a new acceptance set.
+
 ### User-approved confirmed replacement amendment (since v0.3.0)
 
 When a pane now hosts a different saved Pi session, worker `start` may offer an
@@ -120,6 +129,27 @@ refusal identifies the original attempt when available. Inspect its retained
 record and live pane/session before any recovery; no timeout, rephrasing, or
 restart clears the fence. This extends P1/P5/P6/P7 without changing advanced controls.
 
+**Unreleased source (W005-D09):** If no supervisor currently owns the private
+state, the same explicit launch first starts one through ordinary Pi loading in
+a dedicated Herdr space, then verifies its exact native session and endpoint
+before creating an owner. A gracefully stopped supervisor can be replaced while
+retaining worker, route, notice and pause state; an unresolved lock or ambiguous
+native space/start effect remains held, never retried as another supervisor.
+This is not automatic enrollment on package installation and does not waive
+user decisions, independent pauses or review holds. The v0.5.0 release still
+requires a running supervisor before owner launch.
+
+**Unreleased W005-D08:** `/continuation` offers a native Delivery preferences
+menu. Explicit Save persists per-user defaults for future assignments; Cancel
+and Escape discard drafts. Each new owner pins its defaults, while its own
+assignment may be explicitly overridden without changing the global choice.
+The owner sees effective choices in its assignment and can reread them with the
+exact-owner `continuation_delivery_preferences` tool. Saved Automatically Fix
+remains effectively Ask First until a separate human-selection amendment.
+Preferences are not publication, merge or approval authority; mandatory review,
+repo restrictions and independent holds still apply. Neither menu nor read tool
+performs Git, review, retirement, or live state effects.
+
 ### Chat-based owner launch (since v0.4.2)
 
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
@@ -141,8 +171,16 @@ writer claim, decision, or unproven delivery: the command explains the blocker a
 creates no pane. In particular, v0.4.5 pending notices do not prove delivery was
 never attempted and remain blocking; the successful archive scenario uses proof
 recorded by the new supervisor before its first send attempt. A possibly effected
-launch stays held for inspection, not replay.
-See the [contract](contract.md) for the retained state and compatibility boundary.
+launch stays held for inspection, not replay. An owner start refused before any
+pane creation can reuse the exact retained scope, stable key and attempt after
+its prerequisite is corrected, including after a Pi reload; the earlier refusal
+remains in history. A write-ahead split- or workspace-request marker fences even a lost response,
+and a prior created worktree is not a pre-effect retry. Current source also
+offers one exact create-or-cancel worktree selection with current/new-space
+placement, or accepts an exact approved worktree specification without prompting.
+Explicit new-space launch starts owner and writer together without moving the
+planner; the current space remains the no-prompt default. Space choice cannot
+bypass checkout ownership. Legacy/uncertain attempts remain held. See the [contract](contract.md) for the retained state and compatibility boundary.
 
 ### Approved coordinating-owner amendment (since v0.4.0)
 

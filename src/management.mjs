@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Type } from 'typebox';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultRoot, readJson, claim } from './store.mjs';
@@ -10,6 +11,9 @@ import { withWorkerHandoff } from './ownership.mjs';
 import { setScopePaused, stopWorker } from './policy.mjs';
 import { displayName, workerStatus } from './status.mjs';
 import { diagnostics } from './diagnostics.mjs';
+import { deliveryFields, effectiveDeliveryPreferences, readDeliveryPreferences,
+  saveDeliveryPreferences, readAssignmentDeliveryPreferences,
+  saveAssignmentDeliveryPreferences } from './preferences.mjs';
 
 const controlPath = (root, id) => join(root, `management-${id}.json`);
 const unchanged = (left, right) => JSON.stringify(left) === JSON.stringify(right);
@@ -146,6 +150,26 @@ async function requestControl(root, socketPath, paneId, ctx, worker, view, row, 
 export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
   socketPath = process.env.HERDR_SOCKET_PATH, paneId = process.env.HERDR_PANE_ID } = {}) {
   const report = diagnostics('management');
+  pi.registerTool({
+    name: 'continuation_delivery_preferences', label: 'Assignment delivery preferences',
+    description: 'Read effective human-set delivery preferences for this exact coordinating owner. Choices never grant Git publication or automatic finding selection.',
+    parameters: Type.Object({}),
+    async execute(_call, _args, _signal, _update, ctx) {
+      const view = await managementSnapshot(root, socketPath, ctx);
+      const owner = view.own;
+      if (!owner?.current || owner.binding.role !== 'owner')
+        refuse('Exact supervised coordinating owner required for delivery preferences');
+      const grant = await readJson(join(root, `delegation-${owner.binding.coordinatorId}.json`));
+      if (!grant.ownerLaunch || grant.id !== owner.binding.coordinatorId)
+        refuse('Exact owner assignment unavailable');
+      const saved = await readAssignmentDeliveryPreferences(root, grant);
+      const effective = effectiveDeliveryPreferences(saved);
+      return { content: [{ type: 'text', text: deliveryFields.map(field =>
+        `${field.label}: ${effective[field.key]}`).join('\n') +
+        '\nRepository rules and permissions still apply. User finding selection remains required; these settings do not grant publication.' }],
+      details: { grantId: grant.id, effective } };
+    },
+  });
   pi.registerCommand('continuation', {
     description: 'Manage this session and known supervised workers without copying IDs',
     handler: async (_args, ctx) => {
@@ -160,6 +184,28 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
         const value = await worker.selectManagement(ctx, title, choices);
         if (!current()) refuse('Session or prompt changed; reopen the management menu');
         return value;
+      };
+      const editPreferences = async (title, saved, save) => {
+        const draft = { ...saved };
+        while (true) {
+          const effective = effectiveDeliveryPreferences(draft);
+          const rows = deliveryFields.map(field => `${field.label}: ${draft[field.key]}` +
+            (draft[field.key] === effective[field.key] ? '' : ` (effective: ${effective[field.key]})`));
+          const choice = await select(`${title}\nRepository rules and human decisions still apply.`,
+            [...rows, 'Save', 'Cancel']);
+          if (!choice || choice === 'Cancel') return;
+          if (choice === 'Save') {
+            if (!current()) refuse('Session changed before saving delivery preferences');
+            await save(draft);
+            ctx.ui.notify('Delivery preferences saved', 'info');
+            return;
+          }
+          const field = deliveryFields[rows.indexOf(choice)];
+          if (!field) refuse('Delivery preference selection changed');
+          const selected = await select(`${field.label} · ${draft[field.key]}`,
+            [...field.choices, 'Back']);
+          if (field.choices.includes(selected)) draft[field.key] = selected;
+        }
       };
       try {
         const view = await managementSnapshot(root, socketPath, ctx);
@@ -178,13 +224,32 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
         const previous = view.workers.filter(row => !row.binding.stopped && !row.current);
         const labels = rows.map((row, index) => `${index + 1}. ${row.name} — ${row.status.label}`);
         const previousChoice = `Previous / unavailable registrations (${previous.length})`;
-        const choices = [...(view.own ? ['This session: details'] : []),
+        const choices = ['Delivery preferences',
+          ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
+          ...(view.own ? ['This session: details'] : []),
           ...(supervisor.active ? ['Pause global supervision', 'Start global supervision'] :
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
           ...labels, ...(previous.length ? [previousChoice] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
+        if (choice === 'Delivery preferences')
+          return editPreferences('Delivery preferences · defaults for new assignments',
+            await readDeliveryPreferences(root), draft => saveDeliveryPreferences(root, draft));
+        if (choice === 'This assignment: delivery') {
+          const path = join(root, `delegation-${view.own.binding.coordinatorId}.json`);
+          const grant = await readJson(path);
+          if (!grant.ownerLaunch || grant.id !== view.own.binding.coordinatorId)
+            refuse('Exact owner assignment unavailable');
+          const previous = await readAssignmentDeliveryPreferences(root, grant);
+          return editPreferences('This assignment · delivery preferences', previous, async draft => {
+            await freshView(view.own);
+            const latest = await readJson(path);
+            if (latest.revoked || !unchanged(latest, grant))
+              refuse('Assignment changed; reopen delivery preferences');
+            await saveAssignmentDeliveryPreferences(root, grant.id, draft);
+          });
+        }
         await freshView();
         if (choice === 'Pause global supervision') return supervisor.command('pause global', ctx);
         if (choice === 'Start global supervision' || choice === 'Start supervisor here') return supervisor.command('start', ctx);

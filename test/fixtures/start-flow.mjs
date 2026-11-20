@@ -84,6 +84,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory } =
       assistant: (text, stopReason = 'stop') => append({ type: 'message',
         message: { role: 'assistant', stopReason, content: [{ type: 'text', text }] } }),
       command: (name, argument) => commands.get(name)(argument, ctx),
+      tool: (name, args = {}) => tools.get(name)('call', args, undefined, undefined, ctx),
       emit: async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn(event, ctx); },
       dispose: args => tools.get('continuation_disposition')('call', args, undefined, undefined, ctx),
       spawn: (args, signal) => tools.get('continuation_spawn')('spawn-call', args, signal, undefined, ctx),

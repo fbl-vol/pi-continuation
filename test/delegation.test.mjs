@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
@@ -10,6 +11,8 @@ import { sendAction } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
 import { delegatedDisplayLabel, delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
 import { checkpointHash } from '../src/policy.mjs';
+import { defaultDeliveryPreferences, readAssignmentDeliveryPreferences,
+  readDeliveryPreferences, saveDeliveryPreferences } from '../src/preferences.mjs';
 
 test('role names use just a unique shared task code, a bounded checkout name, or the role', () => {
   const grant = { scope: 'Implement W123-D04; W123-D04 only. Private prose must not appear.' };
@@ -43,7 +46,7 @@ async function fixture(t, options = {}) {
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
   let serial = 0;
-  f.onRequest(async request => {
+  f.onRequest(async (request, socket) => {
     const { method, params } = request;
     if (method === 'pane.get') await options.beforePaneRead?.(f, params.pane_id);
     if (method === 'pane.get' && options.closedPanes?.includes(params.pane_id))
@@ -51,11 +54,28 @@ async function fixture(t, options = {}) {
     if (method === 'session.snapshot' && options.historicalPanes)
       return { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents,
         panes: [...f.agents, ...options.historicalPanes] } };
+    if (method === 'workspace.create' && params.label === 'Continuation Supervisor') {
+      effects.push('supervisor-workspace');
+      if (options.supervisorWorkspaceLost) throw new Error('lost supervisor workspace response');
+      assert.fail('This fixture only exercises a lost supervisor workspace response');
+    }
+    if (method === 'workspace.create') {
+      effects.push('workspace');
+      const pane = { pane_id: 'w-new:p1', terminal_id: 'terminal-w-new:p1',
+        workspace_id: 'w-new', tab_id: 'w-new:t1' };
+      children.push({ pane, env: params.env, cwd: params.cwd });
+      assert.equal(params.focus, false);
+      assert.equal(params.label, 'Owner · W123-D04');
+      if (options.workspaceLost) throw new Error('lost workspace response after creation');
+      return { type: 'workspace_created', workspace: { workspace_id: 'w-new' }, root_pane: pane };
+    }
     if (method === 'pane.split') {
       effects.push('split');
       await options.beforeSplit?.(f);
       const id = `w:p${++serial + 10}`;
-      const pane = { pane_id: id, terminal_id: `terminal-${id}`, workspace_id: 'w', tab_id: 'w:t1' };
+      const source = f.agents.find(a => a.pane_id === params.target_pane_id);
+      const pane = { pane_id: id, terminal_id: `terminal-${id}`,
+        workspace_id: source.workspace_id, tab_id: source.tab_id };
       children.push({ pane, env: params.env, cwd: params.cwd });
       assert.equal(params.focus, false);
       if (options.onSplit) options.onSplit(params);
@@ -125,7 +145,7 @@ async function fixture(t, options = {}) {
       const child = children.find(c => c.pane.pane_id === params.target);
       return { type: 'agent_info', agent: { ...child.agent, ...options.readinessPatch } };
     }
-    await options.onSnapshot?.(f, children, request);
+    await options.onSnapshot?.(f, children, request, socket);
   });
   const authorize = (scope = 'Implement the approved fixture feature. Read-only subdelegation is permitted; user selects review fixes.') =>
     f.worker.command('continuation-delegate', `writer ${scope}`);
@@ -288,7 +308,8 @@ test('P1 explicit scope does not silently prefer a negative path over its named 
   let choices;
   f.worker.select((_title, options) => { choices = options; return undefined; });
   await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
-  assert.deepEqual(choices, [target, excluded]);
+  assert.deepEqual(choices, [target, `New space · ${target}`,
+    excluded, `New space · ${excluded}`]);
   assert.deepEqual(f.effects, []);
   f.worker.select(() => target);
   await f.worker.command('start-implementation', scope);
@@ -313,10 +334,11 @@ test('P1 checkout ambiguity uses one native choice; cancellation has no launch e
   let choices;
   f.worker.select((_title, options) => { choices = options; return undefined; });
   await assert.rejects(f.worker.command('start-implementation', scope), /Checkout selection cancelled/);
-  assert.deepEqual(choices, [join(f.root, 'alpha'), join(f.root, 'beta')]);
+  assert.deepEqual(choices, [join(f.root, 'alpha'), `New space · ${join(f.root, 'alpha')}`,
+    join(f.root, 'beta'), `New space · ${join(f.root, 'beta')}`]);
   assert.deepEqual(f.effects, []);
   assert.deepEqual(await f.attempts(), []);
-  f.worker.select((_title, options) => options[1]);
+  f.worker.select((_title, options) => options[2]);
   await f.worker.command('start-implementation', scope);
   assert.equal(f.children[0].cwd, join(f.root, 'beta'));
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
@@ -387,15 +409,15 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
   f.worker.select(() => undefined);
   await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
   assert.deepEqual(f.effects, []);
-  f.worker.select((_title, choices) => choices[0]);
-  f.worker.confirm(false);
+  f.worker.select((_title, choices) => choices.at(-1));
   await assert.rejects(f.worker.command('start-implementation', scope), /Worktree choice cancelled/);
   assert.deepEqual(f.effects, []);
-  f.worker.confirm(async () => {
+  f.worker.select(async (title, choices) => {
+    assert.match(title, /Repository: .*\nBase: [a-f0-9]{40}\nBranch: work\/w123-d04-[a-f0-9]{8}\nPath: /);
     await f.worker.emit('ui_prompt_start');
     f.worker.raw('\r');
     await f.worker.emit('ui_prompt_end');
-    return true;
+    return choices[0];
   });
   await f.worker.command('start-implementation', scope);
   const alternate = f.children[0].cwd;
@@ -403,6 +425,7 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
     assert.equal(f.children[0].agent.cwd, alternate);
     assert.deepEqual((await f.state()).workers[original.workerId], original);
     assert.equal(f.worker.ctx.cwd, f.root);
+    assert.equal(f.worker.confirmations.length, 0);
     const writer = (await f.children[0].native.spawn(task)).details;
     assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
     assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
@@ -411,6 +434,259 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
   } finally {
     execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
   }
+});
+
+test('P1/P7 one occupied-checkout choice creates the alternate tree in a new space', async t => {
+  const f = await fixture(t, { onSplit: params => assert.match(params.cwd, /-w123-d04-[a-f0-9]{8}$/) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const existing = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  let selections = 0;
+  f.worker.select((title, choices) => {
+    selections++;
+    assert.match(title, /Repository: .*\nBase: [a-f0-9]{40}\nBranch: .*\nPath: /);
+    assert.deepEqual(choices, ['Create in current space', 'Create in new space', 'Cancel']);
+    return choices[1];
+  });
+  await f.worker.command('start-implementation', 'Implement W123-D04 here.');
+  const alternate = f.children[0].cwd;
+  try {
+    assert.equal(selections, 1);
+    assert.equal(f.children[0].pane.workspace_id, 'w-new');
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.deepEqual(f.effects, ['workspace', 'start', 'task']);
+  } finally {
+    execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
+});
+
+test('P1/P7 failed supervisor activation after a worktree choice leaves no tree or intent', async t => {
+  let subscription;
+  const f = await fixture(t, { onSnapshot: (_fixture, _children, request, socket) => {
+    if (request.method === 'events.subscribe') subscription = socket;
+  } });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const existing = f.native('w:p2');
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  await f.supervisorCommand('pause global');
+  assert.ok(subscription, 'Supervisor subscription must be observed before testing its loss');
+
+  let proposed;
+  f.worker.select(async (title, choices) => {
+    proposed = title.match(/^Path: (.+)$/m)?.[1];
+    assert.ok(proposed);
+    subscription.destroy();
+    for (let i = 0; i < 100 && !(await f.state()).failure; i++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok((await f.state()).failure, 'The supervisor must have lost its subscription');
+    return choices[0];
+  });
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04 here.'),
+    /Supervisor (ownership unavailable|fault)/);
+  assert.equal(existsSync(proposed), false);
+  assert.deepEqual((await readdir(f.root)).filter(name => name.startsWith('owner-worktree-')), []);
+  assert.deepEqual(f.effects, []);
+  assert.equal((await f.state()).paused, true);
+});
+
+test('P1/P7 an exact authorized worktree skips the selector and second confirmation', async t => {
+  const f = await fixture(t, { onSplit: params => assert.match(params.cwd, /-preauthorized$/) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  const alternate = `${f.root}-preauthorized`;
+  const base = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const options = { worktree: { repository: f.root, base, branch: 'work/authorized', path: alternate } };
+  f.worker.select(() => assert.fail('Exact authorized placement must not prompt'));
+  try {
+    await f.worker.command('start-implementation',
+      `--options ${JSON.stringify(options)} -- Implement W123-D04 here.`);
+    assert.equal(f.children[0].cwd, alternate);
+    assert.equal(f.worker.confirmations.length, 0);
+    assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  } finally {
+    if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
+});
+
+test('P1/P3 new owner pins preferences, shows effective human-selection rule and saves only its override', async t => {
+  const f = await fixture(t);
+  const original = { ...defaultDeliveryPreferences(), fixReviewFindings: 'Automatically Fix', pushBranch: 'Off' };
+  await saveDeliveryPreferences(f.root, original);
+  await f.worker.command('start-implementation', 'Implement W123-D04.');
+  const grant = await readJson(join(f.root, `delegation-${(await f.attempt()).grantId}.json`));
+  const owner = f.children[0].native;
+  assert.deepEqual(grant.deliveryPreferences, original);
+  assert.match(f.children[0].task, /Fix review findings: Ask First/);
+  assert.match(f.children[0].task, /Push branch: Off/);
+  await saveDeliveryPreferences(f.root, { ...original, pushBranch: 'Automatic' });
+  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Off',
+    'later defaults do not rewrite a running assignment');
+  let step = 0;
+  owner.select((title, choices) => {
+    if (step === 1 || step === 3) {
+      assert.match(title, /This assignment · delivery preferences/);
+      assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
+    }
+    const answer = ['This assignment: delivery', 'Push branch: Off', 'Ask First', 'Save'][step++];
+    assert.ok(choices.includes(answer), JSON.stringify(choices));
+    return answer;
+  });
+  await owner.command('continuation', '');
+  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Ask First');
+  assert.equal((await readDeliveryPreferences(f.root)).pushBranch, 'Automatic');
+  const effective = await owner.tool('continuation_delivery_preferences');
+  assert.equal(effective.details.grantId, grant.id);
+  assert.equal(effective.details.saved, undefined, 'the model-facing tool exposes only effective choices');
+  assert.equal(effective.details.effective.fixReviewFindings, 'Ask First');
+  assert.equal(effective.details.effective.pushBranch, 'Ask First');
+  await assert.rejects(f.worker.tool('continuation_delivery_preferences'),
+    /Exact supervised coordinating owner/);
+});
+
+test('P1/P4 a live supervisor cannot bypass an unresolved lost-start response', async t => {
+  const f = await fixture(t);
+  const id = 'b936e2c9-9e87-42de-9837-9b38f2a7dd0d';
+  const parent = f.worker.ctx.sessionManager.getSessionId();
+  const scope = 'Implement W123-D04.';
+  await atomicJson(join(f.root, 'supervisor-start-pending.json'), { token: id, parent, scope });
+  await atomicJson(join(f.root, `supervisor-start-${id}.json`), {
+    id, parent, scope, cwd: f.root, status: 'activating',
+    pane: { pane_id: 'w:supervisor', terminal_id: 'exact-supervisor-terminal' },
+  });
+  const owner = (await f.state()).ownerToken;
+  await assert.rejects(f.worker.command('start-implementation', scope),
+    /Supervisor startup .* is unresolved/);
+  assert.deepEqual(f.effects, [], 'no owner pane, Pi start or task under a pending supervisor start');
+  assert.equal((await f.state()).ownerToken, owner);
+  assert.equal((await readJson(join(f.root, 'supervisor-start-pending.json'))).token, id);
+});
+
+test('P1/P4 a lost supervisor space response remains held and does not create another space', async t => {
+  const f = await fixture(t, { supervisorWorkspaceLost: true });
+  await f.supervisor.emit('session_shutdown');
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor startup .* held for inspection/);
+  const pending = await readJson(join(f.root, 'supervisor-start-pending.json'));
+  assert.ok(pending.token);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor startup .* is unresolved/);
+  assert.deepEqual(f.effects, ['supervisor-workspace']);
+});
+
+test('P1/P4 an existing supervisor lock still prevents startup if its state is missing', async t => {
+  const f = await fixture(t);
+  await rm(join(f.root, 'supervisor.json'));
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Retained supervisor lock/);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P4 an unresolved retained supervisor lock prevents a competing owner', async t => {
+  const f = await fixture(t);
+  const state = await f.state();
+  await f.supervisor.emit('session_shutdown');
+  await writeFile(join(f.root, 'supervisor.lock'), JSON.stringify({ token: state.ownerToken,
+    sessionId: state.supervisorSession }) + '\n');
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Retained supervisor lock/);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P4 one start resumes an ordinarily paused supervisor without a second confirmation', async t => {
+  const f = await fixture(t);
+  const other = join(f.root, 'other');
+  await mkdir(other);
+  execFileSync('git', ['init', '--quiet', other]);
+  const existing = f.native('w:p2');
+  existing.ctx.cwd = other;
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'independent-terminal',
+    workspace_id: 'other', tab_id: 'other:t1', cwd: other, foreground_cwd: other,
+    agent_session: { ...f.agents[0].agent_session, value: existing.file } });
+  await existing.emit('session_start', { reason: 'startup' });
+  await existing.command('continuation-worker', 'start');
+  const workerId = existing.entries.find(e => e.customType === 'pi-continuation-worker').data.workerId;
+  await f.supervisorCommand(`pause worker ${workerId}`);
+  await f.supervisorCommand('pause route other');
+  await f.supervisorCommand('pause global');
+  assert.equal((await f.state()).paused, true);
+  const beforeConfirmations = f.supervisor.confirmations.length;
+  await f.worker.command('start-implementation', 'Implement W123-D04.');
+  const state = await f.state();
+  assert.equal(state.paused, false);
+  assert.equal(state.acceptStarts, true);
+  assert.equal(state.workers[workerId].paused, true);
+  assert.equal(state.routes.other.paused, true);
+  assert.equal(f.supervisor.confirmations.length, beforeConfirmations);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P4 an aborted supervisor turn is not treated as an ordinary launch pause', async t => {
+  const f = await fixture(t);
+  await f.supervisor.emit('agent_settled', { aborted: true });
+  assert.match((await f.state()).reason, /Supervisor turn aborted/);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
+    /Supervisor fault or unknown pause/);
+  assert.equal((await f.state()).paused, true);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P4 cancelling checkout selection does not resume a paused supervisor', async t => {
+  const f = await fixture(t);
+  for (const name of ['alpha', 'beta']) {
+    const path = join(f.root, name);
+    await mkdir(path);
+    execFileSync('git', ['init', '--quiet', path]);
+  }
+  await f.supervisorCommand('pause global');
+  f.worker.select(() => undefined);
+  await assert.rejects(f.worker.command('start-implementation', 'Implement alpha and beta.'),
+    /Checkout selection cancelled/);
+  assert.equal((await f.state()).paused, true);
+  assert.deepEqual(f.effects, []);
+});
+
+test('P1/P7 an explicit new space starts the owner and writer there without moving the planner', async t => {
+  const f = await fixture(t);
+  f.worker.select(() => assert.fail('Explicit space placement must not prompt'));
+  await f.worker.command('start-implementation', '--new-space -- Implement W123-D04.');
+  assert.equal(f.children[0].pane.workspace_id, 'w-new');
+  assert.equal(f.agents[0].workspace_id, 'w');
+  const writer = (await f.children[0].native.spawn(task)).details;
+  assert.equal((await f.state()).workers[writer.workerId].workspaceId, 'w-new');
+  assert.deepEqual(f.effects, ['workspace', 'start', 'task', 'split', 'start', 'task']);
+  assert.equal(f.worker.confirmations.length, 0);
+});
+
+test('P7 another space cannot bypass a live writer in the same checkout', async t => {
+  const f = await fixture(t);
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  await f.worker.command('start-implementation', '--new-space -- Implement W123-D04.');
+  await f.children[0].native.spawn(task);
+  f.worker.select((_title, choices) => {
+    assert.deepEqual(choices, ['Create this worktree', 'Cancel']);
+    return 'Cancel';
+  });
+  await assert.rejects(f.worker.command('start-implementation', '--new-space -- Implement W123-D05.'),
+    /Worktree choice cancelled/);
+  assert.deepEqual(f.effects, ['workspace', 'start', 'task', 'split', 'start', 'task']);
+});
+
+test('P1/P7 a lost new-space response remains fenced without a duplicate space', async t => {
+  const f = await fixture(t, { workspaceLost: true });
+  const scope = '--new-space -- Implement W123-D04.';
+  await assert.rejects(f.worker.command('start-implementation', scope), /held for inspection/);
+  assert.equal((await f.attempt()).status, 'held');
+  await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-effect refusal/);
+  assert.deepEqual(f.effects, ['workspace']);
 });
 
 test('P1/P6 native launch needs no child confirmations and delegates only through the new owner', async t => {
@@ -428,7 +704,7 @@ test('P1/P6 native launch needs no child confirmations and delegates only throug
   assert.equal(ownerBinding.sessionId, owner.native.id);
   assert.equal((await readdir(f.root)).some(file => file.startsWith('owner-launch-pending-')), false,
     'observed owner dispatch releases the checkout fence');
-  await assert.rejects(f.worker.command('start-implementation', scope), /EEXIST/);
+  await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-effect refusal/);
   await assert.rejects(f.worker.spawn(task), /No scoped delegation grant/);
   const writer = (await owner.native.spawn(task)).details;
   const review = { role: 'read-only', key: 'review', task: 'Independently review the writer result.' };
@@ -688,14 +964,36 @@ for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient',
   });
 }
 
+test('P1/P7 a proved pre-split refusal resumes the same scope/key after correction and reload', async t => {
+  const f = await fixture(t);
+  const scope = 'Implement the agreed fixture change.';
+  const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
+  await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
+  const refused = await f.attempt();
+  assert.equal(refused.status, 'preflight-refused');
+  assert.deepEqual(f.effects, []);
+  await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
+  assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+  assert.equal((await f.attempt()).preflightFailures.length, 2);
+  assert.deepEqual(f.effects, []);
+
+  await rm(claimPath);
+  await f.worker.emit('session_shutdown');
+  await f.worker.emit('session_start', { reason: 'reload' });
+  await f.worker.command('start-implementation', scope);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+  assert.equal((await f.attempt()).status, 'dispatched');
+  assert.equal(Object.values((await f.state()).workers).filter(binding => binding.role === 'owner').length, 1);
+});
+
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
   const f = await fixture(t, { splitLost: true });
   await f.supervisorCommand('pause global');
-  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /Global continuation is paused/);
-  assert.deepEqual(f.effects, []);
-  await f.supervisorCommand('activate global');
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /held for inspection.*disconnected before response/);
-  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /EEXIST/);
+  assert.equal((await f.state()).paused, false);
+  await assert.rejects(f.worker.command('start-implementation', 'Agreed scope'), /no proved pre-effect refusal/);
   const attempt = await f.attempt();
   await assert.rejects(f.worker.command('start-implementation', 'Agreed scope.'), error =>
     error.message.includes('Unresolved owner launch') && error.message.includes(attempt.id));
