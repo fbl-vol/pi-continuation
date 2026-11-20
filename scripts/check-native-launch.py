@@ -220,6 +220,9 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 previous_supervisor = json.loads(state_path.read_text())['ownerToken']
                 cli('agent', 'send-keys', supervisor, 'ctrl+d')
                 until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
+                retained = json.loads(state_path.read_text())
+                retained['routes']['fixture-held-route'] = {'paused': True, 'reason': 'Independent test route pause'}
+                state_path.write_text(json.dumps(retained) + '\n')
             if paused_supervisor:
                 cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
                 until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
@@ -284,7 +287,10 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert started['pane']['workspace_id'] != cli('agent', 'get', planner)['agent']['workspace_id']
                 assert not (state_dir/'supervisor-start-pending.json').exists()
                 if previous_supervisor:
-                    assert json.loads(state_path.read_text())['ownerToken'] != previous_supervisor
+                    state = json.loads(state_path.read_text())
+                    assert state['ownerToken'] != previous_supervisor
+                    assert state['routes']['fixture-held-route'] == {
+                        'paused': True, 'reason': 'Independent test route pause'}
                 panes.append(started['pane']['pane_id'])
                 scenario = 'retained-state restart' if previous_supervisor else 'fresh bootstrap'
                 print(f'Native supervisor {scenario} passed: dedicated space, one owner command', flush=True)
