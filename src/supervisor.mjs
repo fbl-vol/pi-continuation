@@ -65,8 +65,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         void annotations?.refresh();
         const closing = closeOwner;
         closeOwner = undefined;
-        try { await closing?.(); }
-        finally { throw report('persist state', error, diagnosticContext); }
+        // Withdraw the listener now, but do not await its drain from the IPC
+        // handler whose save failed. The handler must return before drain ends.
+        if (closing) void closing().catch(failure => report('drain owner endpoint', failure, diagnosticContext));
+        throw report('persist state', error, diagnosticContext);
       }
     });
     // Keep the error visible to this caller, but allow the fail-closed pause write.
