@@ -1061,7 +1061,7 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
-for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
   test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
   const closedPanes = [];
   let interrupt = outcome.startsWith('interrupted');
@@ -1145,7 +1145,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy rec
     id: '55555555-5555-4555-8555-555555555555', grantId: oldGrant });
   const nextScope = 'Assignment B: write the next fixture.';
   let priorLaunch;
-  if (outcome === 'legacy refusal retry') {
+  if (['legacy refusal retry', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence'].includes(outcome)) {
     const savedClaim = await readJson(legacyClaim);
     await rm(legacyClaim);
     await assert.rejects(f.worker.command('start-implementation', nextScope), /refused before pane creation/);
@@ -1155,6 +1155,23 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy rec
     }
     assert.equal(priorLaunch.status, 'preflight-refused');
     await atomicJson(legacyClaim, savedClaim);
+    if (outcome !== 'legacy refusal retry') {
+      // Crash boundary: the grant's exact confirmed choice reached disk, but
+      // retirement was not requested and the attempt is still preflight-refused.
+      const path = join(f.root, `delegation-${priorLaunch.grantId}.json`);
+      const grant = await readJson(path);
+      const workerIds = Object.keys((await f.state()).workers).sort();
+      if (outcome === 'legacy changed set') workerIds.pop();
+      await atomicJson(path, { ...grant, closeAssignment: oldGrant, abandonAssignment: true,
+        confirmedRetryAbandonment: { launchId: priorLaunch.id, writerId: savedClaim.id, workerIds } });
+      await atomicJson(join(f.root, `owner-launch-pending-${createHash('sha256').update(f.root).digest('hex')}.json`), {
+        token: outcome === 'legacy competing fence' ? oldWriter : priorLaunch.id,
+      });
+      await f.worker.emit('session_shutdown');
+      await f.worker.emit('session_start', { reason: 'reload' });
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+    }
   }
   const priorRecords = [];
   if (outcome.startsWith('legacy ')) {
@@ -1190,15 +1207,21 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy rec
   const startB = () => f.worker.command('start-implementation',
     outcome === 'unnamed' || outcome.startsWith('legacy ') ? nextScope :
       `--options {"closeAssignment":"${oldGrant}"} -- ${nextScope}`);
-  if (outcome === 'legacy receipt' || outcome === 'legacy unknown failure') {
-    await assert.rejects(startB(), /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/);
+  const legacyRefusal = {
+    'legacy receipt': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
+    'legacy unknown failure': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
+    'legacy changed set': /Confirmed abandonment set or writer claim changed/,
+    'legacy competing fence': /Unresolved owner launch fence/,
+  }[outcome];
+  if (legacyRefusal) {
+    await assert.rejects(startB(), legacyRefusal);
     assert.equal(choices, 0);
     assert.equal(f.children.length, 3);
     assert.deepEqual((await f.state()).notices, notices);
     assert.equal((await readJson(oldGrantPath)).revoked, false);
     return;
   }
-  if (!(['confirm', 'unnamed', 'legacy refusal retry'].includes(outcome) || outcome.startsWith('interrupted'))) {
+  if (!(['confirm', 'unnamed', 'legacy refusal retry', 'legacy confirmed restart'].includes(outcome) || outcome.startsWith('interrupted'))) {
     await assert.rejects(startB(), /abandonment cancelled|absence is unverified|Another writer claim|active authority|unresolved delivery effect|startup|another owner grant/);
     assert.equal(choices, ['competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant'].includes(outcome) ? 0 : 1);
     assert.equal(f.children.length, 3);
@@ -1234,7 +1257,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy rec
     }
   }
   await startB();
-  assert.equal(choices, 1);
+  assert.equal(choices, outcome === 'legacy confirmed restart' ? 0 : 1);
   assert.equal(f.children.length, 4);
   const final = await f.state();
   assert.deepEqual(final.notices, notices, 'unknown outcomes and receipts are never reclassified');

@@ -480,6 +480,20 @@ const writerClaimPath = (root, checkout) => join(root, `delegation-writer-${dige
 
 const closeoutScopePath = (root, checkout, scope) => join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`);
 
+function confirmedRetryAbandonment(grant, attempt) {
+  const choice = grant.confirmedRetryAbandonment;
+  return choice && attempt.status === 'preflight-refused' && !attempt.closeRequested &&
+    !attempt.abandonRequested && attempt.paneRequested !== true && !attempt.paneId && !attempt.child &&
+    choice.launchId === attempt.id && grant.abandonAssignment === true && isId(grant.closeAssignment) &&
+    isId(choice.writerId) && Array.isArray(choice.workerIds) && choice.workerIds.length &&
+    choice.workerIds.every(isId);
+}
+
+const abandonmentSelection = candidate => ({ writerId: candidate.claim.id,
+  workerIds: candidate.bindings.map(w => w.workerId).sort() });
+const matchesAbandonmentSelection = (choice, candidate) =>
+  isDeepStrictEqual({ writerId: choice.writerId, workerIds: choice.workerIds }, abandonmentSelection(candidate));
+
 // A proved pre-pane refusal may keep its original scope/key across a healthy
 // supervisor replacement. Persist the new grant owner first; a lost response
 // between writes can then reconcile the same exact attempt on the next call.
@@ -497,8 +511,9 @@ async function recoverPreflight(root, checkout, scope, parent, state) {
       attempt.paneRequested === true || attempt.paneId || attempt.child ||
       attempt.closeRequested || attempt.abandonRequested) return;
   try {
-    await readJson(ownerLaunchPath(root, checkout));
-    refuse('Unresolved owner launch fence before preflight recovery');
+    const fence = await readJson(ownerLaunchPath(root, checkout));
+    if (fence.token !== attempt.id || !confirmedRetryAbandonment(grant, attempt))
+      refuse('Unresolved owner launch fence before preflight recovery');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (grant.ownerToken === state.ownerToken && grant.supervisorSession === state.supervisorSession &&
       attempt.ownerToken === state.ownerToken) return { grant, attempt };
@@ -838,6 +853,8 @@ export async function abandonLaunchAssignment(root, request, state, readPane, re
   requireDelegationParent(live, attempt.parent);
   const selected = await abandonmentCandidate(root, grant.checkout, request.grantId, previous,
     live, readPane, readSnapshot, attempt.id);
+  if (grant.confirmedRetryAbandonment && !matchesAbandonmentSelection(grant.confirmedRetryAbandonment, selected))
+    refuse('Confirmed abandonment set or writer claim changed');
   if (!stillCurrent() || !isDeepStrictEqual(previous, state) ||
       !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))) ||
       (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
@@ -1071,6 +1088,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const recipient = ownerLaunch ? undefined : parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
     { id: parentWorker.coordinatorId } : undefined);
   const resumingClose = !!retry?.recoveringClose;
+  const confirmedRetry = !!retry && confirmedRetryAbandonment(authority.grant, retry);
   if (retryAbandonAssignment && (!ownerLaunch || !retry || resumingClose || authority.grant.closeAssignment ||
       retry.closeRequested || retry.abandonRequested)) refuse('Prior launch cannot adopt the abandonment choice');
   const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
@@ -1089,7 +1107,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   let dispatched = false;
   try {
     if (launchFence) {
-      await claimOwnerLaunch(launchFence, id, resumingClose);
+      await claimOwnerLaunch(launchFence, id, resumingClose || confirmedRetry);
       fenceClaimed = true;
     }
     if (resumingClose) {
@@ -1098,17 +1116,24 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
         delete spawn.failure;
       }
       delete spawn.recoveringClose;
-    } else if (retry) await save('prepared');
+    } else if (retry && !retryAbandonAssignment && !confirmedRetry) await save('prepared');
     const oldId = retryAbandonAssignment ?? authority.grant.closeAssignment;
     if (ownerLaunch && oldId) {
+      let confirmedSelection;
       if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
         const old = (await delegationAuthority(root, reference, parent)).state;
         const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
           await readLive(), readPane, readLive, id);
-        const named = candidate.bindings.map(w => w.workerId).sort().join(', ');
-        const choice = await selectApproval(`Abandon inactive assignment ${oldId} and its historical workers ${named}, preserving unanswered holds and unknown notice deliveries?`,
-          ['Abandon exact set and start new assignment', 'Cancel']);
-        if (choice !== 'Abandon exact set and start new assignment') refuse('Assignment abandonment cancelled');
+        confirmedSelection = abandonmentSelection(candidate);
+        if (confirmedRetry) {
+          if (!matchesAbandonmentSelection(authority.grant.confirmedRetryAbandonment, candidate))
+            refuse('Confirmed abandonment set or writer claim changed');
+        } else {
+          const named = confirmedSelection.workerIds.join(', ');
+          const choice = await selectApproval(`Abandon inactive assignment ${oldId} and its historical workers ${named}, preserving unanswered holds and unknown notice deliveries?`,
+            ['Abandon exact set and start new assignment', 'Cancel']);
+          if (choice !== 'Abandon exact set and start new assignment') refuse('Assignment abandonment cancelled');
+        }
       } else if (!authority.grant.abandonAssignment && !authority.grant.closeExplicit && !resumingClose) {
         const choice = await selectApproval(`Close assignment ${oldId} and start this new assignment?`,
           ['Close old assignment and start new one', 'Cancel']);
@@ -1116,10 +1141,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       }
       checkLocal();
       if (retryAbandonAssignment) {
-        // This exact retry originally refused without a retirement choice.
-        // Bind the new confirmed choice under its checkout fence before IPC.
+        // Keep preflight-refused until the effect request is recorded. If Pi
+        // exits after this grant write, the same pre-effect attempt can resume
+        // using only this confirmed set and the matching checkout fence.
         authority.grant.closeAssignment = oldId;
         authority.grant.abandonAssignment = true;
+        authority.grant.confirmedRetryAbandonment = { launchId: id, ...confirmedSelection };
         await atomicJson(grantPath(root, authority.grant.id), authority.grant);
       }
       closeRequested = true;
@@ -1462,12 +1489,14 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       `${options.assignment} ${options.worktree.repository}` : options.assignment,
       (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
     const target = checkout.checkout;
-    await recoverPreflight(root, target, scope, grant.parent, state);
+    const preflight = await recoverPreflight(root, target, scope, grant.parent, state);
+    const confirmed = preflight && confirmedRetryAbandonment(preflight.grant, preflight.attempt) ? preflight.grant : undefined;
     const recoveredClose = await recordedCloseout(root, target, scope, grant.parent, state);
-    if (recoveredClose && options.closeAssignment &&
-        options.closeAssignment !== recoveredClose.grant.closeAssignment)
-      refuse('Previous closeout belongs to another assignment');
-    let closing = recoveredClose?.grant.closeAssignment ?? options.closeAssignment;
+    const retained = recoveredClose?.grant ?? confirmed;
+    if (retained && (options.worktree || (options.closeAssignment && options.closeAssignment !== retained.closeAssignment)))
+      refuse('Previous closeout belongs to another assignment or checkout');
+    let closing = retained?.closeAssignment ?? options.closeAssignment;
+    if (confirmed) grant.abandonAssignment = true;
     if (originOwner) {
       if (closing && closing !== originOwner.coordinatorId) refuse('Only this exact owner assignment may be closed');
       closing = originOwner.coordinatorId;
