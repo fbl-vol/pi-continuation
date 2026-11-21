@@ -177,8 +177,8 @@ never attempted and remain blocking; the successful archive scenario uses proof
 recorded by the new supervisor before its first send attempt. A possibly effected
 launch stays held for inspection, not replay. An owner start refused before any
 pane creation can reuse the exact retained scope, stable key and attempt after
-its prerequisite is corrected, including after a Pi reload; the earlier refusal
-remains in history. A matching saved approval on a positively absent historical
+its prerequisite is corrected, including after a Pi reload or healthy supervisor replacement with the old owner proven absent; the earlier refusal
+remains in history. A writer refusal before acquiring its writer claim likewise keeps the same key/attempt for a corrected prerequisite under unchanged authority; a generic held attempt or possible pane effect is not retryable. A closed, paused delegated worker from a removed independent checkout does not block a free tree when its dispatched grant and exact absence retain a verified different tree identity. Manual or otherwise unidentified historical bindings still block when Git identity cannot be established. A matching saved approval on a positively absent historical
 session instead requires one explicit abandonment choice in the original command.
 Cancel, a live/reappearing or unverified session, unfinished startup, unresolved
 effects, or another checkout blocker refuses without retiring the binding. A chosen

@@ -1492,35 +1492,44 @@ test('P1/P7 a proved pre-split refusal resumes the same scope/key after correcti
   assert.equal(Object.values((await f.state()).workers).filter(binding => binding.role === 'owner').length, 1);
 });
 
-test('P1/P5 baseline: a proved preflight refusal cannot use the same scope after supervisor replacement', async t => {
+for (const partial of [false, true]) test(`P1/P5 proved preflight refusal survives supervisor replacement${partial ? ' and partial rebind' : ''}`, async t => {
   const f = await fixture(t);
   const scope = 'Implement the agreed fixture change.';
   const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
   await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
   await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
   const refused = await f.attempt();
+  const oldToken = (await f.state()).ownerToken;
   await rm(claimPath);
   await f.supervisor.emit('session_shutdown');
   await f.supervisorCommand('start');
-  await assert.rejects(f.worker.command('start-implementation', scope), /ownership|no proved pre-effect/);
-  assert.deepEqual(f.effects, []);
+  if (partial) {
+    const current = await f.state();
+    const grantPath = join(f.root, `delegation-${refused.grantId}.json`);
+    await atomicJson(grantPath, { ...(await readJson(grantPath)), ownerToken: current.ownerToken,
+      supervisorSession: current.supervisorSession, rebindTokens: [oldToken, current.ownerToken] });
+  }
+  await f.worker.command('start-implementation', scope);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
   assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+  assert.equal((await f.attempt()).status, 'dispatched');
 });
 
-test('P1/P5 baseline: writer stable key stays held after a proved pre-pane claim refusal', async t => {
+test('P1/P5 writer stable key recovers a proved pre-pane claim refusal without a new attempt', async t => {
   const f = await fixture(t);
   await f.authorize();
   const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
   await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
   await assert.rejects(f.worker.spawn(task), /held for inspection.*writer claim/);
   const first = await f.attempt();
-  assert.equal(first.status, 'held');
+  assert.equal(first.status, 'preflight-refused');
   assert.equal(first.paneRequested, undefined);
   assert.deepEqual(f.effects, []);
   await rm(claimPath);
-  await assert.rejects(f.worker.spawn(task), /EEXIST/);
+  const launched = (await f.worker.spawn(task)).details;
+  assert.equal(launched.id, first.id);
   assert.deepEqual(await f.attempts(), [`spawn-${first.id}.json`]);
-  assert.deepEqual(f.effects, []);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
 });
 
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
@@ -1783,7 +1792,7 @@ for (const unavailable of [true, false]) {
     if (unavailable) {
       await assert.rejects(f.worker.spawn(task), /Existing worker checkout cannot be verified/);
       assert.deepEqual(f.effects, [], 'unknown checkout must reject before pane creation');
-      assert.equal((await f.attempt()).status, 'held');
+      assert.equal((await f.attempt()).status, 'preflight-refused');
       assert.equal(Object.keys((await f.state()).workers).length, 1);
       assert.equal((await readdir(f.root)).some(p => p.startsWith('delegation-writer-')), false);
     } else {
@@ -1804,6 +1813,32 @@ test('P3/P4 baseline: surviving exact assignment owner loses delegation after su
     /Intended running supervisor changed or is unavailable/);
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
   assert.equal((await f.state()).workers[(await f.attempt()).workerId]?.paused, false);
+});
+
+test('P4/P7 a verified delegated binding from a removed independent tree cannot block the free target', async t => {
+  const closedPanes = [];
+  const f = await fixture(t, { onSplit: () => {}, closedPanes, historicalPanes: [] });
+  const removed = join(f.root, 'independent');
+  await mkdir(removed);
+  execFileSync('git', ['init', '--quiet', removed]);
+  const parent = f.native('w:p2');
+  parent.ctx.cwd = removed;
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'independent-terminal', cwd: removed,
+    agent_session: { ...f.agents[0].agent_session, value: parent.file } });
+  await parent.emit('session_start', { reason: 'startup' });
+  await parent.command('continuation-delegate', 'writer Inspect the independent fixture tree.');
+  const child = (await parent.spawn({ key: 'independent-writer', task: 'Inspect fixture.', role: 'writer' })).details;
+  await f.supervisorCommand(`pause worker ${child.workerId}`);
+  const binding = (await f.state()).workers[child.workerId];
+  const retained = await readJson(join(f.root, `spawn-${binding.delegationId}.json`));
+  assert.equal(retained.status, 'dispatched');
+  assert.equal((await readJson(join(f.root, `delegation-${retained.grantId}.json`))).checkout, removed);
+  f.agents.splice(f.agents.findIndex(a => a.pane_id === binding.paneId), 1);
+  closedPanes.push(binding.paneId);
+  await rm(removed, { recursive: true });
+  await f.worker.command('start-implementation', 'Assignment B: update the free target.');
+  assert.equal(f.children.length, 2);
+  assert.equal((await f.state()).workers[child.workerId].paused, true);
 });
 
 test('P4/P7 baseline: a closed paused binding from a removed separate checkout blocks a free tree', async t => {

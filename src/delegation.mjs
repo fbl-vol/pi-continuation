@@ -411,6 +411,27 @@ async function historicalWorkerBlocker(root, worker, state, live, readPane, read
   return null;
 }
 
+async function retainedIndependentCheckout(root, worker, target, state, live, readPane, readSnapshot) {
+  if (!worker.delegationId || !worker.paused || !await absentSession(worker, live, readPane, readSnapshot) ||
+      !await noRelatedStartup(root, [worker])) return false;
+  const attempt = await readJson(spawnPath(root, worker.delegationId));
+  const grant = await readJson(grantPath(root, attempt.grantId));
+  const saved = await readJson(join(root, `worker-${worker.workerId}.json`));
+  const child = attempt.child;
+  if (attempt.status !== 'dispatched' || attempt.workerId !== worker.workerId ||
+      grant.cwd !== worker.cwd || !registrationMatches(saved, worker) ||
+      child?.sessionId !== worker.sessionId || child.sessionFile !== worker.sessionFile ||
+      child.paneId !== worker.paneId || child.cwd !== worker.cwd ||
+      unresolvedWorkerEffects(state, worker.workerId)) return false;
+  return grant.checkout !== target && grant.checkout !== await commonDirectory(target);
+}
+
+function unresolvedWorkerEffects(state, id) {
+  return !!state.inflight[id] || !!state.ownerWaits[id] ||
+    state.dispositions[id]?.action === 'decision' ||
+    Object.values(state.notices).some(n => n.workerId === id && unresolvedNotice(n));
+}
+
 async function inspectCheckout(root, grant, parent, recipient, state, live, readPane, readSnapshot, recover, approvals) {
   if (!grant.checkout || await checkoutIdentity(grant.cwd, grant.checkout) !== grant.checkout)
     refuse('Delegation checkout identity changed');
@@ -420,7 +441,12 @@ async function inspectCheckout(root, grant, parent, recipient, state, live, read
     const id = isId(worker.workerId) ? worker.workerId : '(invalid ID)';
     let checkout;
     try { checkout = legacyGrant ? await commonDirectory(worker.cwd) : await checkoutRoot(worker.cwd); }
-    catch { refuse(`Existing worker checkout cannot be verified for ${id}; inspect writer ownership`); }
+    catch {
+      try {
+        if (await retainedIndependentCheckout(root, worker, grant.cwd, state, live, readPane, readSnapshot)) continue;
+      } catch { /* Retained evidence is unavailable or contradictory. */ }
+      refuse(`Existing worker checkout cannot be verified for ${id}; inspect writer ownership`);
+    }
     if (checkout !== grant.checkout) continue;
     const parentOwner = worker.role === 'owner' && worker.coordinatorId &&
       worker.sessionId === parent.sessionId && worker.sessionFile === parent.sessionFile &&
@@ -453,6 +479,47 @@ async function inspectCheckout(root, grant, parent, recipient, state, live, read
 const writerClaimPath = (root, checkout) => join(root, `delegation-writer-${digest(checkout)}.json`);
 
 const closeoutScopePath = (root, checkout, scope) => join(root, `owner-launch-${digest(`${checkout}\n${scope}`)}.json`);
+
+// A proved pre-pane refusal may keep its original scope/key across a healthy
+// supervisor replacement. Persist the new grant owner first; a lost response
+// between writes can then reconcile the same exact attempt on the next call.
+async function recoverPreflight(root, checkout, scope, parent, state) {
+  let scoped;
+  try { scoped = await readJson(closeoutScopePath(root, checkout, scope)); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  const grant = await readJson(grantPath(root, scoped.grantId));
+  const keyed = await readJson(join(root, `spawn-key-${digest(`${grant.id}\nassignment-owner`)}.json`));
+  const attempt = await readJson(spawnPath(root, keyed.id));
+  if (!grant.ownerLaunch || grant.checkout !== checkout || grant.scope !== scope ||
+      !isDeepStrictEqual(grant.parent, parent) || grant.revoked || grant.worktreeCreated ||
+      attempt.id !== keyed.id || attempt.grantId !== grant.id || attempt.task !== scope ||
+      attempt.role !== 'owner' || attempt.status !== 'preflight-refused' ||
+      attempt.paneRequested === true || attempt.paneId || attempt.child ||
+      attempt.closeRequested || attempt.abandonRequested) return;
+  try {
+    await readJson(ownerLaunchPath(root, checkout));
+    refuse('Unresolved owner launch fence before preflight recovery');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (grant.ownerToken === state.ownerToken && grant.supervisorSession === state.supervisorSession &&
+      attempt.ownerToken === state.ownerToken) return { grant, attempt };
+  const lineage = grant.rebindTokens ?? [attempt.ownerToken];
+  if (!Array.isArray(lineage) || !lineage.length || lineage.at(-1) !== grant.ownerToken ||
+      !lineage.includes(attempt.ownerToken) || !lineage.every(isId) ||
+      new Set(lineage).size !== lineage.length ||
+      (lineage.includes(state.ownerToken) && grant.ownerToken !== state.ownerToken))
+    refuse('Prior preflight supervisor ownership is unresolved');
+  for (const token of lineage) if (token !== state.ownerToken && await ownerAlive(root, token))
+    refuse('Prior preflight supervisor ownership is unresolved');
+  if (grant.ownerToken !== state.ownerToken) {
+    grant.rebindTokens = [...lineage, state.ownerToken];
+    grant.ownerToken = state.ownerToken;
+    grant.supervisorSession = state.supervisorSession;
+    await atomicJson(grantPath(root, grant.id), grant);
+  }
+  attempt.ownerToken = state.ownerToken;
+  await atomicJson(spawnPath(root, attempt.id), attempt);
+  return { grant, attempt };
+}
 
 // Only a closeout recorded by this exact B launch may resume a pre-pane attempt.
 async function recordedCloseout(root, checkout, scope, parent, state) {
@@ -946,23 +1013,27 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const assignmentPath = join(root, `spawn-assignment-${assignmentKey}.json`);
   let id = randomUUID();
   let retry;
-  if (ownerLaunch) {
+  if (ownerLaunch || role === 'writer') {
     try {
       const keyed = await readJson(keyPath);
       const assigned = await readJson(assignmentPath);
       const previous = await readJson(spawnPath(root, keyed.id));
-      const recoveringClose = authority.grant.closeAssignment &&
+      const recoveringClose = ownerLaunch && authority.grant.closeAssignment &&
         (await recordedCloseout(root, authority.grant.checkout, task, parent,
           (await delegationAuthority(root, reference, parent)).state))?.attempt.id === previous.id;
-      if (assigned.id !== keyed.id || previous.id !== keyed.id ||
-          (previous.status !== 'preflight-refused' && !recoveringClose) || previous.grantId !== authority.grant.id ||
-          previous.key !== key || previous.task !== task || previous.role !== role ||
-          previous.ownerToken !== authority.grant.ownerToken ||
-          !isDeepStrictEqual(previous.parent, parent) || authority.grant.worktreeCreated)
+      const eligible = assigned.id === keyed.id && previous.id === keyed.id &&
+        (previous.status === 'preflight-refused' || recoveringClose) &&
+        previous.grantId === authority.grant.id && previous.key === key && previous.task === task &&
+        previous.role === role && previous.paneRequested !== true && !previous.paneId && !previous.child &&
+        previous.ownerToken === authority.grant.ownerToken &&
+        isDeepStrictEqual(previous.parent, parent) && !authority.grant.worktreeCreated;
+      if (!eligible && ownerLaunch)
         refuse('Prior owner launch has no proved pre-effect refusal; inspect before retrying');
-      id = keyed.id;
-      retry = previous;
-      if (recoveringClose) retry.recoveringClose = true;
+      if (eligible) {
+        id = keyed.id;
+        retry = previous;
+        if (recoveringClose) retry.recoveringClose = true;
+      }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   // Claims survive all uncertain effects. Only this exact durable preflight
@@ -985,6 +1056,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const readPane = id => transport(socketPath, 'pane.get', { pane_id: id });
   const readLive = () => readSnapshot(socketPath);
   let fenceClaimed = false;
+  let writerClaimed = false;
   let splitRequested = false;
   let abandonRequested = false;
   let closeRequested = false;
@@ -1059,6 +1131,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
         // durable writer claim regardless of later dispatch or failures.
         await requireNoWriterClaim(root, authority.grant.checkout, authority.grant.cwd);
         await claim(writerClaimPath(root, authority.grant.checkout), { id, grantId: spawn.grantId });
+        writerClaimed = true;
         await release(launchFence, id);
         fenceClaimed = false;
       }
@@ -1181,7 +1254,8 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     dispatched = true;
   } catch (error) {
     spawn.failure = error.message;
-    if (ownerLaunch && !splitRequested && !abandonRequested && !closeRequested && !authority.grant.worktreeCreated) {
+    if ((ownerLaunch && !splitRequested && !abandonRequested && !closeRequested && !authority.grant.worktreeCreated) ||
+        (role === 'writer' && !writerClaimed && !splitRequested)) {
       spawn.preflightFailures = [...(spawn.preflightFailures ?? []),
         { at: new Date().toISOString(), reason: error.message }];
       await save('preflight-refused');
@@ -1355,6 +1429,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       `${options.assignment} ${options.worktree.repository}` : options.assignment,
       (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
     const target = checkout.checkout;
+    await recoverPreflight(root, target, scope, grant.parent, state);
     const recoveredClose = await recordedCloseout(root, target, scope, grant.parent, state);
     if (recoveredClose && options.closeAssignment &&
         options.closeAssignment !== recoveredClose.grant.closeAssignment)
