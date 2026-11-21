@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdir, realpath } from 'node:fs/promises';
+import { readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
@@ -219,7 +219,8 @@ function launchOptions(input) {
   try { options = JSON.parse(input.slice('--options '.length, end)); }
   catch { refuse('Invalid launch options JSON'); }
   if (!options || typeof options !== 'object' || Array.isArray(options) ||
-      Object.keys(options).some(key => !['worktree', 'space'].includes(key)) ||
+      Object.keys(options).some(key => !['worktree', 'space', 'closeAssignment'].includes(key)) ||
+      (options.closeAssignment !== undefined && !isId(options.closeAssignment)) ||
       (options.space !== undefined && !['current', 'new'].includes(options.space)) ||
       (options.worktree !== undefined && (!options.worktree ||
         ['repository', 'base', 'branch', 'path'].some(key => typeof options.worktree[key] !== 'string'))))
@@ -288,8 +289,11 @@ export async function delegationAuthority(root, reference, binding) {
   if (grant.ownerLaunch) {
     if (reference.spawnId && worker?.role !== 'owner') refuse('Exact supervised coordinating owner required');
     if (!reference.spawnId && (state.supervisorSession === binding.sessionId ||
-      Object.values(state.workers).some(w => w.sessionId === binding.sessionId || w.sessionFile === binding.sessionFile)))
-      refuse('Launch requires an unsupervised planning session');
+      Object.values(state.workers).some(w => (w.sessionId === binding.sessionId || w.sessionFile === binding.sessionFile) &&
+        !(w.role === 'owner' && grant.closeAssignment === w.coordinatorId &&
+          ['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
+            .every(key => binding[key] === w[key])))))
+      refuse('Launch requires an unsupervised planner or the exact closing owner');
   }
   if (worker) {
     const observation = await readObservation(root, worker.workerId);
@@ -446,6 +450,46 @@ async function inspectCheckout(root, grant, parent, recipient, state, live, read
 }
 
 const writerClaimPath = (root, checkout) => join(root, `delegation-writer-${digest(checkout)}.json`);
+
+async function closeoutCandidate(root, checkout, grantId, state, live) {
+  const grant = await readJson(grantPath(root, grantId));
+  const claim = await readJson(writerClaimPath(root, checkout));
+  const attempt = await readJson(spawnPath(root, claim.id));
+  const owner = Object.values(state.workers).find(w => w.role === 'owner' && w.coordinatorId === grantId);
+  const children = Object.values(state.workers).filter(w => w.recipient?.id === grantId);
+  if (!grant.ownerLaunch || grant.revoked || grant.checkout !== checkout || claim.grantId !== grantId ||
+      attempt.id !== claim.id || attempt.grantId !== grantId || attempt.role !== 'writer' ||
+      attempt.status !== 'dispatched' || !owner || !children.some(w => w.delegationId === claim.id) ||
+      state.ownerWaits[owner.workerId]) refuse('Prior assignment is not eligible for closeout');
+  const key = digest(`${grantId}\nassignment-owner`);
+  const ownerKey = await readJson(join(root, `spawn-key-${key}.json`));
+  const ownerAttempt = await readJson(spawnPath(root, ownerKey.id));
+  if (ownerAttempt.status !== 'dispatched' || ownerAttempt.workerId !== owner.workerId ||
+      ownerAttempt.grantId !== grantId || state.routes[owner.route]?.paused ||
+      !sameOccupant(live.agents.find(a => a.pane_id === owner.paneId), owner))
+    refuse('Prior assignment owner or startup changed');
+  for (const file of await readdir(root)) {
+    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
+    const spawned = await readJson(join(root, file));
+    if (spawned.grantId === grantId && spawned.status !== 'dispatched')
+      refuse(`Unresolved assignment startup ${spawned.id}`);
+  }
+  for (const binding of [owner, ...children]) {
+    const agent = live.agents.find(a => a.pane_id === binding.paneId);
+    if (!sameOccupant(agent, binding) || !['idle', 'done'].includes(agent.agent_status) ||
+        binding.paused || binding.stopped || state.inflight[binding.workerId] ||
+        state.ownerWaits[binding.workerId] || state.dispositions[binding.workerId]?.action === 'decision' ||
+        Object.values(state.notices).some(n => (n.workerId === binding.workerId ||
+          n.recipient?.id === grantId) && unresolvedNotice(n)))
+      refuse(`Assignment worker ${binding.workerId} is active or has unresolved effects`);
+    const observation = await readObservation(root, binding.workerId);
+    if (!sameSession(observation.session, binding) || observation.hold ||
+        observation.bootstrapPending || observation.outcome !== 'completed')
+      refuse(`Assignment worker ${binding.workerId} has no settled eligible report`);
+  }
+  return { grant, claim, bindings: [owner, ...children] };
+}
+
 async function requireNoWriterClaim(root, checkout, cwd) {
   const paths = [writerClaimPath(root, checkout)];
   const legacy = await commonDirectory(cwd);
@@ -468,6 +512,41 @@ async function requireNoWriterClaim(root, checkout, cwd) {
 
 /** Owner queue only. No notice selection supplied by the caller; derive it from
  * the exact native checkout attempt and the current supervisor snapshot. */
+export async function closeLaunchAssignment(root, request, state, readSnapshot, stillCurrent, commit) {
+  const attempt = await readJson(spawnPath(root, request.id));
+  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
+  if (attempt.id !== request.id || attempt.status !== 'close-requested' || attempt.role !== 'owner' ||
+      attempt.grantId !== grant.id || attempt.ownerToken !== state.ownerToken || !grant.ownerLaunch ||
+      grant.closeAssignment !== request.grantId || attempt.task !== grant.scope ||
+      (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id)
+    refuse('No matching native close-and-start attempt');
+  const previous = structuredClone(state);
+  const live = await readSnapshot();
+  requireDelegationParent(live, attempt.parent);
+  const closing = await closeoutCandidate(root, grant.checkout, request.grantId, previous, live);
+  if (!stillCurrent() || !isDeepStrictEqual(previous, state) ||
+      (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
+      !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))))
+    refuse('Assignment closeout evidence changed');
+  const final = await readSnapshot();
+  requireDelegationParent(final, attempt.parent);
+  await closeoutCandidate(root, grant.checkout, request.grantId, state, final);
+  for (const binding of closing.bindings) {
+    state.retiredWorkers[binding.workerId] = { ...binding, paused: true, retiredBy: attempt.id };
+    delete state.workers[binding.workerId];
+  }
+  state.closedAssignments ??= {};
+  state.closedAssignments[request.grantId] = { launchId: attempt.id, writerId: closing.claim.id,
+    at: new Date().toISOString() };
+  try { await commit(); }
+  catch (error) { Object.assign(state, previous); throw error; }
+  await atomicJson(grantPath(root, request.grantId), { ...closing.grant, revoked: true });
+  const claim = await readJson(writerClaimPath(root, grant.checkout));
+  if (!isDeepStrictEqual(claim, closing.claim)) refuse('Writer claim changed during closeout');
+  await rm(writerClaimPath(root, grant.checkout));
+  return request.grantId;
+}
+
 export async function abandonLaunchApproval(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
   const attempt = await readJson(spawnPath(root, request.id));
   const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
@@ -659,7 +738,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   }
   const parentWorker = Object.values(authority.state.workers).find(w => w.sessionId === parent.sessionId &&
     w.paneId === parent.paneId);
-  const recipient = parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
+  const recipient = ownerLaunch ? undefined : parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
     { id: parentWorker.coordinatorId } : undefined);
   const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
     parent, role, key, task, status: 'prepared', at: new Date().toISOString(),
@@ -672,6 +751,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   let fenceClaimed = false;
   let splitRequested = false;
   let abandonRequested = false;
+  let closeRequested = false;
   let dispatched = false;
   try {
     if (launchFence) {
@@ -679,6 +759,22 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       fenceClaimed = true;
     }
     if (retry) await save('prepared');
+    if (ownerLaunch && authority.grant.closeAssignment) {
+      const oldId = authority.grant.closeAssignment;
+      if (!authority.grant.closeExplicit) {
+        const choice = await selectApproval(`Close assignment ${oldId} and start this new assignment?`,
+          ['Close old assignment and start new one', 'Cancel']);
+        if (choice !== 'Close old assignment and start new one') refuse('Assignment closeout cancelled');
+      }
+      checkLocal();
+      closeRequested = true;
+      await save('close-requested');
+      const result = await send(root, { type: 'launch-close', id, grantId: oldId,
+        ownerToken: authority.grant.ownerToken }, 'supervisor', { timeoutMs: 15000 });
+      if (!result.accepted || result.id !== id || result.grantId !== oldId)
+        refuse(result.message ?? 'Assignment closeout unverified');
+      await save('prepared');
+    }
     if (role === 'writer' || ownerLaunch) {
       const { state: current, fresh } = await check();
       const approvals = ownerLaunch ? [] : undefined;
@@ -832,12 +928,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     dispatched = true;
   } catch (error) {
     spawn.failure = error.message;
-    if (ownerLaunch && !splitRequested && !abandonRequested && !authority.grant.worktreeCreated) {
+    if (ownerLaunch && !splitRequested && !abandonRequested && !closeRequested && !authority.grant.worktreeCreated) {
       spawn.preflightFailures = [...(spawn.preflightFailures ?? []),
         { at: new Date().toISOString(), reason: error.message }];
       await save('preflight-refused');
     } else await save('held');
-    if (ownerLaunch && !splitRequested && !abandonRequested)
+    if (ownerLaunch && !splitRequested && !abandonRequested && !closeRequested)
       throw new Error(`Implementation start ${id} refused before pane creation; no agent started (${error.message}).`);
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
   } finally {
@@ -978,9 +1074,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, revoked: false };
     const live = await snapshot(socketPath);
     grant.parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
+    const originOwner = Object.values(state.workers).find(w => w.sessionId === session.id || w.sessionFile === session.file);
     if (!allowed() || !sameSession(currentSession(ctx), grant.parent) || state.supervisorSession === session.id ||
-        Object.values(state.workers).some(w => w.sessionId === session.id || w.sessionFile === session.file))
-      refuse('Launch requires an unchanged unsupervised planning session');
+        (originOwner && (originOwner.role !== 'owner' || !sameOccupant(live.agents.find(a => a.pane_id === paneId), originOwner))))
+      refuse('Launch requires an unchanged planner or exact coordinating owner');
     requireDelegationParent(live, grant.parent);
     if (state.routes[grant.parent.workspaceId]?.paused) refuse('Delegation route is paused');
     if (!scope) {
@@ -1005,8 +1102,24 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       `${options.assignment} ${options.worktree.repository}` : options.assignment,
       (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
     const target = checkout.checkout;
-    const placement = await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
-      grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch);
+    let closing = options.closeAssignment;
+    if (originOwner) {
+      if (closing && closing !== originOwner.coordinatorId) refuse('Only this exact owner assignment may be closed');
+      closing = originOwner.coordinatorId;
+    }
+    if (!closing && !options.worktree) {
+      try {
+        const claim = await readJson(writerClaimPath(root, target));
+        await closeoutCandidate(root, target, claim.grantId, state, live);
+        closing = claim.grantId;
+      } catch { /* An ineligible assignment retains the ordinary worktree/owner refusal. */ }
+    }
+    if (closing) await closeoutCandidate(root, target, closing, state, live);
+    const placement = closing ? { cwd: target, space: options.space ?? checkout.space ?? 'current' } :
+      await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
+        grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch);
+    grant.closeAssignment = closing;
+    grant.closeExplicit = !!options.closeAssignment;
     grant.cwd = placement.cwd;
     grant.space = placement.space;
     grant.worktreeCreated = grant.cwd !== target;

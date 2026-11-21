@@ -152,6 +152,8 @@ performs Git, review, retirement, or live state effects.
 
 ### Chat-based owner launch (since v0.4.2)
 
+For sequential work in one tree, starting B can close an eligible exact A assignment under the same native command. Naming A in structured launch options is the human closeout authorization; otherwise one named choice is required. Active writing, held/unknown reports, unresolved decisions, notices or startup effects refuse closeout. The old grant and workers lose authority while their history remains readable. New B receives a separate owner identity and grant, even when launched from A's finished owner pane. This does not attest to a missing review, fix verification or Git delivery, and a lost closeout acknowledgement is held rather than replayed. Exercise planner and owner launches, cancellation, restart and competing claims in disposable state before claiming the full sequential workflow.
+
 A bare `/start-implementation` is the explicit opt-in. One tool-free call to the
 configured model identifies the latest user assignment or agreement to the
 immediately preceding assistant proposal from bounded current conversation text.

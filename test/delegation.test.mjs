@@ -1040,6 +1040,113 @@ for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient',
   });
 }
 
+async function settledAssignment(t) {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: implement a fixture.');
+  const owner = f.children[0];
+  const oldGrant = (await f.attempt()).grantId;
+  const writer = (await owner.native.spawn(task)).details;
+  await new Promise(resolve => setImmediate(resolve)); // Let native task-start hooks settle before the fixture's final reports.
+  const state = await f.state();
+  const oldWriter = writer.workerId;
+  for (const binding of [state.workers[oldWriter], Object.values(state.workers).find(w => w.role === 'owner')]) {
+    f.agents.find(a => a.pane_id === binding.paneId).agent_status = 'idle';
+    await atomicJson(join(f.root, `observation-${binding.workerId}.json`), {
+      session: { id: binding.sessionId, file: binding.sessionFile }, stop: binding.workerId,
+      outcome: 'completed', finalReply: 'Finished the synthetic assignment.', hold: false,
+    });
+  }
+  return { f, oldGrant, oldWriter, writer };
+}
+
+test('P7 an explicit close of A starts B in the same tree with old authority retired', async t => {
+  const { f, oldGrant, oldWriter, writer } = await settledAssignment(t);
+  f.worker.select(() => assert.fail('Named closeout must not ask again'));
+
+  await f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+
+  assert.equal(f.children.length, 3);
+  assert.equal(f.children[2].cwd, f.root);
+  const after = await f.state();
+  assert.equal(after.workers[oldWriter], undefined);
+  assert.equal(after.retiredWorkers[oldWriter].paused, true);
+  assert.equal((await readJson(join(f.root, `delegation-${oldGrant}.json`))).revoked, true);
+  assert.equal(after.closedAssignments[oldGrant].writerId, writer.id);
+  const nextWriter = (await f.children[2].native.spawn({ key: 'assignment-b-writer',
+    task: 'Implement only assignment B.', role: 'writer' })).details;
+  assert.equal(nextWriter.status, 'dispatched');
+  assert.notEqual(nextWriter.workerId, oldWriter);
+  await assert.rejects(f.children[0].native.spawn({ key: 'late-a-writer',
+    task: 'Old assignment A must not act.', role: 'writer' }), /scope revoked|held for inspection/);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  assert.deepEqual((await f.state()).closedAssignments, after.closedAssignments);
+});
+
+test('P7 the finished owner launches B with new authority without reusing its role session', async t => {
+  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+  const previousOwner = f.children[0].native;
+  previousOwner.select(() => assert.fail('Explicit old assignment needs no repeat confirmation'));
+  await previousOwner.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+  assert.equal(f.children.length, 3);
+  assert.equal(f.children[2].cwd, f.root);
+  const state = await f.state();
+  assert.equal(state.workers[oldWriter], undefined);
+  assert.equal(state.retiredWorkers[oldWriter].paused, true);
+  assert.equal(Object.values(state.workers).filter(w => w.role === 'owner').length, 1);
+});
+
+test('P7 an unnamed eligible A requires one choice, and cancel keeps its claim', async t => {
+  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+  let choices = 0;
+  f.worker.select((title, offered) => {
+    choices++;
+    assert.match(title, new RegExp(oldGrant));
+    assert.deepEqual(offered, ['Close old assignment and start new one', 'Cancel']);
+    return 'Cancel';
+  });
+  await assert.rejects(f.worker.command('start-implementation', 'Assignment B: write the next fixture.'),
+    /closeout cancelled/);
+  assert.equal(choices, 1);
+  assert.equal(f.children.length, 2);
+  assert.ok((await f.state()).workers[oldWriter]);
+  assert.equal((await f.state()).closedAssignments?.[oldGrant], undefined);
+});
+
+for (const blocker of ['active writer', 'user decision', 'pending notice', 'held report', 'unfinished startup']) {
+  test(`P7 closeout refuses ${blocker} without releasing A`, async t => {
+    const { f, oldGrant, oldWriter } = await settledAssignment(t);
+    const state = await f.state();
+    if (blocker === 'active writer')
+      f.agents.find(a => a.pane_id === state.workers[oldWriter].paneId).agent_status = 'working';
+    else if (blocker === 'held report') {
+      const observed = await readJson(join(f.root, `observation-${oldWriter}.json`));
+      await atomicJson(join(f.root, `observation-${oldWriter}.json`), { ...observed, hold: true });
+    } else if (blocker === 'unfinished startup') {
+      const id = '22222222-2222-4222-8222-222222222222';
+      await atomicJson(join(f.root, `spawn-${id}.json`), { id, grantId: oldGrant, status: 'held' });
+    } else {
+      const owner = Object.values(state.workers).find(w => w.role === 'owner');
+      if (blocker === 'user decision') state.ownerWaits[owner.workerId] = { kind: 'user' };
+      else state.notices['11111111-1111-4111-8111-111111111111'] = {
+        id: '11111111-1111-4111-8111-111111111111', workerId: oldWriter,
+        route: state.workers[oldWriter].route, kind: 'blocker', text: 'Pending A effect', status: 'pending',
+      };
+      await f.supervisor.emit('session_shutdown');
+      await atomicJson(join(f.root, 'supervisor.json'), state);
+      await f.supervisorCommand('start');
+    }
+    await assert.rejects(f.worker.command('start-implementation',
+      `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`),
+    /not eligible|active or has unresolved effects|settled eligible report|Unresolved assignment startup/);
+    assert.equal(f.children.length, 2);
+    assert.ok((await f.state()).workers[oldWriter]);
+    assert.equal((await f.state()).closedAssignments?.[oldGrant], undefined);
+  });
+}
+
 test('P1/P7 a proved pre-split refusal resumes the same scope/key after correction and reload', async t => {
   const f = await fixture(t);
   const scope = 'Implement the agreed fixture change.';
