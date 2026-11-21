@@ -1362,7 +1362,8 @@ test('P1/P7 relocated settled reviewer cannot be silently closed', async t => {
   assert.equal(f.children.length, 3);
 });
 
-test('P4/P7 failed supervisor IPC save withdraws without waiting on its own handler', { timeout: 8000 }, async t => {
+test('P4/P7 failed supervisor IPC save withdraws without waiting on its own handler',
+  { timeout: 8000, skip: process.platform === 'win32' && 'chmod does not deny writes on Windows' }, async t => {
   let releaseDrain;
   const drainGate = new Promise(resolve => { releaseDrain = resolve; });
   let drainEntered;
