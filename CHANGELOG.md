@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.3] - 2026-11-21
+
+- Allow the exact finished owner to close its settled assignment through a typed
+  A→B command, while preserving the decision and pause fences.
+- Scope Stop startup checks to the selected worker and refuse malformed child
+  identity in its startup history.
+- Withdraw a failed supervisor IPC endpoint before shutdown and wait for its
+  drain so in-flight requests do not outlive teardown.
+
+The focused native typed closeout probe succeeded once; a competing blocker
+notice made repeatability inconclusive. Isolated checks and disposable native
+launch pass. This remains a controlled-trial release; installation does not
+reload sessions, clear holds, register workers or migrate live supervision.
+
 ## [0.7.2] - 2026-11-21
 
 - Recognize specific legacy launch refusals that occurred before pane creation,
