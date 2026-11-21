@@ -406,7 +406,7 @@ async function historicalWorkerBlocker(root, worker, state, live, readPane, read
   return null;
 }
 
-async function inspectCheckout(root, grant, parent, recipient, state, live, readPane, readSnapshot, recover) {
+async function inspectCheckout(root, grant, parent, recipient, state, live, readPane, readSnapshot, recover, approvals) {
   if (!grant.checkout || await checkoutIdentity(grant.cwd, grant.checkout) !== grant.checkout)
     refuse('Delegation checkout identity changed');
   const pending = recover ? new Map() : undefined;
@@ -431,9 +431,17 @@ async function inspectCheckout(root, grant, parent, recipient, state, live, read
         if (registrationMatches(saved, worker)) continue;
       }
       const blocker = await historicalWorkerBlocker(root, worker, state, live, readPane, readSnapshot, pending);
+      if (blocker === 'saved approval remains unanswered' && approvals &&
+          await absentSession(worker, live, readPane, readSnapshot) &&
+          await noRelatedStartup(root, [worker])) {
+        approvals.push(id);
+        continue;
+      }
       if (blocker) refuse(`Checkout already has a supervised worker ${id}: ${blocker}; inspect writer ownership`);
     }
   }
+  if (approvals?.length && pending.size)
+    refuse('Other checkout notices need disposition before historical approval abandonment');
   return pending;
 }
 
@@ -460,6 +468,39 @@ async function requireNoWriterClaim(root, checkout, cwd) {
 
 /** Owner queue only. No notice selection supplied by the caller; derive it from
  * the exact native checkout attempt and the current supervisor snapshot. */
+export async function abandonLaunchApproval(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
+  const attempt = await readJson(spawnPath(root, request.id));
+  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
+  if (attempt.id !== request.id || attempt.status !== 'abandon-requested' || attempt.role !== 'owner' ||
+      attempt.ownerToken !== state.ownerToken || attempt.grantId !== grant.id || !grant.ownerLaunch ||
+      attempt.authority.spawnId || attempt.task !== grant.scope || !isId(request.workerId))
+    refuse('No matching native start attempt');
+  const fence = await readJson(ownerLaunchPath(root, grant.checkout));
+  if (fence.token !== attempt.id) refuse('Native start fence changed');
+  await requireNoWriterClaim(root, grant.checkout, grant.cwd);
+  const previous = structuredClone(state);
+  const live = await readSnapshot();
+  requireDelegationParent(live, attempt.parent);
+  const approvals = [];
+  await inspectCheckout(root, grant, attempt.parent, undefined, previous, live, readPane, readSnapshot, true, approvals);
+  if (approvals.length !== 1 || approvals[0] !== request.workerId)
+    refuse('Historical approval is no longer the sole eligible abandonment');
+  const worker = previous.workers[request.workerId];
+  if (!worker || !await absentSession(worker, live, readPane, readSnapshot) ||
+      !await noRelatedStartup(root, [worker]) || !stillCurrent() ||
+      !isDeepStrictEqual(previous, state) ||
+      (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
+      !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))))
+    refuse('Historical approval or launch evidence changed');
+  await requireNoWriterClaim(root, grant.checkout, grant.cwd);
+  state.retiredWorkers[request.workerId] = { ...worker, paused: true, retiredBy: attempt.id,
+    abandonedApproval: { at: new Date().toISOString(), launchId: attempt.id } };
+  delete state.workers[request.workerId];
+  try { await commit(); }
+  catch (error) { Object.assign(state, previous); throw error; }
+  return request.workerId;
+}
+
 export async function archiveLaunchNotices(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
   const id = request.id;
   const attempt = await readJson(spawnPath(root, id));
@@ -566,7 +607,8 @@ export const delegationInstructions = 'Stay within the approved delegation scope
 /** One durable attempt, never resumed after a crash or a lost response. Read-only
  * readiness checks may repeat; pane creation, agent start, enrollment and task send may not. */
 export async function spawnDelegated({ root, socketPath, paneId, ctx, reference, task, role, key,
-  signal, ownerLaunch = false, allowed = () => true, transport = request, readSnapshot = snapshot, send = sendAction }) {
+  signal, ownerLaunch = false, allowed = () => true, selectApproval = (title, choices) => ctx.ui.select(title, choices),
+  transport = request, readSnapshot = snapshot, send = sendAction }) {
   if (!(ownerLaunch ? role === 'owner' : ['writer', 'read-only'].includes(role)) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
       !key?.trim() || key.length > 120) refuse('A stable assignment key, bounded task and writer/read-only role are required');
   const session = currentSession(ctx);
@@ -629,6 +671,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const readLive = () => readSnapshot(socketPath);
   let fenceClaimed = false;
   let splitRequested = false;
+  let abandonRequested = false;
   let dispatched = false;
   try {
     if (launchFence) {
@@ -638,9 +681,24 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     if (retry) await save('prepared');
     if (role === 'writer' || ownerLaunch) {
       const { state: current, fresh } = await check();
-      const pending = await inspectCheckout(root, authority.grant, parent, recipient, current, fresh, readPane, readLive, ownerLaunch);
+      const approvals = ownerLaunch ? [] : undefined;
+      const pending = await inspectCheckout(root, authority.grant, parent, recipient, current, fresh, readPane, readLive, ownerLaunch, approvals);
       if (ownerLaunch) {
         await requireNoWriterClaim(root, authority.grant.checkout, authority.grant.cwd);
+        if (approvals.length) {
+          if (approvals.length !== 1) refuse('Multiple historical approvals need separate inspection');
+          const choice = await selectApproval(`Abandon inactive assignment ${approvals[0]} with its approval unanswered?`,
+            ['Abandon old assignment and start new one', 'Cancel']);
+          if (choice !== 'Abandon old assignment and start new one') refuse('Historical assignment abandonment cancelled');
+          checkLocal();
+          abandonRequested = true;
+          await save('abandon-requested');
+          const result = await send(root, { type: 'launch-abandon', id, workerId: approvals[0],
+            ownerToken: authority.grant.ownerToken }, 'supervisor', { timeoutMs: 15000 });
+          if (!result.accepted || result.id !== id || result.workerId !== approvals[0])
+            refuse(result.message ?? 'Historical approval abandonment unverified');
+          await save('prepared');
+        }
         if (pending.size) {
           checkLocal();
           const result = await send(root, { type: 'launch-archive', id, ownerToken: authority.grant.ownerToken },
@@ -774,12 +832,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     dispatched = true;
   } catch (error) {
     spawn.failure = error.message;
-    if (ownerLaunch && !splitRequested && !authority.grant.worktreeCreated) {
+    if (ownerLaunch && !splitRequested && !abandonRequested && !authority.grant.worktreeCreated) {
       spawn.preflightFailures = [...(spawn.preflightFailures ?? []),
         { at: new Date().toISOString(), reason: error.message }];
       await save('preflight-refused');
     } else await save('held');
-    if (ownerLaunch && !splitRequested)
+    if (ownerLaunch && !splitRequested && !abandonRequested)
       throw new Error(`Implementation start ${id} refused before pane creation; no agent started (${error.message}).`);
     throw new Error(`Delegation ${id} held for inspection (${error.message}). Do not retry under another key.`);
   } finally {
@@ -977,7 +1035,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       grant.id = previous.id;
     }
     const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
-      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed });
+      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed,
+      selectApproval: (title, choices) => worker.selectManagement(ctx, title, choices) });
     ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
   }
   let launching = false;
