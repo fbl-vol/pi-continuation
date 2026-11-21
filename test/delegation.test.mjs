@@ -1084,7 +1084,8 @@ test('P7 an explicit close of A starts B in the same tree with old authority ret
   assert.deepEqual((await f.state()).closedAssignments, after.closedAssignments);
 });
 
-for (const stage of ['state committed', 'grant revoked', 'claim released', 'supervisor replaced', 'partial rebind']) {
+for (const stage of ['state committed', 'grant revoked', 'claim released', 'supervisor replaced', 'partial rebind',
+  'replaced twice after complete rebind', 'replaced twice after partial rebind']) {
   test(`P7 an interrupted ${stage} resumes only the original pre-pane B attempt`, async t => {
     let interrupt = true;
     const { f, oldGrant, writer } = await settledAssignment(t, { onSnapshot: async f => {
@@ -1114,15 +1115,28 @@ for (const stage of ['state committed', 'grant revoked', 'claim released', 'supe
       await atomicJson(oldGrantPath, { ...old, revoked: false });
       await atomicJson(claimPath, { id: writer.id, grantId: oldGrant });
     } else if (stage === 'grant revoked') await atomicJson(claimPath, { id: writer.id, grantId: oldGrant });
-    if (['supervisor replaced', 'partial rebind'].includes(stage)) {
+    if (stage.includes('replaced') || stage === 'partial rebind') {
       await f.supervisor.emit('session_shutdown');
       await f.supervisorCommand('start');
       const current = await f.state();
       assert.notEqual(current.ownerToken, closed.ownerToken);
-      if (stage === 'partial rebind') {
+      if (stage.includes('partial rebind')) {
         const bGrantPath = join(f.root, `delegation-${b.grantId}.json`);
         await atomicJson(bGrantPath, { ...(await readJson(bGrantPath)),
-          ownerToken: current.ownerToken, supervisorSession: current.supervisorSession });
+          ownerToken: current.ownerToken, supervisorSession: current.supervisorSession,
+          rebindTokens: [closed.ownerToken, current.ownerToken] });
+      }
+      if (stage.includes('complete rebind')) {
+        interrupt = true;
+        await assert.rejects(f.worker.command('start-implementation', scope), /held for inspection/);
+        assert.deepEqual((await readJson(join(f.root, `delegation-${b.grantId}.json`))).rebindTokens,
+          [closed.ownerToken, current.ownerToken]);
+        assert.equal((await readJson(join(f.root, `spawn-${b.id}.json`))).ownerToken, current.ownerToken);
+      }
+      if (stage.includes('replaced twice')) {
+        await f.supervisor.emit('session_shutdown');
+        await f.supervisorCommand('start');
+        assert.notEqual((await f.state()).ownerToken, current.ownerToken);
       }
     }
     await f.worker.emit('session_shutdown');
@@ -1179,6 +1193,12 @@ test('P7 competing writer claim and uncertain pane marker never reuse closeout',
   await assert.rejects(f.worker.command('start-implementation', scope), /Another launch owns the checkout fence/);
   assert.deepEqual(await readJson(fence), { token: unrelated.id });
   await rm(fence);
+  const bGrantPath = join(f.root, `delegation-${b.grantId}.json`);
+  const bGrant = await readJson(bGrantPath);
+  await atomicJson(bGrantPath, { ...bGrant, ownerToken: unrelated.grantId });
+  await assert.rejects(f.worker.command('start-implementation', scope), /Prior supervisor ownership is unresolved/);
+  assert.equal((await readJson(bGrantPath)).ownerToken, unrelated.grantId);
+  await atomicJson(bGrantPath, bGrant);
   await atomicJson(join(f.root, `spawn-${b.id}.json`), { ...b, paneRequested: true, status: 'held' });
   await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-pane closeout/);
   assert.equal(f.children.length, 2);

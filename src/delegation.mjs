@@ -474,21 +474,31 @@ async function recordedCloseout(root, checkout, scope, parent, state) {
       attempt.role !== 'owner' || !isDeepStrictEqual(attempt.parent, parent) ||
       !attempt.closeRequested || attempt.paneRequested !== false || attempt.paneId || attempt.child ||
       !['close-requested', 'prepared', 'creating', 'held'].includes(attempt.status) ||
-      closed?.launchId !== attempt.id || !isId(closed.writerId) ||
-      (closed.ownerToken && ![closed.ownerToken, state.ownerToken].includes(attempt.ownerToken)))
+      closed?.launchId !== attempt.id || !isId(closed.writerId))
     refuse('Prior owner launch has no proved pre-pane closeout; inspect before retrying');
   if (grant.ownerToken !== state.ownerToken || grant.supervisorSession !== state.supervisorSession ||
       attempt.ownerToken !== state.ownerToken) {
-    if (!closed.ownerToken || ![closed.ownerToken, state.ownerToken].includes(grant.ownerToken) ||
-        ![closed.ownerToken, state.ownerToken].includes(attempt.ownerToken) ||
-        await ownerAlive(root, closed.ownerToken) || !state.ownerToken || !state.supervisorSession)
+    // The grant is written before the attempt. Its exact token lineage is the
+    // durable receipt for every owner that previously rebound this B attempt.
+    const lineage = grant.rebindTokens ?? [closed.ownerToken];
+    if (!closed.ownerToken || !Array.isArray(lineage) || lineage[0] !== closed.ownerToken ||
+        lineage.at(-1) !== grant.ownerToken || new Set(lineage).size !== lineage.length ||
+        !lineage.every(isId) || !lineage.includes(attempt.ownerToken) ||
+        !state.ownerToken || !state.supervisorSession ||
+        (grant.ownerToken === state.ownerToken && grant.supervisorSession !== state.supervisorSession) ||
+        (lineage.includes(state.ownerToken) && grant.ownerToken !== state.ownerToken))
       refuse('Prior supervisor ownership is unresolved');
-    // The old supervisor is proven absent and the exact B attempt has not
-    // requested a pane. Bind only this attempt to the new ordinary supervisor.
-    grant.ownerToken = state.ownerToken;
-    grant.supervisorSession = state.supervisorSession;
+    for (const token of lineage) {
+      if (token !== state.ownerToken && await ownerAlive(root, token))
+        refuse('Prior supervisor ownership is unresolved');
+    }
+    if (grant.ownerToken !== state.ownerToken) {
+      grant.rebindTokens = [...lineage, state.ownerToken];
+      grant.ownerToken = state.ownerToken;
+      grant.supervisorSession = state.supervisorSession;
+      await atomicJson(grantPath(root, grant.id), grant);
+    }
     attempt.ownerToken = state.ownerToken;
-    await atomicJson(grantPath(root, grant.id), grant);
     await atomicJson(spawnPath(root, attempt.id), attempt);
   }
   return { grant, attempt, closed };
