@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.1] - 2026-11-21
+
+- Offer one choice to retire the exact verified inactive assignment set and its
+  matching writer claim before starting new work. Preserve history, unanswered
+  approvals and unknown delivery outcomes; never resend a notice or task.
+- Allow normal closeout after a verified settled temporary reviewer pane closes.
+- Recover proved pre-effect owner and writer starts without changing scope or
+  key, including eligible owner retries after supervisor replacement.
+- Keep a verified independent removed checkout from blocking a new launch.
+
+Still for controlled trials. Reload or restart participating Pi sessions before
+using the new recovery flow. Installation does not retire old work or resolve
+any hold. Reauthorizing surviving assignment grants after supervisor restart
+is not included.
+
 ## [0.7.0] - 2026-11-21
 
 - Start a new assignment in the same worktree after explicitly closing the
