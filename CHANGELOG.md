@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.2] - 2026-11-21
+
+- Recognize specific legacy launch refusals that occurred before pane creation,
+  so they no longer block recovery of an inactive assignment. Unknown attempts
+  still block and are reported directly; old records are never replayed.
+- Let the same preflight-refused launch continue after a newly confirmed
+  abandonment choice. If Pi exits after saving that choice but before requesting
+  retirement, retry the same command from the same session after restart. The
+  extension rechecks the selected workers and writer claim without asking again.
+
+Reload or restart the participating sessions before using the new recovery flow.
+Installing this release does not change live supervision or retire old work.
+
 ## [0.7.1] - 2026-11-21
 
 - Offer one choice to retire the exact verified inactive assignment set and its
