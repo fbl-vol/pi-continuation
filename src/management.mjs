@@ -118,7 +118,7 @@ function details(view, row) {
       observation.holdError.kind === 'run' ? 'Cause: a Pi turn ended in error; later success does not clear this hold.' :
         'Cause: the continuation checkpoint could not be updated.',
       `Hold recorded: ${new Date(observation.holdError.at).toISOString()}`,
-      'Resolve the cause, then use the confirmed Start/Return or Clear hold control in that worker.',
+      'Resolve the cause, then use Start/Return or Clear this session hold in /continuation in that worker.',
     ] : observation?.hold && observation.holdReason === 'error' ? [
       'Cause/time unavailable for this retained error hold; inspect the worker session before clearing it.',
     ] : []),
@@ -147,7 +147,7 @@ async function requestControl(root, socketPath, paneId, ctx, worker, view, row, 
   ctx.ui.notify(stop ? 'Worker stopped; history retained. Return only from that session.' : 'Only the selected worker paused.', 'info');
 }
 
-export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
+export function bindManagement(pi, worker, supervisor, coordinator, { root = defaultRoot(),
   socketPath = process.env.HERDR_SOCKET_PATH, paneId = process.env.HERDR_PANE_ID } = {}) {
   const report = diagnostics('management');
   pi.registerTool({
@@ -227,6 +227,12 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
         const choices = ['Delivery preferences',
           ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
           ...(view.own ? ['This session: details'] : []),
+          ...(view.own?.current && ['idle', 'done'].includes(view.own.agent?.agent_status) &&
+            worker.hold && view.own.observation?.hold ? ['Clear this session hold'] : []),
+          ...(view.own?.current && ['idle', 'done'].includes(view.own.agent?.agent_status) &&
+            view.own.binding.role === 'owner' &&
+            view.state.ownerWaits?.[view.own.binding.workerId]?.kind === 'user' ?
+            ['Release this owner decision wait'] : []),
           ...(supervisor.active ? ['Pause global supervision', 'Start global supervision'] :
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
           ...labels, ...(previous.length ? [previousChoice] : []), 'Close'];
@@ -236,6 +242,16 @@ export function bindManagement(pi, worker, supervisor, { root = defaultRoot(),
         if (choice === 'Delivery preferences')
           return editPreferences('Delivery preferences · defaults for new assignments',
             await readDeliveryPreferences(root), draft => saveDeliveryPreferences(root, draft));
+        if (choice === 'Clear this session hold') {
+          await freshView(view.own);
+          return worker.clearHold(ctx);
+        }
+        if (choice === 'Release this owner decision wait') {
+          const fresh = await freshView(view.own);
+          if (fresh.state.ownerWaits?.[view.own.binding.workerId]?.kind !== 'user')
+            refuse('Owner decision changed; reopen the management menu');
+          return coordinator.releaseDecision(ctx);
+        }
         if (choice === 'This assignment: delivery') {
           const path = join(root, `delegation-${view.own.binding.coordinatorId}.json`);
           const grant = await readJson(path);

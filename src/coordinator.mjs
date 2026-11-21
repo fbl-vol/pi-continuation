@@ -218,21 +218,25 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       return { content: [{ type: 'text', text: `Owner waiting for ${args.kind}; no automatic user decision is inferred.` }], details: {} };
     },
   });
+  const releaseDecision = async ctx => {
+    if (coordinator?.role !== 'owner' || !ctx.isIdle())
+      throw new Error('Release the user decision in the idle exact owner session');
+    if (!confirmOwner) throw new Error('Owner release requires the worker-owned guarded confirmation');
+    if (!await confirmOwner(ctx, 'Release user-decision wait?',
+      'Confirm the user has actually provided the decision or selected findings in this owner pane. This command grants no approval, applies no fixes and does not release worker holds.')) return;
+    await ownerRequest(ctx, 'resume-user');
+    ctx.ui.notify('User-decision wait awaits an ordinary user turn; send the selected instruction as user input', 'info');
+  };
   pi.registerCommand('continuation-owner', {
-    description: 'Release a user-decision wait after the user has actually selected the next action: resume',
-    handler: async (args, ctx) => {
-      if (args.trim() !== 'resume' || coordinator?.role !== 'owner' || !ctx.isIdle())
-        throw new Error('Usage: /continuation-owner resume in the idle exact owner session');
-      if (!confirmOwner) throw new Error('Owner release requires the worker-owned guarded confirmation');
-      if (!await confirmOwner(ctx, 'Release user-decision wait?',
-        'Confirm the user has actually provided the decision or selected findings in this owner pane. This command grants no approval, applies no fixes and does not release worker holds.')) return;
-      await ownerRequest(ctx, 'resume-user');
-      ctx.ui.notify('User-decision wait awaits an ordinary user turn; send the selected instruction as user input', 'info');
+    description: 'Explicit user-decision release for existing owners: resume',
+    handler: (args, ctx) => {
+      if (args.trim() !== 'resume') throw new Error('Usage: /continuation-owner resume');
+      return releaseDecision(ctx);
     },
   });
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     await close?.(); close = undefined;
   });
-  return { registerOwner: (ctx, id) => register(ctx, id, true) };
+  return { registerOwner: (ctx, id) => register(ctx, id, true), releaseDecision };
 }

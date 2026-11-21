@@ -15,6 +15,6 @@ export function bindContinuation(pi, options = {}) {
   const supervisor = bindSupervisor(pi, { ...options, allowExperimentalActivation: true });
   const coordinator = bindCoordinator(pi, { ...options, confirmOwner: worker.confirmDelegation });
   bindDelegation(pi, worker, { ...options, registerOwner: coordinator.registerOwner });
-  bindManagement(pi, worker, supervisor, options);
+  bindManagement(pi, worker, supervisor, coordinator, options);
   return worker;
 }

@@ -106,6 +106,30 @@ test('delivery menu distinguishes saved automatic fixes from effective Ask First
   await planner.command('continuation', '');
 });
 
+test('the exact held worker clears its own report from /continuation without lifting supervision', async t => {
+  const f = await started(t);
+  await f.worker.emit('agent_start');
+  f.worker.assistant('Interrupted before completion.');
+  await f.worker.emit('agent_settled', { aborted: true });
+  assert.equal((await f.observation()).hold, true);
+  const prior = await f.state();
+  f.agents[0].agent_status = 'working';
+  f.worker.select((_title, choices) => {
+    assert.ok(!choices.includes('Clear this session hold'));
+    return undefined;
+  });
+  await f.worker.command('continuation', '');
+  f.agents[0].agent_status = 'idle';
+  f.worker.select((_title, choices) => {
+    assert.ok(choices.includes('Clear this session hold'));
+    return 'Clear this session hold';
+  });
+  await f.worker.command('continuation', '');
+  assert.equal((await f.observation()).hold, false);
+  assert.deepEqual((await f.state()).workers[f.workerId()], prior.workers[f.workerId()]);
+  assert.equal(f.worker.confirmations.at(-1)[0], 'Clear worker hold?');
+});
+
 test('retained Stop withdraws the active row; own Return preserves identity, spent budget and consumed stop', async t => {
   const f = await started(t);
   assert.match((await resume(f)).content[0].text, /Continuation delivered/);

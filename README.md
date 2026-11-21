@@ -34,12 +34,11 @@ pi remove git:github.com/fbl-vol/pi-continuation@v0.6.0
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
 
-## Two-command workflow (since alpha.2)
+## Everyday workflow (current source)
 
-After a separately authorized installation:
+After a separately authorized installation, use `/start-implementation` in the planning session for an agreed assignment. It reuses or starts the intended supervisor, enrolls one coordinating owner, and gives that owner bounded delegation for one writer and read-only reviewers. For an unrelated next assignment in the same tree, use `/start-implementation` again and explicitly authorize closing the exact settled previous assignment; it does not attest to missing review or delivery. In a supervised session, use `/continuation` for status, delivery preferences, Pause/Stop, Return and contextual recovery. The owner still delegates and waits using its native tools; an actual user finding selection is never inferred.
 
-1. In the intended supervisor, `/continuation-supervisor start` and confirm.
-2. In each selected worker, `/continuation-worker start` and confirm that it has no other continuation owner.
+Manual supervision of an existing session remains a distinct advanced path: use `/continuation` → **Start supervisor here** in the intended supervisor, then `/continuation` → **Join this session to supervision** in each selected worker. Each action retains its native confirmation. `/continuation-supervisor start` and `/continuation-worker start` remain explicit controls for manual setup/recovery, not prerequisites to `/start-implementation`. Neither installation nor opening the menu enrolls workers.
 
 **Since v0.3.2:** `/continuation-worker` without arguments (including whitespace-only
 arguments) is an alias for `start`, with the same confirmation and safeguards.
@@ -85,6 +84,8 @@ v0.3.0 uses the earlier flat list.
   its identity, checkpoint, history, spent budgets, handled stops and receipts.
   It refuses unresolved continuation, notices or delegated startup. This is not
   permanent retirement and never terminates the Pi session.
+- **Clear this session hold** appears only for the exact held worker in its own menu. It requires confirmation after resolving the cause and reassesses the current report; it does not approve an action, lift a pause or replay an effect.
+- **Release this owner decision wait** appears only for the exact owner awaiting a user decision. It retains the explicit confirmation and requires the actual selected instruction in an ordinary user turn; `/continuation-owner resume` remains available for the same distinct recovery gate.
 - **Return** is available only in that worker's own session, through the menu or
   `/continuation-worker start`. It requires fresh explicit confirmation after Stop,
   not an old in-flight start. A pause that predated Stop remains paused on return,
@@ -120,8 +121,7 @@ v0.5.0 requires confirmed manual recovery for this case.
 
 ## Supervised delegation (since v0.3.0)
 
-For an already installed ordinary extension and an **already-running intended
-supervisor**, the planning session need not enroll in continuation:
+For advanced explicit delegation outside `/start-implementation`, with an already installed ordinary extension and an **already-running intended supervisor**, the planning session need not enroll in continuation:
 
 1. In the planning session, authorize the assignment once with
    `/continuation-delegate writer <bounded assignment scope>` (or `read-only`) and confirm that scope.
@@ -229,8 +229,9 @@ its bounded `writer` delegation scope with `/continuation-delegate`. The owner i
 supervised non-writer and an exact recipient for its delegated children, not another
 supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
 user-decision wait. A child material notice wakes only its owner; user selection
-requires explicit `/continuation-owner resume` in that owner session after the actual
-user decision, then a successful ordinary user-input turn before pending notices
+requires `/continuation` → **Release this owner decision wait** (or the advanced
+`/continuation-owner resume`) in that exact owner session after the actual user
+decision, then a successful ordinary user-input turn before pending notices
 can deliver. Neither release nor a child can bypass the decision fence. No command
 assumes approval or repairs an uncertain effect. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
 for the bounded safeguards. No live owner bootstrap or unattended delivery is claimed.
@@ -257,7 +258,7 @@ Only for a **separately authorized disposable** environment, `pi install /absolu
 1. In an existing worker, `/continuation-worker <existing-checkpoint-path>` enrolls its exact saved session and captures its current idle report for supervisor review, without sending a new task. Save its worker ID; scopes remain paused. If it is already working, wait for a fresh settled report. For a new first task only, optional `/continuation-worker --start {"checkpoint":"/existing/checkpoint.md","message":"Initial user task"}` explicitly supplies that turn. Interrupted setup sends nothing; inspect before retrying. With `--start`, wait for the observed initial-run notice; if none arrives within 30 seconds, it is held—do not blindly resend. Later keyboard input to a registered worker creates a human-input hold.
 2. Optionally, `/continuation-coordinator` in the intended existing coordinator; save its ID.
 3. In the dedicated supervisor, `/continuation-supervisor init`, then `/continuation-supervisor add <worker-id> <workspace-id>`. New scopes start paused. `/continuation-supervisor coordinator <workspace-id> <coordinator-id>` pins the recipient, possibly in another workspace.
-4. Confirm any other continuation owner has stopped. Explicitly confirm `/continuation-supervisor activate worker <id>`, `activate route <workspace-id>`, and `activate global`. One scope never lifts another. No experimental environment flag is required by the ordinary entry profile. `pause` has corresponding scoped forms; `status` reports scopes and pending work. `/continuation-worker-clear-hold` is a separate human-confirmed hold clear after resolving the reason. It may make the current unchanged held report available for supervisor reassessment; it is not action approval or activation and does not lift other pauses or reset budgets.
+4. Confirm any other continuation owner has stopped. Explicitly confirm `/continuation-supervisor activate worker <id>`, `activate route <workspace-id>`, and `activate global`. One scope never lifts another. No experimental environment flag is required by the ordinary entry profile. `pause` has corresponding scoped forms; `status` reports scopes and pending work. `/continuation` → **Clear this session hold** is the confirmed own-session recovery after resolving the reason. It may make the current unchanged held report available for supervisor reassessment; it is not action approval or activation and does not lift other pauses or reset budgets.
 
 Registration rejects role collisions and duplicate canonical checkpoint paths. A changed checkpoint isolates its worker. Repeating setup preserves pauses; a coordinator cannot silently replace another. Explicit reactivation rearms unresolved attention once without resetting budget or replaying a delivered stop.
 
