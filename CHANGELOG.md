@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0] - 2026-11-21
+
+- Start a new assignment in the same worktree after explicitly closing the
+  previous one. Recover interrupted closeout only before any pane request.
+- Offer to abandon a verified inactive assignment that has an unanswered
+  approval. Preserve the approval record and do not answer or replay it.
+- Use `/continuation` for exact-session hold clearing and owner decision release.
+  The standalone hold-clear command is removed; explicit owner resume and
+  deliberate Pause and Stop remain available.
+
 ## [0.6.0] - 2026-11-20
 
 - Start or reuse a dedicated supervisor during `/start-implementation`; resume
