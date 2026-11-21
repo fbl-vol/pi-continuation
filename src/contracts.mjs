@@ -33,7 +33,8 @@ import { readJson } from './store.mjs';
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
  *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>,
- *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>}} SupervisorState
+ *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>,
+ *   closedAssignments: Object<string, {launchId: string, writerId: string, ownerToken?: string, at: string}>}} SupervisorState
  */
 
 export const SCHEMA_VERSION = 1;
@@ -80,6 +81,13 @@ export function decodeSupervisor(record) {
     if (!isId(id) || !object(worker) || worker.workerId !== id || worker.paused !== true ||
         !isId(worker.retiredBy) || typeof worker.sessionId !== 'string' ||
         typeof worker.sessionFile !== 'string' || Object.hasOwn(state.workers, id)) invalid();
+  }
+  if (state.closedAssignments === undefined) state.closedAssignments = {};
+  if (!object(state.closedAssignments)) invalid();
+  for (const [id, closed] of Object.entries(state.closedAssignments)) {
+    if (!isId(id) || !object(closed) || !isId(closed.launchId) || !isId(closed.writerId) ||
+        (closed.ownerToken !== undefined && !isId(closed.ownerToken)) ||
+        !Number.isFinite(Date.parse(closed.at))) invalid();
   }
   if (state.ownerWaits === undefined) state.ownerWaits = {};
   if (!object(state.ownerWaits)) invalid();
