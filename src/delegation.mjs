@@ -999,6 +999,8 @@ export async function unresolvedStartupForWorker(root, binding) {
     const attempt = await readJson(join(root, file));
     if (file !== `spawn-${attempt?.id}.json` || !phases.has(attempt.status) ||
         typeof attempt.parent?.sessionId !== 'string' || typeof attempt.parent?.sessionFile !== 'string' ||
+        (attempt.child !== undefined && (typeof attempt.child?.sessionId !== 'string' ||
+          typeof attempt.child?.sessionFile !== 'string')) ||
         (attempt.status === 'preflight-refused' &&
           (attempt.paneRequested === true || attempt.paneId || attempt.child || attempt.closeRequested || attempt.abandonRequested)))
       return { unverified: true };
