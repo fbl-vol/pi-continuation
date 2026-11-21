@@ -3,13 +3,13 @@ import net from 'node:net';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
 import { atomicJson, readJson } from '../src/store.mjs';
-import { ownerAlive, sendAction } from '../src/ipc.mjs';
+import { ownerAlive, ownerServer, sendAction } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
 import { delegatedDisplayLabel, delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
 import { checkpointHash } from '../src/policy.mjs';
@@ -43,7 +43,7 @@ for (const [scenario, options, attempts] of [
 });
 
 async function fixture(t, options = {}) {
-  const f = await startFixture(t, { blank: true });
+  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer });
   execFileSync('git', ['init', '--quiet', f.root]);
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
@@ -1363,7 +1363,21 @@ test('P1/P7 relocated settled reviewer cannot be silently closed', async t => {
 });
 
 test('P4/P7 failed supervisor IPC save withdraws without waiting on its own handler', { timeout: 8000 }, async t => {
-  const { f } = await settledAssignment(t);
+  let releaseDrain;
+  const drainGate = new Promise(resolve => { releaseDrain = resolve; });
+  let drainEntered;
+  const draining = new Promise(resolve => { drainEntered = resolve; });
+  const startOwnerServer = async (...args) => {
+    const close = await ownerServer(...args);
+    return async () => {
+      const closing = close();
+      drainEntered();
+      await closing;
+      await drainGate;
+    };
+  };
+  const { f } = await settledAssignment(t, { startOwnerServer });
+  t.after(() => releaseDrain());
   const owner = Object.values((await f.state()).workers).find(w => w.role === 'owner');
   const before = await f.state();
   await chmod(f.root, 0o500);
@@ -1376,10 +1390,19 @@ test('P4/P7 failed supervisor IPC save withdraws without waiting on its own hand
   finally { await chmod(f.root, 0o700); }
   assert.notEqual(response?.accepted, true);
   assert.notEqual(response?.code, 'IPC_TIMEOUT', 'failed request must settle without waiting for its own drain');
+  await draining;
   assert.equal(await ownerAlive(f.root, before.ownerToken), false);
   assert.equal((await readJson(join(f.root, 'supervisor.lock'))).token, before.ownerToken);
   assert.deepEqual((await f.state()).ownerWaits, before.ownerWaits);
-  await f.supervisor.emit('session_shutdown');
+  let shutdownDone = false;
+  const shutdown = f.supervisor.emit('session_shutdown').then(() => { shutdownDone = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shutdownDone, false, 'shutdown must retain the failed endpoint drain');
+  releaseDrain();
+  await shutdown;
+  if (process.platform !== 'win32')
+    await assert.rejects(stat(join(f.root, 'worker-supervisor.sock')), { code: 'ENOENT' });
+  assert.equal((await readJson(join(f.root, 'supervisor.lock'))).token, before.ownerToken);
 });
 
 test('P1/P3/P7 exact finished owner can type the native next-assignment command', async t => {

@@ -26,13 +26,15 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'After explicit human Clear, fresh attention may allow reassessment of the same current report and stop ID. ' +
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1' } = {}) {
+  paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
+  startOwnerServer = ownerServer } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
   const report = diagnostics('supervisor');
   let diagnosticContext;
   let closeOwner;
+  let drainingOwner;
   let closeEvents;
   let watcher;
   let lastSnapshot;
@@ -67,7 +69,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         closeOwner = undefined;
         // Withdraw the listener now, but do not await its drain from the IPC
         // handler whose save failed. The handler must return before drain ends.
-        if (closing) void closing().catch(failure => report('drain owner endpoint', failure, diagnosticContext));
+        if (closing) drainingOwner = closing().catch(failure => {
+          report('drain owner endpoint', failure, diagnosticContext);
+        });
         throw report('persist state', error, diagnosticContext);
       }
     });
@@ -644,7 +648,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const token = randomUUID();
         await claim(lockFile(root), { token, pid: process.pid, sessionId: ctx.sessionManager.getSessionId() });
         try {
-          closeOwner = await ownerServer(root, token, request => request?.type === 'management-control' ?
+          closeOwner = await startOwnerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
               acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
@@ -1045,6 +1049,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await closeOwner(); closeOwner = undefined;
       await release(lockFile(root), token);
     }
+    // A failed-save handler cannot wait for its own drain. Shutdown can and must.
+    await drainingOwner;
     await closingAnnotations;
   });
   return { get active() { return active(); }, command };
