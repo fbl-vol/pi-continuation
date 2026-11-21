@@ -811,10 +811,11 @@ test('P1 bare launch preserves earlier user constraints without reintroducing ol
 });
 
 for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane exists', 'session moved',
-  'live exact session', 'unresolved', 'decision', 'pending notices']) {
+  'live exact session', 'unresolved', 'decision', 'pending notices', 'saved approval', 'observation mismatch', 'unfinished startup']) {
   test(`P7 writer ownership checks retain history and distinguish ${condition}`, async t => {
     const f = await fixture(t, {
-      closedPanes: ['closed', 'session moved', 'unresolved', 'decision', 'pending notices'].includes(condition) ? ['w:old'] : [],
+      closedPanes: ['closed', 'session moved', 'unresolved', 'decision', 'pending notices', 'saved approval',
+        'observation mismatch', 'unfinished startup'].includes(condition) ? ['w:old'] : [],
       historicalPanes: condition === 'pane exists' ? [{ pane_id: 'w:old' }] : [],
       historicalPanePatch: condition === 'conflicting replacement' ? { terminal_id: 'changed-terminal' } : {},
     });
@@ -829,6 +830,12 @@ for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane 
     await atomicJson(join(f.root, `worker-${id}.json`), old);
     if (condition === 'unresolved') state.inflight[id] = { id, stop: id };
     if (condition === 'decision') state.dispositions[id] = { stop: id, action: 'decision' };
+    if (['saved approval', 'observation mismatch', 'unfinished startup'].includes(condition))
+      await atomicJson(join(f.root, `observation-${id}.json`), {
+        session: { id: condition === 'observation mismatch' ? 'other-session' : old.sessionId, file: old.sessionFile },
+        stop: id, outcome: condition === 'saved approval' ? 'approval' : 'completed',
+        bootstrapPending: condition === 'unfinished startup', hold: condition === 'saved approval',
+      });
     const noticeIds = ['11111111-1111-4111-8111-111111111112', '11111111-1111-4111-8111-111111111113'];
     if (condition === 'pending notices') {
       state.routes.w = { paused: false, coordinator: null };
@@ -846,16 +853,85 @@ for (const condition of ['closed', 'replaced', 'conflicting replacement', 'pane 
       f.agents.push({ ...f.agents[0], pane_id: old.paneId, terminal_id: old.terminalId,
         agent_session: { ...f.agents[0].agent_session, value: condition === 'live exact session' ? file : join(f.root, 'replacement.jsonl') } });
     }
-    if (condition === 'closed' || condition === 'replaced') {
+    if (['closed', 'replaced', 'saved approval'].includes(condition)) {
+      if (condition === 'saved approval') f.worker.select(async (title, choices) => {
+        assert.match(title, new RegExp(id));
+        assert.match(title, /approval unanswered/);
+        assert.deepEqual(choices, ['Abandon old assignment and start new one', 'Cancel']);
+        await f.worker.emit('ui_prompt_start');
+        return choices[0];
+      });
       await f.worker.command('start-implementation', 'Update the docs');
       assert.deepEqual(f.effects, ['split', 'start', 'task']);
+      const ownerAttempt = (await f.attempt()).id;
       const writer = (await f.children[0].native.spawn(task)).details;
       assert.equal(writer.status, 'dispatched');
-      assert.deepEqual((await f.state()).workers[id], old);
+      if (condition === 'saved approval') {
+        const after = await f.state();
+        assert.equal(after.workers[id], undefined);
+        assert.equal(after.retiredWorkers[id].retiredBy, ownerAttempt);
+        assert.deepEqual(await readJson(join(f.root, `observation-${id}.json`)), {
+          session: { id: old.sessionId, file: old.sessionFile }, stop: id, outcome: 'approval',
+          bootstrapPending: false, hold: true,
+        });
+        await f.supervisor.emit('session_shutdown');
+        await f.supervisorCommand('start');
+        assert.deepEqual((await f.state()).retiredWorkers[id], after.retiredWorkers[id]);
+      } else assert.deepEqual((await f.state()).workers[id], old);
     } else {
       await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), ({ message }) =>
         message.includes('no agent started') && message.includes(`supervised worker ${id}`) &&
-        (condition !== 'pending notices' || noticeIds.every(noticeId => message.includes(noticeId))));
+        (condition !== 'pending notices' || noticeIds.every(noticeId => message.includes(noticeId))) &&
+        (condition !== 'saved approval' || message.includes('saved approval')) &&
+        (condition !== 'observation mismatch' || message.includes('observation mismatch')) &&
+        (condition !== 'unfinished startup' || message.includes('unfinished startup')));
+      assert.deepEqual(f.effects, []);
+    }
+  });
+}
+
+for (const condition of ['cancel', 'session returns', 'other checkout blocker']) {
+  test(`P7 historical approval abandonment refuses ${condition} without retiring authority`, async t => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const f = await fixture(t, { closedPanes: ['w:old'], historicalPanes: [], beforePaneRead: (_f, pane) => {
+      if (condition === 'session returns' && pane === 'w:old' && selected) {
+        f.agents.push({ ...f.agents[0], pane_id: 'w:relocated',
+          agent_session: { ...f.agents[0].agent_session, value: file } });
+        selected = false;
+      }
+    } });
+    let selected = false;
+    const file = join(f.root, 'old.jsonl');
+    const old = { workerId: id, route: 'w', paused: true, paneId: 'w:old', cwd: f.root,
+      terminalId: 'old-terminal', workspaceId: 'w', tabId: 'w:t1', sessionKind: 'path', sessionValue: file,
+      sessionId: 'old-session', sessionFile: file, checkpoint: join(f.root, 'old.md') };
+    const state = await f.state();
+    state.workers[id] = old;
+    await writeFile(old.checkpoint, 'Historical checkpoint');
+    await atomicJson(join(f.root, `worker-${id}.json`), old);
+    await atomicJson(join(f.root, `observation-${id}.json`), {
+      session: { id: old.sessionId, file }, stop: id, outcome: 'approval', hold: true,
+    });
+    if (condition === 'other checkout blocker') state.inflight[id] = { id, stop: id };
+    await f.supervisor.emit('session_shutdown');
+    await atomicJson(join(f.root, 'supervisor.json'), state);
+    await f.supervisorCommand('start');
+    let choices = 0;
+    f.worker.select(() => { choices++; selected = true;
+      return condition === 'cancel' ? 'Cancel' : 'Abandon old assignment and start new one'; });
+    await assert.rejects(f.worker.command('start-implementation', 'Update the docs'), ({ message }) => {
+      assert.match(message, condition === 'session returns' ? /held for inspection/ : /no agent started/);
+      if (condition === 'cancel') assert.match(message, /abandonment cancelled/);
+      return true;
+    });
+    assert.deepEqual(f.effects, []);
+    assert.equal(choices, condition === 'other checkout blocker' ? 0 : 1);
+    assert.deepEqual((await f.state()).workers[id], old);
+    assert.equal((await f.state()).retiredWorkers[id], undefined);
+    if (condition === 'session returns') {
+      assert.equal((await f.attempt()).status, 'held');
+      await assert.rejects(f.worker.command('start-implementation', 'Update the docs'),
+        /Prior owner launch has no proved pre-effect refusal/);
       assert.deepEqual(f.effects, []);
     }
   });

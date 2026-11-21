@@ -9,7 +9,7 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
-import { archiveLaunchNotices, spawnPath } from './delegation.mjs';
+import { abandonLaunchApproval, archiveLaunchNotices, spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -545,6 +545,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return { accepted: true, ownerToken: state.ownerToken };
   });
 
+  const acceptLaunchAbandon = request => queue(async () => {
+    const version = inputVersion;
+    const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
+      version === inputVersion && state.acceptStarts && request.ownerToken === state.ownerToken;
+    if (!uuid(request.id) || !uuid(request.workerId) || !stillCurrent())
+      return { accepted: false, message: 'Supervisor unavailable for assignment abandonment' };
+    try {
+      const workerId = await abandonLaunchApproval(root, request, state,
+        id => herdrRequest(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), stillCurrent, commit);
+      return { accepted: true, id: request.id, workerId };
+    } catch (error) {
+      return { accepted: false, message: error.code ? 'Historical approval evidence unavailable; inspect supervisor status' : error.message };
+    }
+  });
+
   const acceptLaunchArchive = request => queue(async () => {
     const version = inputVersion;
     const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
@@ -599,6 +614,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
               acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :
               request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
