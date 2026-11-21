@@ -988,6 +988,27 @@ export async function archiveLaunchNotices(root, request, state, readPane, readS
 const registrationMatches = (saved, binding) => sameSession({ id: saved.sessionId, file: saved.sessionFile }, binding) &&
   saved.cwd === binding.cwd && saved.paneId === binding.paneId;
 
+// Launch protocol owns phase interpretation. Unknown or malformed history cannot
+// establish independence; a related non-dispatched attempt remains unresolved.
+export async function unresolvedStartupForWorker(root, binding) {
+  const phases = new Set(['prepared', 'creating', 'split-requested', 'workspace-requested',
+    'starting', 'enrolling', 'dispatching', 'dispatched', 'held', 'preflight-refused',
+    'close-requested', 'abandon-requested']);
+  for (const file of await readdir(root)) {
+    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
+    const attempt = await readJson(join(root, file));
+    if (file !== `spawn-${attempt?.id}.json` || !phases.has(attempt.status) ||
+        typeof attempt.parent?.sessionId !== 'string' || typeof attempt.parent?.sessionFile !== 'string' ||
+        (attempt.status === 'preflight-refused' &&
+          (attempt.paneRequested === true || attempt.paneId || attempt.child || attempt.closeRequested || attempt.abandonRequested)))
+      return { unverified: true };
+    if (attempt.status !== 'dispatched' && [attempt.parent, attempt.child].some(ref => ref &&
+      (ref.sessionId === binding.sessionId || ref.sessionFile === binding.sessionFile)))
+      return { related: attempt.id };
+  }
+  return null;
+}
+
 async function noRelatedStartup(root, bindings) {
   for (const file of await readdir(root)) {
     if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;

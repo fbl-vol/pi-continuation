@@ -6,7 +6,7 @@ import { startFixture } from './fixtures/start-flow.mjs';
 import { newSupervisor, decodeSupervisor } from '../src/contracts.mjs';
 import { stopWorker, returnStoppedWorker, checkpointHash } from '../src/policy.mjs';
 import { managementSnapshot } from '../src/management.mjs';
-import { atomicJson } from '../src/store.mjs';
+import { atomicJson, readJson } from '../src/store.mjs';
 import { defaultDeliveryPreferences, readDeliveryPreferences } from '../src/preferences.mjs';
 import { sendAction } from '../src/ipc.mjs';
 
@@ -189,6 +189,36 @@ test('Stop refuses a real accepted-but-uncertain continuation and retains its hi
   assert.equal(after.workers[f.workerId()].stopped, undefined);
   assert.deepEqual(after.inflight, before.inflight);
   assert.match(f.worker.notifications.at(-1)[0], /Unresolved worker delivery/);
+});
+
+test('Stop ignores unrelated proved no-effect preflight refusal without deleting history', async t => {
+  const f = await started(t);
+  const id = '11111111-1111-1111-1111-111111111111';
+  const path = join(f.root, `spawn-${id}.json`);
+  const attempt = { id, status: 'preflight-refused', role: 'owner',
+    parent: { sessionId: 'unrelated', sessionFile: join(f.root, 'other.jsonl') },
+    preflightFailures: [{ at: new Date().toISOString(), reason: 'No effect requested' }] };
+  await atomicJson(path, attempt);
+  await ownAction(f, 'Stop supervising this worker');
+  assert.equal((await f.state()).workers[f.workerId()].stopped, true);
+  assert.deepEqual(await readJson(path), attempt);
+});
+
+test('Stop still refuses a related preflight refusal and an unrelated possible pane effect', async t => {
+  const f = await started(t);
+  const id = '11111111-1111-1111-1111-111111111111';
+  const path = join(f.root, `spawn-${id}.json`);
+  const attempt = { id, status: 'preflight-refused',
+    parent: { sessionId: f.worker.id, sessionFile: f.worker.file } };
+  await atomicJson(path, attempt);
+  await ownAction(f, 'Stop supervising this worker');
+  assert.equal((await f.state()).workers[f.workerId()].stopped, undefined);
+  await atomicJson(path, { ...attempt, parent: { sessionId: 'other', sessionFile: join(f.root, 'other.jsonl') },
+    paneRequested: true });
+  await ownAction(f, 'Stop supervising this worker');
+  assert.equal((await f.state()).workers[f.workerId()].stopped, undefined);
+  assert.deepEqual(await readJson(path), { ...attempt,
+    parent: { sessionId: 'other', sessionFile: join(f.root, 'other.jsonl') }, paneRequested: true });
 });
 
 test('Stop refuses retained uncertain delegated startup, without deleting its attempt', async t => {

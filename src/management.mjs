@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { Type } from 'typebox';
-import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultRoot, readJson, claim } from './store.mjs';
 import { isId, readSupervisor, readObservation } from './contracts.mjs';
@@ -8,6 +7,7 @@ import { currentSession } from './session.mjs';
 import { snapshot, sameOccupant } from './herdr.mjs';
 import { ownerAlive, sendAction } from './ipc.mjs';
 import { withWorkerHandoff } from './ownership.mjs';
+import { unresolvedStartupForWorker } from './delegation.mjs';
 import { setScopePaused, stopWorker } from './policy.mjs';
 import { displayName, workerStatus } from './status.mjs';
 import { diagnostics } from './diagnostics.mjs';
@@ -33,21 +33,6 @@ function requesterBinding(ctx, live, paneId) {
   return binding;
 }
 
-async function requireNoPendingSpawn(root, binding) {
-  for (const name of await readdir(root)) {
-    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(name)) continue;
-    const attempt = await readJson(join(root, name));
-    if (attempt?.id !== name.slice(6, -5) || typeof attempt.parent?.sessionId !== 'string' ||
-        typeof attempt.parent?.sessionFile !== 'string' ||
-        !['prepared', 'creating', 'starting', 'enrolling', 'dispatching', 'dispatched', 'held'].includes(attempt.status))
-      refuse('Delegation history cannot be verified; inspect before Stop');
-    const related = [attempt.parent, attempt.child].some(ref => ref &&
-      (ref.sessionId === binding.sessionId || ref.sessionFile === binding.sessionFile));
-    if (related && attempt.status !== 'dispatched')
-      refuse('Unresolved delegated startup requires inspection before Stop');
-  }
-}
-
 /** Owner-only transition. The durable opt-in is written by the native command,
  * never by a model activation tool. A consumed/lost request is not replayed. */
 export async function applyManagementControl(root, request, state, readLive, commit) {
@@ -71,7 +56,9 @@ export async function applyManagementControl(root, request, state, readLive, com
       const observation = await readObservation(root, binding.workerId);
       if (observation.session.id !== binding.sessionId || observation.session.file !== binding.sessionFile ||
           observation.bootstrapPending) refuse('Worker startup is unverified or unresolved; inspect before Stop');
-      await requireNoPendingSpawn(root, binding);
+      const startup = await unresolvedStartupForWorker(root, binding);
+      if (startup?.unverified) refuse('Delegation history cannot be verified; inspect before Stop');
+      if (startup?.related) refuse('Unresolved delegated startup requires inspection before Stop');
     }
     await claim(join(root, `management-used-${intent.id}.json`), { id: intent.id });
     if (intent.action === 'stop') stopWorker(state, binding.workerId, intent.id);
