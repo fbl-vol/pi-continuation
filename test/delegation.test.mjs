@@ -51,9 +51,11 @@ async function fixture(t, options = {}) {
     if (method === 'pane.get') await options.beforePaneRead?.(f, params.pane_id);
     if (method === 'pane.get' && options.closedPanes?.includes(params.pane_id))
       throw Object.assign(new Error('Pane closed'), { code: 'pane_not_found' });
-    if (method === 'session.snapshot' && options.historicalPanes)
+    if (method === 'session.snapshot' && options.historicalPanes) {
+      await options.onSnapshot?.(f, children, request, socket);
       return { type: 'session_snapshot', snapshot: { protocol: 22, agents: f.agents,
         panes: [...f.agents, ...options.historicalPanes] } };
+    }
     if (method === 'workspace.create' && params.label === 'Continuation Supervisor') {
       effects.push('supervisor-workspace');
       if (options.supervisorWorkspaceLost) throw new Error('lost supervisor workspace response');
@@ -1059,6 +1061,205 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
+for (const outcome of ['confirm', 'unnamed', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+  test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
+  const closedPanes = [];
+  let interrupt = outcome.startsWith('interrupted');
+  const { f, oldGrant, oldWriter } = await settledAssignment(t, { closedPanes, historicalPanes: [],
+    onSnapshot: async fixture => {
+      if (!interrupt) return;
+      const state = await fixture.state();
+      if (!Object.values(state.closedAssignments ?? {}).some(closed => closed.abandoned)) return;
+      for (const file of (await readdir(fixture.root)).filter(name => /^spawn-[a-f0-9-]{36}\.json$/.test(name))) {
+        const attempt = await readJson(join(fixture.root, file));
+        if (attempt.closeRequested && attempt.status === 'creating' && attempt.paneRequested === false) {
+          interrupt = false;
+          throw new Error('Fixture interruption after durable abandonment, before pane request');
+        }
+      }
+    },
+  });
+  const reviewer = (await f.children[0].native.spawn({ key: 'review-old',
+    task: 'Review assignment A.', role: 'read-only' })).details;
+  await new Promise(resolve => setImmediate(resolve));
+  const state = await f.state();
+  const owner = Object.values(state.workers).find(w => w.role === 'owner');
+  const reviewed = state.workers[reviewer.workerId];
+  await atomicJson(join(f.root, `observation-${reviewed.workerId}.json`), {
+    session: { id: reviewed.sessionId, file: reviewed.sessionFile }, stop: reviewed.workerId,
+    outcome: 'completed', finalReply: 'Reviewed fixture.', hold: false,
+  });
+  for (const binding of [owner, state.workers[oldWriter], reviewed]) {
+    binding.paused = true;
+    closedPanes.push(binding.paneId);
+    f.agents.splice(f.agents.findIndex(a => a.pane_id === binding.paneId), 1);
+  }
+  for (let i = 1; i <= 2; i++) {
+    const id = `33333333-3333-4333-8333-33333333333${i}`;
+    state.notices[id] = { id, workerId: oldWriter, recipient: { ...owner, id: oldGrant, role: 'owner' },
+      route: state.workers[oldWriter].route, stop: id, kind: 'blocker',
+      status: 'pending', text: 'Unknown historical delivery outcome' };
+  }
+  delete state.notices['33333333-3333-4333-8333-333333333332'].recipient;
+  for (let i = 1; i <= 3; i++) {
+    const id = `44444444-4444-4444-8444-44444444444${i}`;
+    const old = { ...state.workers[oldWriter], workerId: id, delegationId: undefined,
+      paneId: `old:p${i}`, terminalId: `old-terminal-${i}`,
+      sessionId: `old-session-${i}`, sessionFile: join(f.root, `old-${i}.jsonl`),
+      sessionValue: join(f.root, `old-${i}.jsonl`), checkpoint: join(f.root, `old-${i}.md`) };
+    state.workers[id] = old;
+    await writeFile(old.checkpoint, 'Historical checkpoint');
+    await atomicJson(join(f.root, `worker-${id}.json`), old);
+    await atomicJson(join(f.root, `observation-${id}.json`), {
+      session: { id: old.sessionId, file: old.sessionFile }, stop: id,
+      outcome: 'approval', hold: true, holdReason: 'error',
+    });
+    closedPanes.push(old.paneId);
+  }
+  // Retain the older Git-common-directory claim shape rather than a modern
+  // per-tree claim; the old grant is the witness tying it to this checkout.
+  const treeClaim = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  const legacy = join(f.root, '.git');
+  const legacyClaim = join(f.root, `delegation-writer-${createHash('sha256').update(legacy).digest('hex')}.json`);
+  await atomicJson(legacyClaim, await readJson(treeClaim));
+  await rm(treeClaim);
+  const oldGrantPath = join(f.root, `delegation-${oldGrant}.json`);
+  await atomicJson(oldGrantPath, { ...(await readJson(oldGrantPath)), checkout: legacy });
+  if (outcome === 'foreign grant') {
+    const other = state.workers['44444444-4444-4444-8444-444444444441'];
+    other.role = 'owner';
+    other.coordinatorId = '88888888-8888-4888-8888-888888888888';
+  }
+  if (outcome === 'inflight') state.inflight[oldWriter] = {
+    id: '66666666-6666-4666-8666-666666666666', stop: 'blocked-stop' };
+  if (outcome === 'sending notice') state.notices['33333333-3333-4333-8333-333333333331'].status = 'sending';
+  if (outcome === 'startup effect') await atomicJson(join(f.root, 'spawn-77777777-7777-4777-8777-777777777777.json'), {
+    id: '77777777-7777-4777-8777-777777777777', grantId: oldGrant, status: 'held',
+    paneRequested: true, parent: { ...owner, sessionKind: 'path' },
+  });
+  await f.supervisor.emit('session_shutdown');
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  await f.supervisorCommand('start');
+  const notices = structuredClone((await f.state()).notices);
+  if (outcome === 'competing claim') await atomicJson(treeClaim, {
+    id: '55555555-5555-4555-8555-555555555555', grantId: oldGrant });
+  let choices = 0;
+  f.worker.select((title, options) => {
+    choices++;
+    assert.match(title, /Abandon inactive assignment/);
+    assert.match(title, new RegExp(oldGrant));
+    assert.equal(options[0], 'Abandon exact set and start new assignment');
+    if (outcome === 'reappear') f.agents.push({ ...f.agents[0], pane_id: 'old:relocated',
+      agent_session: { ...f.agents[0].agent_session, value: owner.sessionFile } });
+    return outcome === 'cancel' ? 'Cancel' : options[0];
+  });
+  const startB = () => f.worker.command('start-implementation', outcome === 'unnamed' ?
+    'Assignment B: write the next fixture.' :
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+  if (!(['confirm', 'unnamed'].includes(outcome) || outcome.startsWith('interrupted'))) {
+    await assert.rejects(startB(), /abandonment cancelled|absence is unverified|Another writer claim|active authority|unresolved delivery effect|startup|another owner grant/);
+    assert.equal(choices, ['competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant'].includes(outcome) ? 0 : 1);
+    assert.equal(f.children.length, 3);
+    assert.deepEqual((await f.state()).notices, notices);
+    assert.equal(Object.keys((await f.state()).retiredWorkers).length, 0);
+    assert.equal((await readJson(oldGrantPath)).revoked, false);
+    assert.ok(await readJson(legacyClaim));
+    return;
+  }
+  if (outcome.startsWith('interrupted')) {
+    await assert.rejects(startB(), /held for inspection/);
+    assert.equal(f.children.length, 3);
+    assert.equal((await f.state()).closedAssignments[oldGrant].abandoned, true);
+    assert.equal(interrupt, false);
+    if (outcome === 'interrupted-state' || outcome === 'interrupted-grant') {
+      await atomicJson(legacyClaim, { id: (await f.state()).closedAssignments[oldGrant].writerId,
+        grantId: oldGrant });
+      if (outcome === 'interrupted-state')
+        await atomicJson(oldGrantPath, { ...(await readJson(oldGrantPath)), revoked: false });
+    }
+    if (outcome === 'interrupted-restart') {
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+    }
+    if (outcome === 'interrupted-competing') {
+      await atomicJson(treeClaim, { id: '99999999-9999-4999-8999-999999999999', grantId: oldGrant });
+      await assert.rejects(startB(), /Another writer claim appeared during abandonment|held for inspection/);
+      assert.deepEqual(await readJson(treeClaim), {
+        id: '99999999-9999-4999-8999-999999999999', grantId: oldGrant });
+      assert.equal(f.children.length, 3);
+      assert.deepEqual((await f.state()).notices, notices);
+      return;
+    }
+  }
+  await startB();
+  assert.equal(choices, 1);
+  assert.equal(f.children.length, 4);
+  const final = await f.state();
+  assert.deepEqual(final.notices, notices, 'unknown outcomes and receipts are never reclassified');
+  assert.equal(Object.keys(final.retiredWorkers).length, 6);
+  assert.equal(Object.keys(final.workers).length, 1);
+  assert.equal(final.closedAssignments[oldGrant].abandoned, true);
+  assert.equal((await readJson(oldGrantPath)).revoked, true);
+  await assert.rejects(readJson(legacyClaim), { code: 'ENOENT' });
+  for (let i = 1; i <= 3; i++) {
+    const id = `44444444-4444-4444-8444-44444444444${i}`;
+    assert.equal((await readJson(join(f.root, `observation-${id}.json`))).outcome, 'approval');
+  }
+  const restarted = await f.state();
+  const nextOwner = Object.values(restarted.workers).find(w => w.role === 'owner');
+  restarted.routes.w.coordinator = { ...nextOwner, id: nextOwner.coordinatorId, role: 'owner' };
+  await f.supervisor.emit('session_shutdown');
+  await atomicJson(join(f.root, 'supervisor.json'), restarted);
+  await f.supervisorCommand('start');
+  await f.supervisorCommand('activate global');
+  assert.deepEqual((await f.state()).notices, notices);
+  assert.equal(Object.keys((await f.state()).retiredWorkers).length, 6);
+  });
+}
+
+test('P1/P7 a settled absent temporary reviewer does not prevent normal A closeout', async t => {
+  const closedPanes = [];
+  const { f, oldGrant } = await settledAssignment(t, { closedPanes, historicalPanes: [] });
+  const reviewer = (await f.children[0].native.spawn({ key: 'review-a',
+    task: 'Review assignment A.', role: 'read-only' })).details;
+  await new Promise(resolve => setImmediate(resolve));
+  const binding = (await f.state()).workers[reviewer.workerId];
+  await atomicJson(join(f.root, `observation-${binding.workerId}.json`), {
+    session: { id: binding.sessionId, file: binding.sessionFile }, stop: binding.workerId,
+    outcome: 'completed', finalReply: 'Reviewed fixture.', hold: false,
+  });
+  closedPanes.push(binding.paneId);
+  f.agents.splice(f.agents.findIndex(a => a.pane_id === binding.paneId), 1);
+
+  await f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+  assert.equal(f.children.length, 4);
+  assert.equal((await f.state()).retiredWorkers[reviewer.workerId].paused, true);
+});
+
+test('P1/P7 relocated settled reviewer cannot be silently closed', async t => {
+  const closedPanes = [];
+  const { f, oldGrant } = await settledAssignment(t, { closedPanes, historicalPanes: [] });
+  const reviewer = (await f.children[0].native.spawn({ key: 'review-a',
+    task: 'Review assignment A.', role: 'read-only' })).details;
+  await new Promise(resolve => setImmediate(resolve));
+  const binding = (await f.state()).workers[reviewer.workerId];
+  await atomicJson(join(f.root, `observation-${binding.workerId}.json`), {
+    session: { id: binding.sessionId, file: binding.sessionFile }, stop: binding.workerId,
+    outcome: 'completed', finalReply: 'Reviewed fixture.', hold: false,
+  });
+  closedPanes.push(binding.paneId);
+  const agent = f.agents.find(a => a.pane_id === binding.paneId);
+  f.agents.splice(f.agents.indexOf(agent), 1);
+  f.agents.push({ ...agent, pane_id: 'w:moved', terminal_id: 'moved-terminal' });
+
+  await assert.rejects(f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`),
+    /active or has unresolved effects|active authority or an unresolved effect|absence is unverified/);
+  assert.equal((await f.state()).workers[reviewer.workerId]?.paused, false);
+  assert.equal(f.children.length, 3);
+});
+
 test('P7 an explicit close of A starts B in the same tree with old authority retired', async t => {
   const { f, oldGrant, oldWriter, writer } = await settledAssignment(t);
   f.worker.select(() => assert.fail('Named closeout must not ask again'));
@@ -1260,7 +1461,7 @@ for (const blocker of ['active writer', 'user decision', 'pending notice', 'held
     }
     await assert.rejects(f.worker.command('start-implementation',
       `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`),
-    /not eligible|active or has unresolved effects|settled eligible report|Unresolved assignment startup/);
+    /not eligible|active or has unresolved effects|settled eligible report|Unresolved assignment startup|active authority or an unresolved effect/);
     assert.equal(f.children.length, 2);
     assert.ok((await f.state()).workers[oldWriter]);
     assert.equal((await f.state()).closedAssignments?.[oldGrant], undefined);
@@ -1289,6 +1490,37 @@ test('P1/P7 a proved pre-split refusal resumes the same scope/key after correcti
   assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
   assert.equal((await f.attempt()).status, 'dispatched');
   assert.equal(Object.values((await f.state()).workers).filter(binding => binding.role === 'owner').length, 1);
+});
+
+test('P1/P5 baseline: a proved preflight refusal cannot use the same scope after supervisor replacement', async t => {
+  const f = await fixture(t);
+  const scope = 'Implement the agreed fixture change.';
+  const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
+  await assert.rejects(f.worker.command('start-implementation', scope), /no agent started/);
+  const refused = await f.attempt();
+  await rm(claimPath);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(f.worker.command('start-implementation', scope), /ownership|no proved pre-effect/);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(await f.attempts(), [`spawn-${refused.id}.json`]);
+});
+
+test('P1/P5 baseline: writer stable key stays held after a proved pre-pane claim refusal', async t => {
+  const f = await fixture(t);
+  await f.authorize();
+  const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(claimPath, { id: '11111111-1111-4111-8111-111111111111' });
+  await assert.rejects(f.worker.spawn(task), /held for inspection.*writer claim/);
+  const first = await f.attempt();
+  assert.equal(first.status, 'held');
+  assert.equal(first.paneRequested, undefined);
+  assert.deepEqual(f.effects, []);
+  await rm(claimPath);
+  await assert.rejects(f.worker.spawn(task), /EEXIST/);
+  assert.deepEqual(await f.attempts(), [`spawn-${first.id}.json`]);
+  assert.deepEqual(f.effects, []);
 });
 
 test('P4/P5 native launch preserves pauses and never retries uncertain pane creation', async t => {
@@ -1561,6 +1793,44 @@ for (const unavailable of [true, false]) {
     }
   });
 }
+
+test('P3/P4 baseline: surviving exact assignment owner loses delegation after supervisor restart', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: inspect the synthetic fixture.');
+  const owner = f.children[0].native;
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(owner.spawn({ key: 'review-after-restart', task: 'Review A.', role: 'read-only' }),
+    /Intended running supervisor changed or is unavailable/);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+  assert.equal((await f.state()).workers[(await f.attempt()).workerId]?.paused, false);
+});
+
+test('P4/P7 baseline: a closed paused binding from a removed separate checkout blocks a free tree', async t => {
+  const f = await fixture(t);
+  const removed = join(f.root, 'removed-checkout');
+  await mkdir(removed);
+  execFileSync('git', ['init', '--quiet', removed]);
+  const old = f.native('w:p2');
+  old.ctx.cwd = removed;
+  f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'old-terminal', cwd: removed,
+    agent_session: { ...f.agents[0].agent_session, value: old.file } });
+  await old.emit('session_start', { reason: 'startup' });
+  await old.command('continuation-worker', 'start');
+  const state = await f.state();
+  const binding = Object.values(state.workers)[0];
+  binding.paused = true;
+  await f.supervisor.emit('session_shutdown');
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  await f.supervisorCommand('start');
+  f.agents.splice(f.agents.findIndex(a => a.pane_id === 'w:p2'), 1);
+  await rm(removed, { recursive: true });
+
+  await assert.rejects(f.worker.command('start-implementation', 'Assignment B: implement a fixture.'),
+    /Existing worker checkout cannot be verified/);
+  assert.deepEqual(f.effects, []);
+  assert.equal((await f.state()).workers[binding.workerId]?.paused, true);
+});
 
 test('P4 owner restart retains route pause and refuses stale grant retargeting', async t => {
   const f = await fixture(t);

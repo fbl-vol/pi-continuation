@@ -504,7 +504,7 @@ async function recordedCloseout(root, checkout, scope, parent, state) {
   return { grant, attempt, closed };
 }
 
-async function closeoutCandidate(root, checkout, grantId, state, live) {
+async function closeoutCandidate(root, checkout, grantId, state, live, readPane, readSnapshot) {
   const grant = await readJson(grantPath(root, grantId));
   const claim = await readJson(writerClaimPath(root, checkout));
   const attempt = await readJson(spawnPath(root, claim.id));
@@ -529,8 +529,15 @@ async function closeoutCandidate(root, checkout, grantId, state, live) {
   }
   for (const binding of [owner, ...children]) {
     const agent = live.agents.find(a => a.pane_id === binding.paneId);
-    if (!sameOccupant(agent, binding) || !['idle', 'done'].includes(agent.agent_status) ||
-        state.inflight[binding.workerId] ||
+    const settledLive = sameOccupant(agent, binding) && ['idle', 'done'].includes(agent.agent_status);
+    let absentReviewer = false;
+    if (!agent && binding.delegationId) {
+      const reviewAttempt = await readJson(spawnPath(root, binding.delegationId));
+      absentReviewer = reviewAttempt.role === 'read-only' && reviewAttempt.grantId === grantId &&
+        reviewAttempt.status === 'dispatched' && reviewAttempt.workerId === binding.workerId &&
+        await absentSession(binding, live, readPane, readSnapshot);
+    }
+    if ((!settledLive && !absentReviewer) || state.inflight[binding.workerId] ||
         state.ownerWaits[binding.workerId] || state.dispositions[binding.workerId]?.action === 'decision' ||
         Object.values(state.notices).some(n => (n.workerId === binding.workerId ||
           n.recipient?.id === grantId) && unresolvedNotice(n)))
@@ -541,6 +548,85 @@ async function closeoutCandidate(root, checkout, grantId, state, live) {
       refuse(`Assignment worker ${binding.workerId} has no settled eligible report`);
   }
   return { grant, claim, bindings: [owner, ...children] };
+}
+
+// A historical assignment can be abandoned only as an exact set. In particular,
+// pending notices are retained with unknown delivery outcome, never archived as
+// unsent. A claim's old Git-common-directory key is valid only when its grant
+// still resolves to this exact working tree.
+async function abandonmentCandidate(root, checkout, oldId, state, live, readPane, readSnapshot, launchId) {
+  const grant = await readJson(grantPath(root, oldId));
+  if (!grant.ownerLaunch || grant.revoked || await checkoutIdentity(grant.cwd, grant.checkout) !== grant.checkout ||
+      await checkoutRoot(grant.cwd) !== checkout ||
+      (grant.ownerToken !== state.ownerToken && await ownerAlive(root, grant.ownerToken)))
+    refuse('Old assignment checkout or supervisor ownership changed');
+  const claimPath = writerClaimPath(root, grant.checkout);
+  const claim = await readJson(claimPath);
+  const treePath = writerClaimPath(root, checkout);
+  const legacyPath = writerClaimPath(root, await commonDirectory(grant.cwd));
+  for (const otherPath of new Set([treePath, legacyPath])) {
+    if (otherPath === claimPath) continue;
+    try { await readJson(otherPath); refuse('Another writer claim may own this checkout'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  const writer = await readJson(spawnPath(root, claim.id));
+  if (claim.grantId !== oldId || writer.id !== claim.id || writer.grantId !== oldId ||
+      writer.role !== 'writer' || writer.status !== 'dispatched')
+    refuse('Old assignment writer claim is not attributable');
+  const owner = Object.values(state.workers).find(w => w.role === 'owner' && w.coordinatorId === oldId);
+  if (!owner || !Object.values(state.workers).some(w => w.delegationId === writer.id))
+    refuse('Old assignment owner or writer is not retained');
+  const ownerKey = await readJson(join(root, `spawn-key-${digest(`${oldId}\nassignment-owner`)}.json`));
+  const ownerAttempt = await readJson(spawnPath(root, ownerKey.id));
+  if (ownerAttempt.status !== 'dispatched' || ownerAttempt.workerId !== owner.workerId ||
+      ownerAttempt.grantId !== oldId) refuse('Old owner startup is unresolved');
+
+  const bindings = [];
+  for (const binding of Object.values(state.workers)) {
+    let tree;
+    try { tree = await checkoutRoot(binding.cwd); }
+    catch { refuse(`Worker ${binding.workerId} checkout cannot be verified`); }
+    if (tree !== checkout) continue;
+    if (!binding.paused || state.inflight[binding.workerId] || state.ownerWaits[binding.workerId] ||
+        state.dispositions[binding.workerId]?.action === 'decision')
+      refuse(`Worker ${binding.workerId} has active authority or an unresolved effect`);
+    if (binding.role === 'owner' && binding.coordinatorId !== oldId)
+      refuse(`Worker ${binding.workerId} belongs to another owner grant`);
+    if (binding.delegationId) {
+      const child = await readJson(spawnPath(root, binding.delegationId));
+      if (child.grantId !== oldId || child.workerId !== binding.workerId || child.status !== 'dispatched')
+        refuse(`Worker ${binding.workerId} has independent or unfinished delegation authority`);
+    }
+    const saved = await readJson(join(root, `worker-${binding.workerId}.json`));
+    const observed = await readObservation(root, binding.workerId);
+    if (!registrationMatches(saved, binding) || await realpath(saved.checkpoint) !== binding.checkpoint ||
+        !sameSession(observed.session, binding) || observed.bootstrapPending ||
+        !await absentSession(binding, live, readPane, readSnapshot))
+      refuse(`Worker ${binding.workerId} identity, startup or absence is unverified`);
+    bindings.push(binding);
+  }
+  if (!bindings.some(w => w.workerId === owner.workerId) ||
+      !bindings.some(w => w.delegationId === writer.id) || !await noRelatedStartup(root, bindings))
+    refuse('Old assignment startup or checkout membership is unresolved');
+  for (const file of await readdir(root)) {
+    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
+    const started = await readJson(join(root, file));
+    if (started.id === launchId || started.status === 'dispatched' ||
+        (started.status === 'preflight-refused' && started.paneRequested !== true &&
+          !started.paneId && !started.child)) continue;
+    const scope = await readJson(grantPath(root, started.grantId));
+    if (scope.checkout === checkout || scope.checkout === grant.checkout)
+      refuse(`Unresolved checkout launch ${started.id}`);
+  }
+  const ids = new Set(bindings.map(w => w.workerId));
+  for (const notice of Object.values(state.notices)) {
+    if ((ids.has(notice.workerId) || notice.recipient?.id === oldId) && unresolvedNotice(notice)) {
+      if (!ids.has(notice.workerId) || notice.status !== 'pending' ||
+          (notice.recipient && notice.recipient.id !== oldId))
+        refuse(`Notice ${notice.id} has an unresolved delivery effect`);
+    }
+  }
+  return { grant, claim, claimPath, bindings };
 }
 
 async function requireNoWriterClaim(root, checkout, cwd) {
@@ -565,7 +651,7 @@ async function requireNoWriterClaim(root, checkout, cwd) {
 
 /** Owner queue only. No notice selection supplied by the caller; derive it from
  * the exact native checkout attempt and the current supervisor snapshot. */
-export async function closeLaunchAssignment(root, request, state, readSnapshot, stillCurrent, commit) {
+export async function closeLaunchAssignment(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
   const attempt = await readJson(spawnPath(root, request.id));
   const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
   if (attempt.id !== request.id || attempt.status !== 'close-requested' || attempt.role !== 'owner' ||
@@ -598,14 +684,14 @@ export async function closeLaunchAssignment(root, request, state, readSnapshot, 
     if (claim) await rm(path);
     return request.grantId;
   }
-  const closing = await closeoutCandidate(root, grant.checkout, request.grantId, previous, live);
+  const closing = await closeoutCandidate(root, grant.checkout, request.grantId, previous, live, readPane, readSnapshot);
   if (!stillCurrent() || !isDeepStrictEqual(previous, state) ||
       (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
       !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))))
     refuse('Assignment closeout evidence changed');
   const final = await readSnapshot();
   requireDelegationParent(final, attempt.parent);
-  await closeoutCandidate(root, grant.checkout, request.grantId, state, final);
+  await closeoutCandidate(root, grant.checkout, request.grantId, state, final, readPane, readSnapshot);
   for (const binding of closing.bindings) {
     state.retiredWorkers[binding.workerId] = { ...binding, paused: true, retiredBy: attempt.id };
     delete state.workers[binding.workerId];
@@ -619,6 +705,76 @@ export async function closeLaunchAssignment(root, request, state, readSnapshot, 
   const claim = await readJson(writerClaimPath(root, grant.checkout));
   if (!isDeepStrictEqual(claim, closing.claim)) refuse('Writer claim changed during closeout');
   await rm(writerClaimPath(root, grant.checkout));
+  return request.grantId;
+}
+
+export async function abandonLaunchAssignment(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
+  const attempt = await readJson(spawnPath(root, request.id));
+  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
+  if (attempt.id !== request.id || attempt.status !== 'close-requested' || attempt.role !== 'owner' ||
+      attempt.grantId !== grant.id || attempt.ownerToken !== state.ownerToken || !grant.ownerLaunch ||
+      !grant.abandonAssignment || grant.closeAssignment !== request.grantId ||
+      attempt.task !== grant.scope || !attempt.closeRequested || attempt.paneRequested !== false ||
+      attempt.paneId || attempt.child ||
+      (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id)
+    refuse('No matching native abandonment attempt');
+  const oldPath = grantPath(root, request.grantId);
+  const oldGrant = await readJson(oldPath);
+  const claimPath = writerClaimPath(root, oldGrant.checkout);
+  const recorded = state.closedAssignments?.[request.grantId];
+  if (recorded) {
+    if (!recorded.abandoned || recorded.launchId !== attempt.id ||
+        !Array.isArray(recorded.workerIds) || !recorded.workerIds.length ||
+        recorded.workerIds.some(id => !state.retiredWorkers[id] || state.retiredWorkers[id].retiredBy !== attempt.id) ||
+        Object.values(state.workers).some(w => recorded.workerIds.includes(w.workerId)) ||
+        !stillCurrent()) refuse('Recorded abandonment identity or effect boundary changed');
+    let claim;
+    try { claim = await readJson(claimPath); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (claim && (claim.id !== recorded.writerId || claim.grantId !== request.grantId))
+      refuse('Another assignment owns the writer claim');
+    for (const otherPath of new Set([writerClaimPath(root, grant.checkout),
+      writerClaimPath(root, await commonDirectory(oldGrant.cwd))])) {
+      if (otherPath === claimPath) continue;
+      try { await readJson(otherPath); refuse('Another writer claim appeared during abandonment'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    if (!oldGrant.revoked) await atomicJson(oldPath, { ...oldGrant, revoked: true });
+    if (claim) await rm(claimPath);
+    return request.grantId;
+  }
+  const previous = structuredClone(state);
+  const live = await readSnapshot();
+  requireDelegationParent(live, attempt.parent);
+  const selected = await abandonmentCandidate(root, grant.checkout, request.grantId, previous,
+    live, readPane, readSnapshot, attempt.id);
+  if (!stillCurrent() || !isDeepStrictEqual(previous, state) ||
+      !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))) ||
+      (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
+      !isDeepStrictEqual(selected.claim, await readJson(selected.claimPath)))
+    refuse('Assignment abandonment evidence changed');
+  const final = await readSnapshot();
+  requireDelegationParent(final, attempt.parent);
+  const checked = await abandonmentCandidate(root, grant.checkout, request.grantId, state,
+    final, readPane, readSnapshot, attempt.id);
+  if (!isDeepStrictEqual(checked.bindings, selected.bindings) ||
+      !isDeepStrictEqual(checked.claim, selected.claim) || !stillCurrent())
+    refuse('Assignment abandonment set or claim changed');
+  const at = new Date().toISOString();
+  for (const binding of selected.bindings) {
+    state.retiredWorkers[binding.workerId] = { ...binding, paused: true, retiredBy: attempt.id,
+      abandonedAssignment: { at, launchId: attempt.id } };
+    delete state.workers[binding.workerId];
+  }
+  state.closedAssignments ??= {};
+  state.closedAssignments[request.grantId] = { launchId: attempt.id, writerId: selected.claim.id,
+    ownerToken: attempt.ownerToken, workerIds: selected.bindings.map(w => w.workerId), abandoned: true, at };
+  try { await commit(); }
+  catch (error) { Object.assign(state, previous); throw error; }
+  await atomicJson(oldPath, { ...selected.grant, revoked: true });
+  if (!isDeepStrictEqual(selected.claim, await readJson(selected.claimPath)))
+    refuse('Writer claim changed during abandonment');
+  await rm(selected.claimPath);
   return request.grantId;
 }
 
@@ -847,7 +1003,15 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     } else if (retry) await save('prepared');
     if (ownerLaunch && authority.grant.closeAssignment) {
       const oldId = authority.grant.closeAssignment;
-      if (!authority.grant.closeExplicit && !resumingClose) {
+      if (authority.grant.abandonAssignment && !resumingClose) {
+        const old = (await delegationAuthority(root, reference, parent)).state;
+        const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
+          await readLive(), readPane, readLive, id);
+        const named = candidate.bindings.map(w => w.workerId).sort().join(', ');
+        const choice = await selectApproval(`Abandon inactive assignment ${oldId} and its historical workers ${named}, preserving unanswered holds and unknown notice deliveries?`,
+          ['Abandon exact set and start new assignment', 'Cancel']);
+        if (choice !== 'Abandon exact set and start new assignment') refuse('Assignment abandonment cancelled');
+      } else if (!authority.grant.abandonAssignment && !authority.grant.closeExplicit && !resumingClose) {
         const choice = await selectApproval(`Close assignment ${oldId} and start this new assignment?`,
           ['Close old assignment and start new one', 'Cancel']);
         if (choice !== 'Close old assignment and start new one') refuse('Assignment closeout cancelled');
@@ -857,10 +1021,10 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       spawn.closeRequested = true;
       spawn.paneRequested = false;
       await save('close-requested');
-      const result = await send(root, { type: 'launch-close', id, grantId: oldId,
-        ownerToken: authority.grant.ownerToken }, 'supervisor', { timeoutMs: 15000 });
+      const result = await send(root, { type: authority.grant.abandonAssignment ? 'launch-abandon-assignment' : 'launch-close',
+        id, grantId: oldId, ownerToken: authority.grant.ownerToken }, 'supervisor', { timeoutMs: 15000 });
       if (!result.accepted || result.id !== id || result.grantId !== oldId)
-        refuse(result.message ?? 'Assignment closeout unverified');
+        refuse(result.message ?? 'Assignment retirement unverified');
       await save('prepared');
     }
     if (role === 'writer' || ownerLaunch) {
@@ -1203,15 +1367,39 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     if (!closing && !options.worktree) {
       try {
         const claim = await readJson(writerClaimPath(root, target));
-        await closeoutCandidate(root, target, claim.grantId, state, live);
+        await closeoutCandidate(root, target, claim.grantId, state, live,
+          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
         closing = claim.grantId;
       } catch { /* An ineligible assignment retains the ordinary worktree/owner refusal. */ }
+      if (!closing) {
+        try {
+          const legacy = await commonDirectory(target);
+          if (legacy !== target) {
+            const claim = await readJson(writerClaimPath(root, legacy));
+            await abandonmentCandidate(root, target, claim.grantId, state, live,
+              id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
+            closing = claim.grantId;
+            grant.abandonAssignment = true;
+          }
+        } catch { /* Unverified historical claims retain the ordinary refusal. */ }
+      }
     }
-    if (closing && !recoveredClose) await closeoutCandidate(root, target, closing, state, live);
+    if (closing && !recoveredClose && !grant.abandonAssignment) {
+      try {
+        await closeoutCandidate(root, target, closing, state, live,
+          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
+      } catch (closeError) {
+        if (!options.closeAssignment) throw closeError;
+        await abandonmentCandidate(root, target, closing, state, live,
+          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
+        grant.abandonAssignment = true;
+      }
+    }
     const placement = closing ? { cwd: target, space: options.space ?? checkout.space ?? 'current' } :
       await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
         grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch);
     grant.closeAssignment = closing;
+    grant.abandonAssignment = recoveredClose?.grant.abandonAssignment ?? grant.abandonAssignment;
     grant.closeExplicit = recoveredClose?.grant.closeExplicit ?? !!options.closeAssignment;
     grant.cwd = placement.cwd;
     grant.space = placement.space;

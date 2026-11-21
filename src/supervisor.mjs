@@ -9,7 +9,7 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
-import { abandonLaunchApproval, archiveLaunchNotices, closeLaunchAssignment, spawnPath } from './delegation.mjs';
+import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment, spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -219,7 +219,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   const flushNotices = async () => {
     if (!active() || !allowExperimentalActivation || !subscriptionLive || state.paused || !lastSnapshot) return;
     for (const notice of Object.values(state.notices ?? {})) {
-      if (notice.status !== 'pending') continue;
+      // Historical abandonment retains unknown pending outcomes for inspection,
+      // but a later route coordinator must never replay a retired sender's notice.
+      if (notice.status !== 'pending' || !state.workers[notice.workerId]) continue;
       const route = state.routes[notice.route];
       const recipient = notice.recipient ?? route?.coordinator;
       if (!route || route.paused || !recipient ||
@@ -552,10 +554,26 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!uuid(request.id) || !uuid(request.grantId) || !stillCurrent())
       return { accepted: false, message: 'Supervisor unavailable for assignment closeout' };
     try {
-      const grantId = await closeLaunchAssignment(root, request, state, () => snapshot(socketPath), stillCurrent, commit);
+      const grantId = await closeLaunchAssignment(root, request, state,
+        id => herdrRequest(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), stillCurrent, commit);
       return { accepted: true, id: request.id, grantId };
     } catch (error) {
       return { accepted: false, message: error.code ? 'Closeout evidence unavailable; inspect supervisor status' : error.message };
+    }
+  });
+
+  const acceptLaunchAbandonAssignment = request => queue(async () => {
+    const version = inputVersion;
+    const stillCurrent = () => active() && subscriptionLive && !state.paused && !promptActive &&
+      version === inputVersion && state.acceptStarts && request.ownerToken === state.ownerToken;
+    if (!uuid(request.id) || !uuid(request.grantId) || !stillCurrent())
+      return { accepted: false, message: 'Supervisor unavailable for assignment abandonment' };
+    try {
+      const grantId = await abandonLaunchAssignment(root, request, state,
+        id => herdrRequest(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), stillCurrent, commit);
+      return { accepted: true, id: request.id, grantId };
+    } catch (error) {
+      return { accepted: false, message: error.code ? 'Abandonment evidence unavailable; inspect supervisor status' : error.message };
     }
   });
 
@@ -628,6 +646,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
               acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
               request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :
               request?.type === 'launch-close' ? acceptLaunchClose(request) :
               request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
