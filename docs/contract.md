@@ -82,7 +82,7 @@ owner endpoint revalidates these under the worker ownership mutex and serializes
 the durable transition. This IPC accepts only Pause and Stop, never activation or
 hold-clear. Loss/uncertainty is inspection work, not replay permission. Native own
 Return and supervisor-global controls reuse the existing confirmed start/control
-paths; another session cannot remotely clear a worker's hold.
+paths; another session cannot remotely clear a worker's hold. Current-source `/continuation` exposes the existing guarded own-session Clear hold only for that exact held worker, and the existing confirmed user-decision release only for the exact owner with a user wait. Clear does not approve, activate or replay a report; decision release still requires the actual human selection followed by an ordinary user turn. The advanced explicit owner-resume command remains available while single-submission decision provenance is unresolved. Manual supervisor/worker setup, scoped delegation and supervisor route/worker recovery retain their distinct controls rather than becoming implicit launch effects.
 
 Pause stays in the active list. Retained Stop keeps the worker binding and keyed
 history but marks it stopped/paused and withdraws it from active attention/listing.

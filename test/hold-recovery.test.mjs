@@ -26,7 +26,7 @@ async function fixture(t) {
   const emit = async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn(event, ctx); };
   const previous = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
-  bindContinuation(pi, { root, socketPath: join(root, 'fake.sock'), paneId: 'fake:p1' });
+  const observer = bindContinuation(pi, { root, socketPath: join(root, 'fake.sock'), paneId: 'fake:p1' });
   t.after(async () => {
     await emit('session_shutdown');
     if (previous === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previous;
@@ -38,7 +38,7 @@ async function fixture(t) {
   await emit('session_start');
   await commands.get('continuation-worker')(checkpoint, ctx);
   const [file] = (await readdir(root)).filter(name => name.startsWith('observation-'));
-  const rawInput = () => { for (const fn of input) fn({ data: '/continuation-worker-clear-hold\r' }); };
+  const rawInput = () => { for (const fn of input) fn({ data: '/continuation\r' }); };
   const assistant = (text, stopReason = 'stop') => {
     leaf = `reply-${entries.length}`;
     entries.push({ id: leaf, type: 'message', message: { role: 'assistant', stopReason,
@@ -49,7 +49,7 @@ async function fixture(t) {
     saveSupervisor: value => atomicJson(join(root, 'supervisor.json'), value),
     supervisor: () => readJson(join(root, 'supervisor.json')),
     saved: () => readJson(join(root, file)), setConfirm: fn => { confirm = fn; },
-    clear: async () => { rawInput(); await commands.get('continuation-worker-clear-hold')('', ctx); },
+    clear: async () => { rawInput(); await observer.clearHold(ctx); },
     freshHeld: async (text = 'Remaining approved work.', reason = 'stop', aborted = false) => {
       rawInput();
       await emit('input', { source: 'interactive', text: 'Continue approved work' });

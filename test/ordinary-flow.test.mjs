@@ -54,9 +54,9 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
         appendEntry: (customType, data) => { leaf = randomUUID(); entries.push({ id: leaf, type: 'custom', customType, data }); },
         sendMessage: (...args) => messages.push(args),
         sendUserMessage: () => assert.fail('Plain enrollment must not send another task') };
-      bindContinuation(pi, { root, socketPath, paneId });
-      return { pi, ctx, entries, messages, commands, tools,
-        rawInput: () => { for (const fn of input) fn({ data: '/continuation-worker-clear-hold\r' }); },
+      const observer = bindContinuation(pi, { root, socketPath, paneId });
+      return { pi, ctx, entries, messages, commands, tools, observer,
+        rawInput: () => { for (const fn of input) fn({ data: '/continuation\r' }); },
         assistant: text => { leaf = randomUUID(); entries.push({ id: leaf, type: 'message',
           message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] } }); },
         emit: async (name, event = {}) => {
@@ -122,7 +122,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
       assert.match(completion.content[0].text, /Report held; requested action was not accepted/);
       const beforeClear = await readJson(join(root, 'supervisor.json'));
       worker.rawInput();
-      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
+      await worker.observer.clearHold(worker.ctx);
       const cleared = await readJson(join(root, `observation-${workerId}.json`));
       assert.equal(cleared.stop, observation.stop);
       assert.equal(cleared.finalReply, observation.finalReply);
@@ -155,7 +155,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     if (recovery) {
       // Clearing again cannot revive the report that was actually delivered.
       worker.rawInput();
-      await worker.commands.get('continuation-worker-clear-hold')('', worker.ctx);
+      await worker.observer.clearHold(worker.ctx);
       const invalidated = await readJson(join(root, `observation-${workerId}.json`));
       assert.equal(invalidated.stop, null);
       assert.equal(invalidated.outcome, 'unknown');

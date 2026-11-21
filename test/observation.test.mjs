@@ -32,7 +32,6 @@ function fakePi(sessionId, sessionFile) {
   }, registerTool: () => {},
     registerCommand: (name, definition) => {
       if (name === 'continuation-worker') pi.command = definition.handler;
-      if (name === 'continuation-worker-clear-hold') pi.clearHold = definition.handler;
     },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
   return { pi, ctx, notices, entries, terminalInput,
@@ -201,7 +200,7 @@ test('alternate shortcut UI durably holds an existing worker and revokes a later
   await run(foreign.ctx);
   assert.equal(s.observer.hold, true); // Synchronous in-memory receipt fence, before disk IO.
   overlap = true;
-  await s.pi.clearHold('', s.ctx);
+  await s.observer.clearHold(s.ctx);
   const saved = JSON.parse(await readFile(join(s.root, `observation-${id}.json`)));
   assert.equal(saved.hold, true);
   assert.equal(saved.stop, null);
@@ -239,7 +238,7 @@ test('a fully overlapping approval cannot be erased by hold-clear confirmation',
   await s.emit('ui_prompt_start');
   await s.emit('ui_prompt_end');
   overlap = true;
-  await s.pi.clearHold('', s.ctx);
+  await s.observer.clearHold(s.ctx);
   assert.equal(s.observer.hold, true);
   assert.equal(JSON.parse(await readFile(join(s.root, `observation-${id}.json`))).hold, true);
   assert.deepEqual(s.sent, []);
@@ -257,7 +256,7 @@ test('a new turn while clearing a prior hold leaves the worker held', async t =>
   await s.emit('ui_prompt_start');
   await s.emit('ui_prompt_end');
   interrupt = true;
-  await s.pi.clearHold('', s.ctx);
+  await s.observer.clearHold(s.ctx);
   assert.equal(s.observer.hold, true);
   assert.match(s.notices.at(-1)[0], /changed during confirmation/);
 });
@@ -541,7 +540,7 @@ test('sticky hold survives a subsequent working observation and restart until ex
     const id = first.entries[0].data.workerId;
     const observation = () => readFile(join(root, `observation-${id}.json`), 'utf8').then(JSON.parse);
     assert.equal((await observation()).outcome, 'approval');
-    await next.pi.clearHold('', next.ctx);
+    await observer.clearHold(next.ctx);
     assert.equal(observer.hold, false);
     assert.equal((await observation()).stop, null);
     assert.equal((await observation()).hold, false);
@@ -858,7 +857,7 @@ test('an exact final reply is captured; oversized replies hold instead of hiding
     assert.equal((await saved()).hold, true);
     assert.equal((await saved()).finalReply, undefined);
 
-    await worker.pi.clearHold('', worker.ctx);
+    await observer.clearHold(worker.ctx);
     assert.equal(observer.hold, false);
     await worker.emit('agent_start');
     worker.entries.push({ type: 'message', id: 'empty', message: { role: 'assistant',

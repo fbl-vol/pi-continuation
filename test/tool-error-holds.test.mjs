@@ -263,7 +263,7 @@ test('management details explain a run hold without raw tool payloads or changin
   assert.match(text, /Held: run failed/);
   assert.match(text, /Cause: a Pi turn ended in error/);
   assert.ok(text.includes(`Hold recorded: ${before.holdError.at}`));
-  assert.match(text, /confirmed Start\/Return or Clear hold/);
+  assert.match(text, /Start\/Return or Clear this session hold in \/continuation/);
   assert.doesNotMatch(text, /Synthetic provider failure/);
   assert.deepEqual(await f.observation(), before);
   assert.equal(f.worker.messages.length, 0);

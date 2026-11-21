@@ -668,41 +668,38 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       await observe(stopped, ctx);
     } catch (error) { worker = undefined; report('observe settled turn', error, ctx); }
   });
-  pi.registerCommand('continuation-worker-clear-hold', {
-    description: 'Clear a resolved hold and allow current-report reassessment; not approval or activation',
-    handler: async (_args, ctx) => {
-      if (!worker || !hold || ctx.mode !== 'tui') return;
-      const guard = promptsFor(ctx);
-      const record = worker;
-      const version = stopVersion;
-      const session = currentSession(ctx);
-      let prior;
-      if (reviewCurrentReports) {
-        await pendingWrite;
-        try { prior = await readObservation(root, record.workerId); }
-        catch (error) { report('read held report', error, ctx); return; }
-      }
-      if (!await guard.confirm('Clear worker hold?',
-        'Only clear after resolving the hold reason. The current unchanged report may be reassessed. ' +
-        'This is not action approval or scope activation; other pauses, budgets and no-replay guards remain.')) {
-        await pendingWrite;
-        return;
-      }
-      const now = currentSession(ctx);
-      if (worker !== record || stopVersion !== version || now.id !== session.id ||
-          now.file !== session.file || now.leaf !== session.leaf || !ctx.isIdle()) {
-        ctx.ui.notify('Worker changed during confirmation; hold retained.', 'warning'); return;
-      }
-      const currentReport = prior ? currentHeldReport(prior, ctx, version, now) ??
-        (worker.managedInput && prior.parkedReport ? currentHeldReport(prior.parkedReport, ctx, version, now) : null) : null;
-      hold = false;
-      holdReason = undefined;
-      holdError = undefined;
-      parkedReport = undefined;
-      stopVersion++;
-      await observe(currentReport ?? { session: now, outcome: 'unknown', stop: null }, ctx);
-    },
-  });
+  const clearHold = async ctx => {
+    if (!worker || !hold || ctx.mode !== 'tui') return;
+    const guard = promptsFor(ctx);
+    const record = worker;
+    const version = stopVersion;
+    const session = currentSession(ctx);
+    let prior;
+    if (reviewCurrentReports) {
+      await pendingWrite;
+      try { prior = await readObservation(root, record.workerId); }
+      catch (error) { report('read held report', error, ctx); return; }
+    }
+    if (!await guard.confirm('Clear worker hold?',
+      'Only clear after resolving the hold reason. The current unchanged report may be reassessed. ' +
+      'This is not action approval or scope activation; other pauses, budgets and no-replay guards remain.')) {
+      await pendingWrite;
+      return;
+    }
+    const now = currentSession(ctx);
+    if (worker !== record || stopVersion !== version || now.id !== session.id ||
+        now.file !== session.file || now.leaf !== session.leaf || !ctx.isIdle()) {
+      ctx.ui.notify('Worker changed during confirmation; hold retained.', 'warning'); return;
+    }
+    const currentReport = prior ? currentHeldReport(prior, ctx, version, now) ??
+      (worker.managedInput && prior.parkedReport ? currentHeldReport(prior.parkedReport, ctx, version, now) : null) : null;
+    hold = false;
+    holdReason = undefined;
+    holdError = undefined;
+    parkedReport = undefined;
+    stopVersion++;
+    await observe(currentReport ?? { session: now, outcome: 'unknown', stop: null }, ctx);
+  };
   pi.on('session_shutdown', async () => {
     if (preparing) preparing.interrupted = true;
     if (initialPending) { clearTimeout(initialPending.timer); initialPending = undefined; }
@@ -723,7 +720,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     get registered() { return !!worker; }, get hold() { return hold; },
     get interactionVersion() { return stopVersion; },
     selectManagement(ctx, title, choices) { return promptsFor(ctx).select(title, choices); },
-    start: requestStart,
+    start: requestStart, clearHold,
     get confirming() { return prompts?.confirming === true; },
     get promptBlocked() { return !prompts?.intact || prompts.blocked; },
     confirmDelegation(ctx, title, message) { return promptsFor(ctx).confirm(title, message); },

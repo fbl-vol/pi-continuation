@@ -1328,7 +1328,11 @@ test('P3 owner child wait persists; user selection gate blocks child notices and
   await assert.rejects(f.worker.wait({ kind: 'child', children: [child.workerId] }), /rejected/i);
   await assert.rejects(f.worker.spawn({ key: 'review', task: 'Review after user selection.', role: 'read-only' }),
     /waiting for a user decision/);
-  await f.worker.command('continuation-owner', 'resume');
+  f.worker.select((_title, choices) => {
+    assert.ok(choices.includes('Release this owner decision wait'));
+    return 'Release this owner decision wait';
+  });
+  await f.worker.command('continuation', '');
   const afterRelease = await f.state();
   assert.equal(afterRelease.ownerWaits[f.workerId()]?.kind, 'released');
   assert.equal(afterRelease.handled[f.workerId()], waitingStop,
