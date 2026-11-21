@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdir, realpath, rm } from 'node:fs/promises';
+import { access, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
@@ -617,10 +617,30 @@ async function closeoutCandidate(root, checkout, grantId, state, live, readPane,
   return { grant, claim, bindings: [owner, ...children] };
 }
 
-// A historical assignment can be abandoned only as an exact set. In particular,
-// pending notices are retained with unknown delivery outcome, never archived as
-// unsent. A claim's old Git-common-directory key is valid only when its grant
-// still resolves to this exact working tree.
+async function isLegacyCheckoutRefusal(root, attempt, grant, file, state, treeFence, legacyFence) {
+  // v0.4.5/v0.4.6 wrote `held` for these checkout refusals, both emitted
+  // before pane.split. Missing pane fields alone are not proof of no effect.
+  const knownRefusal = attempt.failure === 'Checkout already has a supervised worker; delegate read-only work or inspect writer ownership' ||
+    /^Checkout already has a supervised worker [a-f0-9-]{36}: unverified observation, unresolved startup, or approval; inspect writer ownership$/.test(attempt.failure);
+  if (!knownRefusal || attempt.status !== 'held' || !isId(attempt.id) || file !== `spawn-${attempt.id}.json` ||
+      attempt.role !== 'owner' || attempt.key !== 'assignment-owner' || !grant.ownerLaunch ||
+      attempt.grantId !== grant.id || attempt.ownerToken !== grant.ownerToken || attempt.task !== grant.scope ||
+      !isDeepStrictEqual(attempt.parent, grant.parent) || !isDeepStrictEqual(attempt.authority, { grantId: grant.id }) ||
+      grant.worktreeCreated || grant.closeAssignment ||
+      ['paneRequested', 'paneId', 'terminalId', 'workspaceId', 'tabId', 'child', 'workerId',
+        'closeRequested', 'abandonRequested'].some(key => Object.hasOwn(attempt, key)) ||
+      [state.workers, state.retiredWorkers].some(workers => Object.values(workers).some(w => w.delegationId === attempt.id)))
+    return false;
+  for (const path of new Set([treeFence, legacyFence])) {
+    try { if ((await readJson(path)).token === attempt.id) return false; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  try { await access(join(root, `spawn-receipt-${attempt.id}.json`)); return false; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return true; }
+}
+
+// A historical assignment can be abandoned only as an exact set. Pending
+// notices keep their unknown outcome. A legacy claim must resolve to this tree.
 async function abandonmentCandidate(root, checkout, oldId, state, live, readPane, readSnapshot, launchId) {
   const grant = await readJson(grantPath(root, oldId));
   if (!grant.ownerLaunch || grant.revoked || await checkoutIdentity(grant.cwd, grant.checkout) !== grant.checkout ||
@@ -675,6 +695,8 @@ async function abandonmentCandidate(root, checkout, oldId, state, live, readPane
   if (!bindings.some(w => w.workerId === owner.workerId) ||
       !bindings.some(w => w.delegationId === writer.id) || !await noRelatedStartup(root, bindings))
     refuse('Old assignment startup or checkout membership is unresolved');
+  const treeFence = ownerLaunchPath(root, checkout);
+  const legacyFence = ownerLaunchPath(root, await commonDirectory(grant.cwd));
   for (const file of await readdir(root)) {
     if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
     const started = await readJson(join(root, file));
@@ -682,8 +704,9 @@ async function abandonmentCandidate(root, checkout, oldId, state, live, readPane
         (started.status === 'preflight-refused' && started.paneRequested !== true &&
           !started.paneId && !started.child)) continue;
     const scope = await readJson(grantPath(root, started.grantId));
-    if (scope.checkout === checkout || scope.checkout === grant.checkout)
-      refuse(`Unresolved checkout launch ${started.id}`);
+    if (scope.checkout !== checkout && scope.checkout !== grant.checkout) continue;
+    if (!await isLegacyCheckoutRefusal(root, started, scope, file, state, treeFence, legacyFence))
+      throw Object.assign(new Error(`Unresolved checkout launch ${started.id}`), { code: 'UNRESOLVED_CHECKOUT_LAUNCH' });
   }
   const ids = new Set(bindings.map(w => w.workerId));
   for (const notice of Object.values(state.notices)) {
@@ -984,7 +1007,8 @@ export const delegationInstructions = 'Stay within the approved delegation scope
 /** One durable attempt, never resumed after a crash or a lost response. Read-only
  * readiness checks may repeat; pane creation, agent start, enrollment and task send may not. */
 export async function spawnDelegated({ root, socketPath, paneId, ctx, reference, task, role, key,
-  signal, ownerLaunch = false, allowed = () => true, selectApproval = (title, choices) => ctx.ui.select(title, choices),
+  signal, ownerLaunch = false, retryAbandonAssignment, allowed = () => true,
+  selectApproval = (title, choices) => ctx.ui.select(title, choices),
   transport = request, readSnapshot = snapshot, send = sendAction }) {
   if (!(ownerLaunch ? role === 'owner' : ['writer', 'read-only'].includes(role)) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
       !key?.trim() || key.length > 120) refuse('A stable assignment key, bounded task and writer/read-only role are required');
@@ -1047,6 +1071,8 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const recipient = ownerLaunch ? undefined : parentWorker?.recipient ?? (parentWorker?.role === 'owner' ?
     { id: parentWorker.coordinatorId } : undefined);
   const resumingClose = !!retry?.recoveringClose;
+  if (retryAbandonAssignment && (!ownerLaunch || !retry || resumingClose || authority.grant.closeAssignment ||
+      retry.closeRequested || retry.abandonRequested)) refuse('Prior launch cannot adopt the abandonment choice');
   const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
     parent, role, key, task, status: 'prepared', at: new Date().toISOString(),
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
@@ -1073,9 +1099,9 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       }
       delete spawn.recoveringClose;
     } else if (retry) await save('prepared');
-    if (ownerLaunch && authority.grant.closeAssignment) {
-      const oldId = authority.grant.closeAssignment;
-      if (authority.grant.abandonAssignment && !resumingClose) {
+    const oldId = retryAbandonAssignment ?? authority.grant.closeAssignment;
+    if (ownerLaunch && oldId) {
+      if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
         const old = (await delegationAuthority(root, reference, parent)).state;
         const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
           await readLive(), readPane, readLive, id);
@@ -1089,6 +1115,13 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
         if (choice !== 'Close old assignment and start new one') refuse('Assignment closeout cancelled');
       }
       checkLocal();
+      if (retryAbandonAssignment) {
+        // This exact retry originally refused without a retirement choice.
+        // Bind the new confirmed choice under its checkout fence before IPC.
+        authority.grant.closeAssignment = oldId;
+        authority.grant.abandonAssignment = true;
+        await atomicJson(grantPath(root, authority.grant.id), authority.grant);
+      }
       closeRequested = true;
       spawn.closeRequested = true;
       spawn.paneRequested = false;
@@ -1456,7 +1489,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
             closing = claim.grantId;
             grant.abandonAssignment = true;
           }
-        } catch { /* Unverified historical claims retain the ordinary refusal. */ }
+        } catch (error) {
+          if (error.code === 'UNRESOLVED_CHECKOUT_LAUNCH') throw error;
+          // Other unverified historical claims retain the ordinary refusal.
+        }
       }
     }
     if (closing && !recoveredClose && !grant.abandonAssignment) {
@@ -1485,6 +1521,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     await activateForLaunch();
     await delegationOwner(root, grant);
     const scopePath = closeoutScopePath(root, grant.checkout, scope);
+    let retryAbandonAssignment;
     try {
       await claim(scopePath, { grantId: grant.id });
       await claim(grantPath(root, grant.id), grant);
@@ -1502,10 +1539,11 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
           (attempt.status !== 'preflight-refused' &&
             (!recoveredClose || attempt.id !== recoveredClose.attempt.id)) || attempt.grantId !== previous.id)
         refuse('Prior owner launch has no proved pre-effect refusal; inspect before retrying');
+      if (grant.abandonAssignment && !previous.closeAssignment) retryAbandonAssignment = grant.closeAssignment;
       grant.id = previous.id;
     }
     const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
-      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, allowed,
+      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, retryAbandonAssignment, allowed,
       selectApproval: (title, choices) => worker.selectManagement(ctx, title, choices) });
     ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
   }

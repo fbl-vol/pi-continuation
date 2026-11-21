@@ -1061,7 +1061,7 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
-for (const outcome of ['confirm', 'unnamed', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
   test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
   const closedPanes = [];
   let interrupt = outcome.startsWith('interrupted');
@@ -1143,6 +1143,40 @@ for (const outcome of ['confirm', 'unnamed', 'cancel', 'reappear', 'competing cl
   const notices = structuredClone((await f.state()).notices);
   if (outcome === 'competing claim') await atomicJson(treeClaim, {
     id: '55555555-5555-4555-8555-555555555555', grantId: oldGrant });
+  const nextScope = 'Assignment B: write the next fixture.';
+  let priorLaunch;
+  if (outcome === 'legacy refusal retry') {
+    const savedClaim = await readJson(legacyClaim);
+    await rm(legacyClaim);
+    await assert.rejects(f.worker.command('start-implementation', nextScope), /refused before pane creation/);
+    for (const file of await f.attempts()) {
+      const attempt = await readJson(join(f.root, file));
+      if (attempt.task === nextScope) priorLaunch = attempt;
+    }
+    assert.equal(priorLaunch.status, 'preflight-refused');
+    await atomicJson(legacyClaim, savedClaim);
+  }
+  const priorRecords = [];
+  if (outcome.startsWith('legacy ')) {
+    for (const [n, failure] of [
+      [1, 'Checkout already has a supervised worker; delegate read-only work or inspect writer ownership'],
+      [2, `Checkout already has a supervised worker ${oldWriter}: unverified observation, unresolved startup, or approval; inspect writer ownership`],
+    ]) {
+      const id = `77777777-7777-4777-8777-77777777777${n}`;
+      const grantId = `88888888-8888-4888-8888-88888888888${n}`;
+      const task = `Prior historical attempt ${n}`;
+      const grant = { ...(await readJson(oldGrantPath)), id: grantId, scope: task };
+      const attempt = { id, grantId, parent: grant.parent, authority: { grantId }, ownerToken: grant.ownerToken,
+        role: 'owner', key: 'assignment-owner', task, status: 'held',
+        failure: outcome === 'legacy unknown failure' && n === 1 ? 'Possible lost split response' : failure };
+      const path = join(f.root, `spawn-${id}.json`);
+      await atomicJson(join(f.root, `delegation-${grantId}.json`), grant);
+      await atomicJson(path, attempt);
+      priorRecords.push({ path, attempt });
+      if (outcome === 'legacy receipt' && n === 1)
+        await atomicJson(join(f.root, `spawn-receipt-${id}.json`), { id, status: 'accepted' });
+    }
+  }
   let choices = 0;
   f.worker.select((title, options) => {
     choices++;
@@ -1153,10 +1187,18 @@ for (const outcome of ['confirm', 'unnamed', 'cancel', 'reappear', 'competing cl
       agent_session: { ...f.agents[0].agent_session, value: owner.sessionFile } });
     return outcome === 'cancel' ? 'Cancel' : options[0];
   });
-  const startB = () => f.worker.command('start-implementation', outcome === 'unnamed' ?
-    'Assignment B: write the next fixture.' :
-    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
-  if (!(['confirm', 'unnamed'].includes(outcome) || outcome.startsWith('interrupted'))) {
+  const startB = () => f.worker.command('start-implementation',
+    outcome === 'unnamed' || outcome.startsWith('legacy ') ? nextScope :
+      `--options {"closeAssignment":"${oldGrant}"} -- ${nextScope}`);
+  if (outcome === 'legacy receipt' || outcome === 'legacy unknown failure') {
+    await assert.rejects(startB(), /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/);
+    assert.equal(choices, 0);
+    assert.equal(f.children.length, 3);
+    assert.deepEqual((await f.state()).notices, notices);
+    assert.equal((await readJson(oldGrantPath)).revoked, false);
+    return;
+  }
+  if (!(['confirm', 'unnamed', 'legacy refusal retry'].includes(outcome) || outcome.startsWith('interrupted'))) {
     await assert.rejects(startB(), /abandonment cancelled|absence is unverified|Another writer claim|active authority|unresolved delivery effect|startup|another owner grant/);
     assert.equal(choices, ['competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant'].includes(outcome) ? 0 : 1);
     assert.equal(f.children.length, 3);
@@ -1199,6 +1241,8 @@ for (const outcome of ['confirm', 'unnamed', 'cancel', 'reappear', 'competing cl
   assert.equal(Object.keys(final.retiredWorkers).length, 6);
   assert.equal(Object.keys(final.workers).length, 1);
   assert.equal(final.closedAssignments[oldGrant].abandoned, true);
+  if (priorLaunch) assert.equal(final.closedAssignments[oldGrant].launchId, priorLaunch.id);
+  for (const { path, attempt } of priorRecords) assert.deepEqual(await readJson(path), attempt);
   assert.equal((await readJson(oldGrantPath)).revoked, true);
   await assert.rejects(readJson(legacyClaim), { code: 'ENOENT' });
   for (let i = 1; i <= 3; i++) {
