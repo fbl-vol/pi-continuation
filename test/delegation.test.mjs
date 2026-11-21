@@ -1388,11 +1388,28 @@ test('P1/P3/P7 exact finished owner can type the native next-assignment command'
   owner.assistant('Finished the synthetic assignment.');
   await owner.emit('agent_settled', { aborted: false });
   owner.raw('/start-implementation');
+  f.agents.find(a => a.pane_id === f.children[0].pane.pane_id).agent_status = 'working';
   assert.ok(owner.continuation.launchEvidence(owner.ctx), 'typed command retains exact pre-command evidence');
   await owner.command('start-implementation',
     `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
   assert.equal(f.children.length, 3);
   assert.equal((await f.state()).closedAssignments[oldGrant].launchId !== undefined, true);
+});
+
+for (const change of ['blocked owner', 'working writer']) test(`P1/P7 typed owner launch rejects ${change}`, async t => {
+  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+  const owner = f.children[0].native;
+  owner.assistant('Finished the synthetic assignment.');
+  await owner.emit('agent_settled', { aborted: false });
+  owner.raw('/start-implementation');
+  const binding = change === 'blocked owner' ? Object.values((await f.state()).workers)
+    .find(w => w.role === 'owner') : (await f.state()).workers[oldWriter];
+  f.agents.find(a => a.pane_id === binding.paneId).agent_status = change === 'blocked owner' ? 'blocked' : 'working';
+  await assert.rejects(owner.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`),
+    /blocked|active or has unresolved effects|held for inspection/);
+  assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+  assert.equal(f.children.length, 2);
 });
 
 for (const change of ['Escape', 'changed leaf']) test(`P1/P3/P7 typed owner launch rejects ${change}`, async t => {

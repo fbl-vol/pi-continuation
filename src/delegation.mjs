@@ -619,7 +619,12 @@ async function closeoutCandidate(root, checkout, grantId, state, live, readPane,
   }
   for (const binding of [owner, ...children]) {
     const agent = live.agents.find(a => a.pane_id === binding.paneId);
-    const settledLive = sameOccupant(agent, binding) && ['idle', 'done'].includes(agent.agent_status);
+    const current = await readObservation(root, binding.workerId);
+    const typedOwner = binding === owner && typedOwnerReport(current, binding, commandEvidence);
+    // Pi marks the exact command's owner working while it runs. The previous
+    // settled report is usable only through its still-fenced typing witness.
+    const settledLive = sameOccupant(agent, binding) && (['idle', 'done'].includes(agent.agent_status) ||
+      (typedOwner && agent.agent_status === 'working'));
     let absentReviewer = false;
     if (!agent && binding.delegationId) {
       const reviewAttempt = await readJson(spawnPath(root, binding.delegationId));
@@ -632,8 +637,6 @@ async function closeoutCandidate(root, checkout, grantId, state, live, readPane,
         Object.values(state.notices).some(n => (n.workerId === binding.workerId ||
           n.recipient?.id === grantId) && unresolvedNotice(n)))
       refuse(`Assignment worker ${binding.workerId} is active or has unresolved effects`);
-    const current = await readObservation(root, binding.workerId);
-    const typedOwner = binding === owner && typedOwnerReport(current, binding, commandEvidence);
     const observation = typedOwner ? current.commandReport : current;
     if (!sameSession(observation.session, binding) || observation.hold ||
         observation.bootstrapPending || observation.outcome !== 'completed')
