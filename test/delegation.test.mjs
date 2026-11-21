@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
 import { atomicJson, readJson } from '../src/store.mjs';
-import { ownerAlive, ownerServer, sendAction } from '../src/ipc.mjs';
+import { ownerAlive, ownerServer, sendAction, workerEndpoint } from '../src/ipc.mjs';
 import { attentionContent } from '../src/attention.mjs';
 import { delegatedDisplayLabel, delegationInstructions, spawnDelegated } from '../src/delegation.mjs';
 import { checkpointHash } from '../src/policy.mjs';
@@ -1222,7 +1222,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
       try { JSON.parse(line); oldWorkerStarts++; } catch { /* Older ownerServer rejects non-JSON before dispatch. */ }
       socket.end('invalid\n');
     }));
-    oldEndpoint.listen(join(f.root, 'worker-supervisor.sock'));
+    oldEndpoint.listen(workerEndpoint(f.root, 'supervisor'));
     await once(oldEndpoint, 'listening');
     t.after(() => new Promise(resolve => oldEndpoint.close(resolve)));
   }
