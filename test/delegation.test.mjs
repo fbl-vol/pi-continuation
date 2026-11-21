@@ -1040,8 +1040,8 @@ for (const blocker of [null, 'receipt', 'live recipient', 'returning recipient',
   });
 }
 
-async function settledAssignment(t) {
-  const f = await fixture(t);
+async function settledAssignment(t, options) {
+  const f = await fixture(t, options);
   await f.worker.command('start-implementation', 'Assignment A: implement a fixture.');
   const owner = f.children[0];
   const oldGrant = (await f.attempt()).grantId;
@@ -1082,6 +1082,106 @@ test('P7 an explicit close of A starts B in the same tree with old authority ret
   await f.supervisor.emit('session_shutdown');
   await f.supervisorCommand('start');
   assert.deepEqual((await f.state()).closedAssignments, after.closedAssignments);
+});
+
+for (const stage of ['state committed', 'grant revoked', 'claim released', 'supervisor replaced', 'partial rebind']) {
+  test(`P7 an interrupted ${stage} resumes only the original pre-pane B attempt`, async t => {
+    let interrupt = true;
+    const { f, oldGrant, writer } = await settledAssignment(t, { onSnapshot: async f => {
+      if (!interrupt) return;
+      const attempts = await f.attempts?.() ?? (await readdir(f.root)).filter(p => /^spawn-[a-f0-9-]{36}\.json$/.test(p));
+      for (const file of attempts) {
+        const attempt = await readJson(join(f.root, file));
+        if (attempt.closeRequested && attempt.status === 'creating' && attempt.paneRequested === false) {
+          interrupt = false;
+          throw new Error('Fixture process interrupted before pane request');
+        }
+      }
+    } });
+    const scope = `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`;
+    await assert.rejects(f.worker.command('start-implementation', scope), /held for inspection/);
+    const closed = await f.state();
+    assert.equal(closed.closedAssignments[oldGrant].writerId, writer.id);
+    const attempts = await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file))));
+    const b = attempts.find(attempt => attempt.closeRequested);
+    assert.equal(b.status, 'held');
+    assert.equal(b.paneRequested, false);
+    assert.equal(b.paneId, undefined);
+    const claimPath = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+    const oldGrantPath = join(f.root, `delegation-${oldGrant}.json`);
+    const old = await readJson(oldGrantPath);
+    if (stage === 'state committed') {
+      await atomicJson(oldGrantPath, { ...old, revoked: false });
+      await atomicJson(claimPath, { id: writer.id, grantId: oldGrant });
+    } else if (stage === 'grant revoked') await atomicJson(claimPath, { id: writer.id, grantId: oldGrant });
+    if (['supervisor replaced', 'partial rebind'].includes(stage)) {
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+      const current = await f.state();
+      assert.notEqual(current.ownerToken, closed.ownerToken);
+      if (stage === 'partial rebind') {
+        const bGrantPath = join(f.root, `delegation-${b.grantId}.json`);
+        await atomicJson(bGrantPath, { ...(await readJson(bGrantPath)),
+          ownerToken: current.ownerToken, supervisorSession: current.supervisorSession });
+      }
+    }
+    await f.worker.emit('session_shutdown');
+    await f.worker.emit('session_start', { reason: 'reload' });
+    await f.worker.command('start-implementation', scope);
+    const after = (await f.attempts()).map(file => file);
+    assert.equal(after.length, attempts.length);
+    assert.equal((await readJson(join(f.root, `spawn-${b.id}.json`))).status, 'dispatched');
+    assert.equal((await readJson(oldGrantPath)).revoked, true);
+    await assert.rejects(readJson(claimPath), { code: 'ENOENT' });
+    assert.equal(f.children.length, 3);
+  });
+}
+
+test('P7 a retained pause on a settled A is preserved in retirement, not lifted for B', async t => {
+  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+  const state = await f.state();
+  state.workers[oldWriter].paused = true;
+  await f.supervisor.emit('session_shutdown');
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  await f.supervisorCommand('start');
+  await f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+  assert.equal((await f.state()).retiredWorkers[oldWriter].paused, true);
+  assert.equal((await f.state()).closedAssignments[oldGrant].writerId !== undefined, true);
+});
+
+test('P7 competing writer claim and uncertain pane marker never reuse closeout', async t => {
+  let interrupt = true;
+  const { f, oldGrant } = await settledAssignment(t, { onSnapshot: async f => {
+    if (!interrupt) return;
+    for (const file of (await readdir(f.root)).filter(p => /^spawn-[a-f0-9-]{36}\.json$/.test(p))) {
+      const attempt = await readJson(join(f.root, file));
+      if (attempt.closeRequested && attempt.status === 'creating' && !attempt.paneRequested) {
+        interrupt = false;
+        throw new Error('Fixture pre-pane interruption');
+      }
+    }
+  } });
+  const scope = `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`;
+  await assert.rejects(f.worker.command('start-implementation', scope), /held for inspection/);
+  const attempts = await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file))));
+  const b = attempts.find(attempt => attempt.closeRequested);
+  const path = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  const unrelated = { id: '33333333-3333-4333-8333-333333333333',
+    grantId: '44444444-4444-4444-8444-444444444444' };
+  await atomicJson(path, unrelated);
+  await assert.rejects(f.worker.command('start-implementation', scope), /writer claim|closeout|no proved pre-pane/);
+  assert.deepEqual(await readJson(path), unrelated);
+  assert.equal(f.children.length, 2);
+  await rm(path);
+  const fence = join(f.root, `owner-launch-pending-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(fence, { token: unrelated.id });
+  await assert.rejects(f.worker.command('start-implementation', scope), /Another launch owns the checkout fence/);
+  assert.deepEqual(await readJson(fence), { token: unrelated.id });
+  await rm(fence);
+  await atomicJson(join(f.root, `spawn-${b.id}.json`), { ...b, paneRequested: true, status: 'held' });
+  await assert.rejects(f.worker.command('start-implementation', scope), /no proved pre-pane closeout/);
+  assert.equal(f.children.length, 2);
 });
 
 test('P7 the finished owner launches B with new authority without reusing its role session', async t => {

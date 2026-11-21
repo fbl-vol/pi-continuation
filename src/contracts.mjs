@@ -34,7 +34,7 @@ import { readJson } from './store.mjs';
  *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>,
  *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>,
- *   closedAssignments: Object<string, {launchId: string, writerId: string, at: string}>}} SupervisorState
+ *   closedAssignments: Object<string, {launchId: string, writerId: string, ownerToken?: string, at: string}>}} SupervisorState
  */
 
 export const SCHEMA_VERSION = 1;
@@ -86,6 +86,7 @@ export function decodeSupervisor(record) {
   if (!object(state.closedAssignments)) invalid();
   for (const [id, closed] of Object.entries(state.closedAssignments)) {
     if (!isId(id) || !object(closed) || !isId(closed.launchId) || !isId(closed.writerId) ||
+        (closed.ownerToken !== undefined && !isId(closed.ownerToken)) ||
         !Number.isFinite(Date.parse(closed.at))) invalid();
   }
   if (state.ownerWaits === undefined) state.ownerWaits = {};
