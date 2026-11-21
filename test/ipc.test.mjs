@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { listenJson, sendAction, workerEndpoint, ownerServer, ownerAlive } from '../src/ipc.mjs';
+import { listenJson, sendAction, workerEndpoint, ownerServer, ownerAlive, supportsAssignmentAbandonment } from '../src/ipc.mjs';
 
 test('local framing preserves split UTF-8 and invokes an accepted handler only once', async t => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
@@ -91,6 +91,26 @@ test('closing waits for an accepted handler after its peer disconnects', { timeo
   assert.equal(calls, 1);
 });
 
+test('an older supervisor rejects the non-JSON capability challenge before worker enrollment', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'continuation-'));
+  const token = randomUUID();
+  let workerStarts = 0;
+  const server = net.createServer(socket => {
+    socket.once('data', data => {
+      const line = data.toString().trim();
+      if (line === token) return socket.end(token + '\n');
+      try { JSON.parse(line); workerStarts++; } catch { /* Old ownerServer rejects malformed JSON. */ }
+      socket.end('invalid\n');
+    });
+  });
+  server.listen(workerEndpoint(root, 'supervisor'));
+  await once(server, 'listening');
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
+  assert.equal(await ownerAlive(root, token), true);
+  assert.equal(await supportsAssignmentAbandonment(root, token), false);
+  assert.equal(workerStarts, 0);
+});
+
 test('native owner challenge does not accept a wrong token and withdraws on close', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuation-'));
   const token = randomUUID();
@@ -98,6 +118,7 @@ test('native owner challenge does not accept a wrong token and withdraws on clos
   try {
     assert.equal(await ownerAlive(root, 'wrong'), false);
     assert.equal(await ownerAlive(root, token), true);
+    assert.equal(await supportsAssignmentAbandonment(root, token), true);
     await close();
     assert.equal(await ownerAlive(root, token), false);
   } finally { await close(); await rm(root, { recursive: true, force: true }); }

@@ -100,9 +100,16 @@ export async function sendAction(root, action, targetId = action.workerId, { tim
 export function ownerServer(root, token, handleStart) {
   return listenLine(workerEndpoint(root, 'supervisor'), 8192, async line => {
     if (line === token) return token;
+    // A non-JSON challenge cannot reach the old supervisor's worker-start fallback.
+    if (line === `${token}:launch-abandon-assignment`) return `${token}:launch-abandon-assignment`;
     if (!handleStart) return 'invalid';
     return JSON.stringify(await handleStart(JSON.parse(line)));
   }, 'invalid', () => {});
+}
+
+export async function supportsAssignmentAbandonment(root, token) {
+  const challenge = `${token}:launch-abandon-assignment`;
+  return await requestLine(workerEndpoint(root, 'supervisor'), challenge, 128, 1000) === challenge;
 }
 
 export async function ownerAlive(root, token) {

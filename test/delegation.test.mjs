@@ -1,4 +1,6 @@
 import test from 'node:test';
+import net from 'node:net';
+import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -1061,7 +1063,7 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
-for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
   test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
   const closedPanes = [];
   let interrupt = outcome.startsWith('interrupted');
@@ -1145,7 +1147,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy con
     id: '55555555-5555-4555-8555-555555555555', grantId: oldGrant });
   const nextScope = 'Assignment B: write the next fixture.';
   let priorLaunch;
-  if (['legacy refusal retry', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence'].includes(outcome)) {
+  if (['legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence'].includes(outcome)) {
     const savedClaim = await readJson(legacyClaim);
     await rm(legacyClaim);
     await assert.rejects(f.worker.command('start-implementation', nextScope), /refused before pane creation/);
@@ -1155,7 +1157,22 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy con
     }
     assert.equal(priorLaunch.status, 'preflight-refused');
     await atomicJson(legacyClaim, savedClaim);
-    if (outcome !== 'legacy refusal retry') {
+    if (outcome === 'legacy held post-request') {
+      const path = join(f.root, `delegation-${priorLaunch.grantId}.json`);
+      await atomicJson(path, { ...(await readJson(path)), closeAssignment: oldGrant, abandonAssignment: true });
+      await atomicJson(join(f.root, `spawn-${priorLaunch.id}.json`), {
+        ...priorLaunch, status: 'held', closeRequested: true, paneRequested: false,
+        failure: 'Supervisor is not accepting this worker start; run supervisor start first',
+      });
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+      const retained = await readJson(join(f.root, `spawn-${priorLaunch.id}.json`));
+      assert.equal(retained.closeRequested, true);
+      assert.equal(retained.paneRequested, false);
+      assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+      assert.equal(Object.keys((await f.state()).retiredWorkers).length, 0);
+    }
+    if (outcome !== 'legacy refusal retry' && outcome !== 'legacy held post-request') {
       // Crash boundary: the grant's exact confirmed choice reached disk, but
       // retirement was not requested and the attempt is still preflight-refused.
       const path = join(f.root, `delegation-${priorLaunch.grantId}.json`);
@@ -1194,6 +1211,21 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy con
         await atomicJson(join(f.root, `spawn-receipt-${id}.json`), { id, status: 'accepted' });
     }
   }
+  let oldEndpoint;
+  let oldWorkerStarts = 0;
+  if (outcome === 'legacy mismatch') {
+    const token = (await f.state()).ownerToken;
+    await f.supervisor.emit('session_shutdown');
+    oldEndpoint = net.createServer(socket => socket.once('data', data => {
+      const line = data.toString().trim();
+      if (line === token) return socket.end(token + '\n');
+      try { JSON.parse(line); oldWorkerStarts++; } catch { /* Older ownerServer rejects non-JSON before dispatch. */ }
+      socket.end('invalid\n');
+    }));
+    oldEndpoint.listen(join(f.root, 'worker-supervisor.sock'));
+    await once(oldEndpoint, 'listening');
+    t.after(() => new Promise(resolve => oldEndpoint.close(resolve)));
+  }
   let choices = 0;
   f.worker.select((title, options) => {
     choices++;
@@ -1208,6 +1240,8 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy con
     outcome === 'unnamed' || outcome.startsWith('legacy ') ? nextScope :
       `--options {"closeAssignment":"${oldGrant}"} -- ${nextScope}`);
   const legacyRefusal = {
+    'legacy mismatch': /does not support assignment abandonment/,
+    'legacy held post-request': /Prior owner launch has no proved pre-effect refusal|Unresolved checkout launch|Unresolved owner launch fence/,
     'legacy receipt': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
     'legacy unknown failure': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
     'legacy changed set': /Confirmed abandonment set or writer claim changed/,
@@ -1216,6 +1250,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy refusal retry', 'legacy con
   if (legacyRefusal) {
     await assert.rejects(startB(), legacyRefusal);
     assert.equal(choices, 0);
+    if (outcome === 'legacy mismatch') assert.equal(oldWorkerStarts, 0);
     assert.equal(f.children.length, 3);
     assert.deepEqual((await f.state()).notices, notices);
     assert.equal((await readJson(oldGrantPath)).revoked, false);

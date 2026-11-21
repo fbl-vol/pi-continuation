@@ -13,7 +13,7 @@ import { deliveryFields, effectiveDeliveryPreferences, readAssignmentDeliveryPre
 import { currentSession } from './session.mjs';
 import { agreedLaunchScope } from './checkpoint.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
-import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
+import { listenJson, ownerAlive, sendAction, supportsAssignmentAbandonment } from './ipc.mjs';
 
 const exec = promisify(execFile);
 async function checkoutRoot(cwd) {
@@ -1119,6 +1119,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     } else if (retry && !retryAbandonAssignment && !confirmedRetry) await save('prepared');
     const oldId = retryAbandonAssignment ?? authority.grant.closeAssignment;
     if (ownerLaunch && oldId) {
+      if (retryAbandonAssignment || authority.grant.abandonAssignment) {
+        let supported = false;
+        try { supported = await supportsAssignmentAbandonment(root, authority.grant.ownerToken); }
+        catch { /* An unknown endpoint is not evidence of support. */ }
+        if (!supported) refuse('Running supervisor does not support assignment abandonment; reload or restart the supervisor session before confirming. Reload this planning session if it still uses older code.');
+      }
       let confirmedSelection;
       if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
         const old = (await delegationAuthority(root, reference, parent)).state;
