@@ -253,7 +253,7 @@ export async function delegationOwner(root, grant) {
   return state;
 }
 
-export async function delegationAuthority(root, reference, binding) {
+export async function delegationAuthority(root, reference, binding, commandEvidence) {
   const grant = await readJson(grantPath(root, reference?.grantId));
   if (grant.revoked || (reference.spawnId ? grant.cwd : grant.originCwd ?? grant.cwd) !== await realpath(binding.cwd))
     refuse('Delegation scope revoked or cwd changed');
@@ -300,7 +300,9 @@ export async function delegationAuthority(root, reference, binding) {
     const observation = await readObservation(root, worker.workerId);
     if (['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
       .some(key => binding[key] !== worker[key])) refuse('Parent worker identity changed');
-    if (worker.paused || observation.hold || observation.session.id !== binding.sessionId ||
+    const typedCloseout = grant.ownerLaunch && !reference.spawnId && worker.role === 'owner' &&
+      grant.closeAssignment === worker.coordinatorId && typedOwnerReport(observation, worker, commandEvidence);
+    if (worker.paused || (observation.hold && !typedCloseout) || observation.session.id !== binding.sessionId ||
         observation.session.file !== binding.sessionFile) refuse('Parent worker is paused or held');
   }
   return { grant, state, role };
@@ -586,7 +588,13 @@ async function recordedCloseout(root, checkout, scope, parent, state) {
   return { grant, attempt, closed };
 }
 
-async function closeoutCandidate(root, checkout, grantId, state, live, readPane, readSnapshot) {
+function typedOwnerReport(current, binding, evidence) {
+  return evidence?.workerId === binding.workerId && evidence.stop === current.commandReport?.stop &&
+    evidence.version === current.version && current.hold && current.holdReason === 'typing' &&
+    current.parkedReport?.stop === evidence.stop;
+}
+
+async function closeoutCandidate(root, checkout, grantId, state, live, readPane, readSnapshot, commandEvidence) {
   const grant = await readJson(grantPath(root, grantId));
   const claim = await readJson(writerClaimPath(root, checkout));
   const attempt = await readJson(spawnPath(root, claim.id));
@@ -624,7 +632,9 @@ async function closeoutCandidate(root, checkout, grantId, state, live, readPane,
         Object.values(state.notices).some(n => (n.workerId === binding.workerId ||
           n.recipient?.id === grantId) && unresolvedNotice(n)))
       refuse(`Assignment worker ${binding.workerId} is active or has unresolved effects`);
-    const observation = await readObservation(root, binding.workerId);
+    const current = await readObservation(root, binding.workerId);
+    const typedOwner = binding === owner && typedOwnerReport(current, binding, commandEvidence);
+    const observation = typedOwner ? current.commandReport : current;
     if (!sameSession(observation.session, binding) || observation.hold ||
         observation.bootstrapPending || observation.outcome !== 'completed')
       refuse(`Assignment worker ${binding.workerId} has no settled eligible report`);
@@ -758,7 +768,7 @@ async function requireNoWriterClaim(root, checkout, cwd) {
  * the exact native checkout attempt and the current supervisor snapshot. */
 export async function closeLaunchAssignment(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
   const attempt = await readJson(spawnPath(root, request.id));
-  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
+  const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent, request.commandEvidence);
   if (attempt.id !== request.id || attempt.status !== 'close-requested' || attempt.role !== 'owner' ||
       attempt.grantId !== grant.id || attempt.ownerToken !== state.ownerToken || !grant.ownerLaunch ||
       grant.closeAssignment !== request.grantId || attempt.task !== grant.scope ||
@@ -789,14 +799,14 @@ export async function closeLaunchAssignment(root, request, state, readPane, read
     if (claim) await rm(path);
     return request.grantId;
   }
-  const closing = await closeoutCandidate(root, grant.checkout, request.grantId, previous, live, readPane, readSnapshot);
+  const closing = await closeoutCandidate(root, grant.checkout, request.grantId, previous, live, readPane, readSnapshot, request.commandEvidence);
   if (!stillCurrent() || !isDeepStrictEqual(previous, state) ||
       (await readJson(ownerLaunchPath(root, grant.checkout))).token !== attempt.id ||
       !isDeepStrictEqual(attempt, await readJson(spawnPath(root, attempt.id))))
     refuse('Assignment closeout evidence changed');
   const final = await readSnapshot();
   requireDelegationParent(final, attempt.parent);
-  await closeoutCandidate(root, grant.checkout, request.grantId, state, final, readPane, readSnapshot);
+  await closeoutCandidate(root, grant.checkout, request.grantId, state, final, readPane, readSnapshot, request.commandEvidence);
   for (const binding of closing.bindings) {
     state.retiredWorkers[binding.workerId] = { ...binding, paused: true, retiredBy: attempt.id };
     delete state.workers[binding.workerId];
@@ -1024,7 +1034,7 @@ export const delegationInstructions = 'Stay within the approved delegation scope
 /** One durable attempt, never resumed after a crash or a lost response. Read-only
  * readiness checks may repeat; pane creation, agent start, enrollment and task send may not. */
 export async function spawnDelegated({ root, socketPath, paneId, ctx, reference, task, role, key,
-  signal, ownerLaunch = false, retryAbandonAssignment, allowed = () => true,
+  signal, ownerLaunch = false, retryAbandonAssignment, commandEvidence, allowed = () => true,
   selectApproval = (title, choices) => ctx.ui.select(title, choices),
   transport = request, readSnapshot = snapshot, send = sendAction }) {
   if (!(ownerLaunch ? role === 'owner' : ['writer', 'read-only'].includes(role)) || !task?.trim() || Buffer.byteLength(task) > 16000 ||
@@ -1032,7 +1042,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const session = currentSession(ctx);
   const live = await readSnapshot(socketPath);
   const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
-  const authority = await delegationAuthority(root, reference, parent);
+  const authority = await delegationAuthority(root, reference, parent, commandEvidence);
   if (role === 'writer' && authority.role === 'read-only') refuse('Read-only delegates cannot create writers');
   if (ownerLaunch ? !authority.grant.ownerLaunch || reference.spawnId || task !== authority.grant.scope :
     authority.grant.ownerLaunch && !reference.spawnId) refuse('Owner launch requires the native start command');
@@ -1042,7 +1052,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   };
   const check = async () => {
     checkLocal();
-    const state = (await delegationAuthority(root, reference, parent)).state;
+    const state = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
     const fresh = await readSnapshot(socketPath);
     requireDelegationParent(fresh, parent);
     return { state, fresh };
@@ -1061,7 +1071,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       const previous = await readJson(spawnPath(root, keyed.id));
       const recoveringClose = ownerLaunch && authority.grant.closeAssignment &&
         (await recordedCloseout(root, authority.grant.checkout, task, parent,
-          (await delegationAuthority(root, reference, parent)).state))?.attempt.id === previous.id;
+          (await delegationAuthority(root, reference, parent, commandEvidence)).state))?.attempt.id === previous.id;
       const eligible = assigned.id === keyed.id && previous.id === keyed.id &&
         (previous.status === 'preflight-refused' || recoveringClose) &&
         previous.grantId === authority.grant.id && previous.key === key && previous.task === task &&
@@ -1127,7 +1137,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       }
       let confirmedSelection;
       if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
-        const old = (await delegationAuthority(root, reference, parent)).state;
+        const old = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
         const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
           await readLive(), readPane, readLive, id);
         confirmedSelection = abandonmentSelection(candidate);
@@ -1160,7 +1170,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       spawn.paneRequested = false;
       await save('close-requested');
       const result = await send(root, { type: authority.grant.abandonAssignment ? 'launch-abandon-assignment' : 'launch-close',
-        id, grantId: oldId, ownerToken: authority.grant.ownerToken }, 'supervisor', { timeoutMs: 15000 });
+        id, grantId: oldId, ownerToken: authority.grant.ownerToken, commandEvidence },  'supervisor', { timeoutMs: 15000 });
       if (!result.accepted || result.id !== id || result.grantId !== oldId)
         refuse(result.message ?? 'Assignment retirement unverified');
       await save('prepared');
@@ -1426,8 +1436,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       refuse('Use /start-implementation [agreed scope] in an idle Herdr Pi TUI (up to 8000 UTF-8 bytes)');
     const version = generation;
     const session = currentSession(ctx);
-    const allowed = () => generation === version && ctx.isIdle() && !worker.hold && !worker.promptBlocked &&
-      currentSession(ctx).leaf === session.leaf;
+    const commandEvidence = worker.launchEvidence(ctx);
+    const allowed = () => generation === version && ctx.isIdle() &&
+      (!worker.hold || (commandEvidence && isDeepStrictEqual(worker.launchEvidence(ctx), commandEvidence))) &&
+      !worker.promptBlocked && currentSession(ctx).leaf === session.leaf;
     const cwd = await realpath(ctx.cwd);
     let pending;
     try { pending = await readJson(join(root, 'supervisor-start-pending.json')); }
@@ -1511,7 +1523,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       try {
         const claim = await readJson(writerClaimPath(root, target));
         await closeoutCandidate(root, target, claim.grantId, state, live,
-          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
+          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), commandEvidence);
         closing = claim.grantId;
       } catch { /* An ineligible assignment retains the ordinary worktree/owner refusal. */ }
       if (!closing) {
@@ -1533,9 +1545,9 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     if (closing && !recoveredClose && !grant.abandonAssignment) {
       try {
         await closeoutCandidate(root, target, closing, state, live,
-          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
+          id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath), commandEvidence);
       } catch (closeError) {
-        if (!options.closeAssignment) throw closeError;
+        if (!options.closeAssignment || commandEvidence) throw closeError;
         await abandonmentCandidate(root, target, closing, state, live,
           id => request(socketPath, 'pane.get', { pane_id: id }), () => snapshot(socketPath));
         grant.abandonAssignment = true;
@@ -1578,7 +1590,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       grant.id = previous.id;
     }
     const result = await spawnDelegated({ root, socketPath, paneId, ctx, reference: { grantId: grant.id },
-      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, retryAbandonAssignment, allowed,
+      task: scope, role: 'owner', key: 'assignment-owner', ownerLaunch: true, retryAbandonAssignment, commandEvidence, allowed,
       selectApproval: (title, choices) => worker.selectManagement(ctx, title, choices) });
     ctx.ui.notify(`Coordinating owner started in ${result.paneId}. Continue this assignment in that pane.`, 'info');
   }

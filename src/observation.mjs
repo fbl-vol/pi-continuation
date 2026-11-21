@@ -66,6 +66,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let parkedReport;
   let lastObserved;
   let stopVersion = 0;
+  let commandReport;
+  let commandLeaf;
   let shutdownVersion;
   let previousAssistantId;
   const lastAssistantId = ctx => [...ctx.sessionManager.getBranch()].reverse().find(e =>
@@ -93,6 +95,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       holdError = undefined;
     }
     parkedReport = undefined;
+    commandReport = undefined;
+    commandLeaf = undefined;
     return observe({ session: currentSession(ctx), outcome: 'unknown', stop: null }, ctx);
   });
   const observe = (value, ctx) => {
@@ -102,6 +106,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       holdReason: owner.managedInput && hold ? holdReason ?? 'restored' : undefined,
       holdError: hold ? holdError : undefined,
       parkedReport: owner.managedInput ? parkedReport : undefined,
+      commandReport: owner.managedInput && holdReason === 'typing' ? commandReport : undefined,
       ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
     let checkpoint;
     let checkpointError;
@@ -198,7 +203,12 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       // fence itself; Escape and concurrent external UI still interrupt it.
       if (prompts?.confirming && !isInterrupt(data)) return;
       if (!worker || (hold && (!worker.managedInput || !isInterrupt(data)))) return;
-      if (worker.managedInput && !hold) parkedReport = lastObserved?.stop ? lastObserved : undefined;
+      if (worker.managedInput && !hold) {
+        parkedReport = lastObserved?.stop ? lastObserved : undefined;
+        commandReport = lastObserved?.outcome === 'completed' && !lastObserved.hold ? lastObserved : undefined;
+        commandLeaf = currentSession(ctx).leaf;
+      }
+      if (isInterrupt(data)) { commandReport = undefined; commandLeaf = undefined; }
       hold = true;
       holdReason = isInterrupt(data) ? 'interruption' : 'typing';
       holdError = undefined;
@@ -215,6 +225,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     holdReason = 'prompt';
     holdError = undefined;
     parkedReport = undefined;
+    commandReport = undefined; commandLeaf = undefined;
     stopVersion++;
     void observe({ session: currentSession(ctx), outcome: 'approval', stop: null }, ctx);
   };
@@ -639,6 +650,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     previousAssistantId = lastAssistantId(ctx);
     // Every new turn invalidates the previous stop, including a human prompt.
     parkedReport = undefined;
+    commandReport = undefined; commandLeaf = undefined;
     const observed = await observe({ session: currentSession(ctx), outcome: 'working', stop: null }, ctx);
     if (observed && delegatedReceipt) await atomicJson(delegatedReceipt.path,
       { id: delegatedReceipt.id, status: 'sent' });
@@ -719,6 +731,14 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   return {
     get registered() { return !!worker; }, get hold() { return hold; },
     get interactionVersion() { return stopVersion; },
+    launchEvidence(ctx) {
+      if (!worker || worker.role !== 'owner' || !hold || holdReason !== 'typing' ||
+          !commandReport || commandLeaf !== currentSession(ctx).leaf ||
+          commandReport.session?.id !== worker.sessionId || commandReport.session?.file !== worker.sessionFile ||
+          !ctx.isIdle() || promptsFor(ctx).blocked ||
+          lastObserved?.version !== stopVersion) return;
+      return { workerId: worker.workerId, stop: commandReport.stop, version: stopVersion };
+    },
     selectManagement(ctx, title, choices) { return promptsFor(ctx).select(title, choices); },
     start: requestStart, clearHold,
     get confirming() { return prompts?.confirming === true; },

@@ -194,6 +194,16 @@ export function decodeObservation(record) {
         parked.version !== record.version || !['typing', 'interruption'].includes(record.holdReason)) invalid();
     decodeObservation(parked);
   }
+  if (record.commandReport !== undefined) {
+    const original = record.commandReport;
+    if (version !== 1 || record.outcome !== 'unknown' || record.stop !== null ||
+        record.hold !== true || record.holdReason !== 'typing' || !object(original) ||
+        original.schemaVersion !== SCHEMA_VERSION || original.outcome !== 'completed' ||
+        original.hold !== false || !isId(original.stop) || !original.finalReply?.trim() ||
+        original.version !== record.version - 1 || original.session?.id !== record.session.id ||
+        original.session?.file !== record.session.file || original.session?.leaf !== record.session.leaf ||
+        original.commandReport !== undefined || decodeObservation(original).hold) invalid();
+  }
   if (record.bootstrapPending !== undefined && typeof record.bootstrapPending !== 'boolean') invalid();
   if (record.promptScope !== undefined && (!object(record.promptScope) ||
       !isId(record.promptScope.id) || !Number.isSafeInteger(record.promptScope.revision) ||

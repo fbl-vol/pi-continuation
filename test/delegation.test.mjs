@@ -1362,6 +1362,34 @@ test('P1/P7 relocated settled reviewer cannot be silently closed', async t => {
   assert.equal(f.children.length, 3);
 });
 
+test('P1/P3/P7 exact finished owner can type the native next-assignment command', async t => {
+  const { f, oldGrant } = await settledAssignment(t);
+  const owner = f.children[0].native;
+  owner.assistant('Finished the synthetic assignment.');
+  await owner.emit('agent_settled', { aborted: false });
+  owner.raw('/start-implementation');
+  assert.ok(owner.continuation.launchEvidence(owner.ctx), 'typed command retains exact pre-command evidence');
+  await owner.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`);
+  assert.equal(f.children.length, 3);
+  assert.equal((await f.state()).closedAssignments[oldGrant].launchId !== undefined, true);
+});
+
+for (const change of ['Escape', 'changed leaf']) test(`P1/P3/P7 typed owner launch rejects ${change}`, async t => {
+  const { f, oldGrant } = await settledAssignment(t);
+  const owner = f.children[0].native;
+  owner.assistant('Finished the synthetic assignment.');
+  await owner.emit('agent_settled', { aborted: false });
+  owner.raw('/start-implementation');
+  if (change === 'Escape') owner.raw('\u001b');
+  else owner.user('Another task changed the report context.');
+  await assert.rejects(owner.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: write the next fixture.`),
+    /Launch requires an unchanged planner|Planning session changed/);
+  assert.equal(f.children.length, 2);
+  assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+});
+
 test('P7 an explicit close of A starts B in the same tree with old authority retired', async t => {
   const { f, oldGrant, oldWriter, writer } = await settledAssignment(t);
   f.worker.select(() => assert.fail('Named closeout must not ask again'));
