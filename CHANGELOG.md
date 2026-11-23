@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.4] - 2026-11-23
+
+- The exact surviving assignment owner can confirm `/continuation-delegate recover-reviewers`
+  once per healthy replacement after a recorded graceful supervisor shutdown.
+  Recovery restores read-only reviewer delegation only; writer authority, claims,
+  pauses, waits, and attempt history are unchanged. A proven no-effect writer
+  preflight refusal does not block recovery and is not retried.
+
+Missing graceful-end evidence (including shutdowns by older builds), ambiguous
+identity, or unresolved effects still block recovery. Verified with isolated
+checks and disposable Linux Pi/Herdr sessions, not live supervision or native
+Windows/macOS. Installation does not reload sessions, clear holds, or migrate
+existing supervision.
+
 ## [0.7.3] - 2026-11-21
 
 - Allow the exact finished owner to close its settled assignment through a typed
