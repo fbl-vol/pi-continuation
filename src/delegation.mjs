@@ -265,18 +265,26 @@ export async function delegationOwner(root, grant) {
   return state;
 }
 
+async function provedSupervisorEnd(root, token, sessionId) {
+  if (!isId(token) || typeof sessionId !== 'string' || !sessionId) return false;
+  const ended = await optionalRecord(endedSupervisorPath(root, token));
+  return ended?.token === token && ended.sessionId === sessionId && !await ownerAlive(root, token);
+}
+
 async function reviewerRecovery(root, grant, parent, state, preview) {
   if (!isId(state.ownerToken) || state.ownerToken === grant.ownerToken)
     refuse('No replacement supervisor to recover reviewer delegation to');
+  const predecessor = state.predecessorSupervisor;
   const recovery = { grantId: grant.id, spawnId: parent.id, workerId: parent.workerId,
-    previousToken: grant.ownerToken, previousSession: grant.supervisorSession,
+    previousToken: grant.ownerToken, previousSession: grant.supervisorSession, predecessor,
     ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, role: 'read-only' };
   if (!preview && !isDeepStrictEqual(await optionalRecord(reviewerRecoveryPath(root, recovery)), recovery))
     refuse('Intended running supervisor changed or is unavailable; in the exact owner use /continuation-delegate recover-reviewers');
-  const ended = await optionalRecord(endedSupervisorPath(root, grant.ownerToken));
-  if (ended?.token !== grant.ownerToken || ended?.sessionId !== grant.supervisorSession ||
-      await ownerAlive(root, grant.ownerToken))
+  if (!await provedSupervisorEnd(root, grant.ownerToken, grant.supervisorSession))
     refuse('Prior supervisor has no proved graceful end for this assignment');
+  if (predecessor?.token === state.ownerToken ||
+      !await provedSupervisorEnd(root, predecessor?.token, predecessor?.sessionId))
+    refuse('Predecessor supervisor has no proved graceful end for this replacement');
   const lock = await optionalRecord(join(root, 'supervisor.lock'));
   if (lock?.token !== state.ownerToken || lock?.sessionId !== state.supervisorSession || lock?.pid !== state.ownerPid ||
       await optionalRecord(join(root, 'supervisor-start-pending.json')))
@@ -399,6 +407,33 @@ export async function delegatedStart(root, id, record, state, live) {
 
 const unresolvedNotice = notice => ['pending', 'sending', 'uncertain'].includes(notice.status);
 
+// Only a writer's recorded no-effect preflight refusal is settled here; it
+// remains a retained attempt and this classification never authorizes retry.
+async function settledWriterPreflight(root, attempt, grant, recovery, owner) {
+  if (attempt.status !== 'preflight-refused' || attempt.role !== 'writer' ||
+      attempt.grantId !== grant.id || attempt.authority?.grantId !== grant.id ||
+      attempt.authority.spawnId !== recovery.spawnId || attempt.parentWorkerId !== recovery.workerId ||
+      attempt.ownerToken !== grant.ownerToken || attempt.recipient?.id !== grant.id ||
+      !sameSession({ id: attempt.parent?.sessionId, file: attempt.parent?.sessionFile }, owner) ||
+      !['paneId', 'terminalId', 'workspaceId', 'tabId', 'cwd'].every(key => attempt.parent[key] === owner[key]) ||
+      ![undefined, false].includes(attempt.paneRequested) || attempt.paneId || attempt.child || attempt.workerId ||
+      attempt.terminalId || attempt.workspaceId || attempt.tabId || attempt.closeRequested || attempt.abandonRequested ||
+      !attempt.failure || attempt.preflightFailures?.at(-1)?.reason !== attempt.failure ||
+      typeof attempt.key !== 'string' || typeof attempt.task !== 'string') return false;
+  for (const [kind, value] of [['key', attempt.key], ['assignment', attempt.task]]) {
+    const index = await optionalRecord(join(root, `spawn-${kind}-${digest(`${grant.id}\n${value}`)}.json`));
+    if (index?.id !== attempt.id) return false;
+  }
+  if (await optionalRecord(join(root, `spawn-receipt-${attempt.id}.json`)) !== undefined) return false;
+  const fence = await optionalRecord(ownerLaunchPath(root, grant.checkout));
+  if (fence?.token === attempt.id) return false;
+  for (const checkout of new Set([grant.checkout, await commonDirectory(grant.cwd)])) {
+    const writer = await optionalRecord(writerClaimPath(root, checkout));
+    if (writer?.id === attempt.id) return false;
+  }
+  return true;
+}
+
 async function requireSettledRecoveryEffects(root, { grant, state, recovery }, currentAttempt) {
   const workers = new Set([recovery.workerId, ...Object.values(state.workers)
     .filter(w => w.recipient?.id === grant.id).map(w => w.workerId)]);
@@ -415,10 +450,14 @@ async function requireSettledRecoveryEffects(root, { grant, state, recovery }, c
     const attempt = await readJson(join(root, file));
     if (file === `spawn-${currentAttempt}.json`) continue;
     if (attempt.grantId !== grant.id && !workers.has(attempt.workerId) && !workers.has(attempt.parentWorkerId)) continue;
-    const receipt = file === `spawn-${attempt.id}.json` && attempt.status === 'dispatched' &&
-      await optionalRecord(join(root, `spawn-receipt-${attempt.id}.json`));
-    if (receipt?.id !== attempt.id || receipt?.status !== 'sent')
-      refuse(`Assignment startup ${file} has no proved dispatch`);
+    if (file === `spawn-${attempt.id}.json`) {
+      if (attempt.status === 'dispatched') {
+        const receipt = await optionalRecord(join(root, `spawn-receipt-${attempt.id}.json`));
+        if (receipt?.id === attempt.id && receipt.status === 'sent') continue;
+      }
+      if (await settledWriterPreflight(root, attempt, grant, recovery, state.workers[recovery.workerId])) continue;
+    }
+    refuse(`Assignment startup ${file} has no proved dispatch or no-effect preflight`);
   }
 }
 
@@ -1763,7 +1802,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         }
         if (!await worker.confirmDelegation(ctx, 'Restore read-only reviewer delegation?',
           `Assignment ${grant.id}: ${grant.scope}\nEnded supervisor ${recovery.previousSession}\n` +
-          `Replacement ${recovery.supervisorSession}\nNo writer authority, pause, wait or prior attempt will change.`)) return;
+          `Predecessor ${recovery.predecessor.sessionId}\nReplacement ${recovery.supervisorSession}\n` +
+          'No writer authority, pause, wait or prior attempt will change.')) return;
         const final = await candidate();
         if (!isDeepStrictEqual(grant, final.grant) || !isDeepStrictEqual(recovery, final.recovery) ||
             generation !== version || !ctx.isIdle() || worker.promptBlocked ||

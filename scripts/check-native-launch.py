@@ -41,6 +41,9 @@ class Model(BaseHTTPRequestHandler):
             tool = ('continuation_spawn', dict(key='denied-writer', task='Synthetic second writer.', role='writer'))
         elif self.server.reviewer_recovery and last.get('tool_call_id') == 'fixture-denied-writer':
             tool = ('continuation_spawn', dict(key='recovered-review', task=REVIEW_TASK, role='read-only'))
+        elif (self.server.reviewer_recovery and last.get('tool_call_id') == 'fixture-continuation_spawn' and
+              WRITER_TASK in json.dumps(messages) and REVIEW_REQUEST not in json.dumps(messages)):
+            tool = ('continuation_spawn', dict(key='preflight-writer', task='Synthetic refused preflight.', role='writer'))
         elif (not self.server.reviewer_recovery and last['role'] == 'tool' and
               last.get('tool_call_id') == 'fixture-continuation_spawn'):
             try:
@@ -61,7 +64,8 @@ class Model(BaseHTTPRequestHandler):
         self.end_headers()
         if tool:
             name, arguments = tool
-            call_id = 'fixture-denied-writer' if arguments.get('key') == 'denied-writer' else f'fixture-{name}'
+            call_id = {'denied-writer': 'fixture-denied-writer', 'preflight-writer': 'fixture-preflight-writer'}.get(
+                arguments.get('key'), f'fixture-{name}')
             call = dict(index=0, id=call_id, type='function',
                         function=dict(name=name, arguments=json.dumps(arguments)))
             response = [({'role': 'assistant', 'tool_calls': [call]}, None), ({}, 'tool_calls')]
@@ -408,24 +412,32 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             settled_owner = json.loads(state_path.read_text())['workers'][attempt['workerId']]
             assert not settled_owner['paused'], settled_owner
             if reviewer_recovery:
-                old = json.loads(state_path.read_text())
+                preflight, = (json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')
+                              if json.loads(p.read_text())['key'] == 'preflight-writer')
+                assert preflight['status'] == 'preflight-refused' and not preflight.get('paneRequested') and not preflight.get('child')
                 history = {p: p.read_bytes() for p in state_dir.glob('*.json')
                            if p.name.startswith(('spawn-', 'delegation-'))}
-                cli('agent', 'send-keys', supervisor, 'ctrl+d')
-                until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
-                replacement = cli('pane', 'split', supervisor, '--direction', 'down', '--cwd', str(work))['pane']['pane_id']
-                panes.append(replacement)
-                until('replacement shell ready', lambda: shell_alone(replacement))
-                cli('agent', 'start', 'smoke-replacement', '--kind', 'pi', '--pane', replacement)
-                cli('agent', 'prompt', replacement, '/continuation-supervisor start')
-                until('replacement start confirmation', lambda: 'Start continuation supervisor?' in visible(replacement))
-                cli('agent', 'send-keys', replacement, 'enter')
-                until('replacement committed', lambda: json.loads(state_path.read_text())['ownerToken'] != old['ownerToken'])
-                until('replacement settled', lambda: cli('agent', 'get', replacement)['agent']['agent_status'] in ('idle', 'done'))
-                cli('agent', 'prompt', owner['paneId'], '/continuation-delegate recover-reviewers')
-                until('one native reviewer recovery confirmation', lambda: 'Restore read-only reviewer delegation?' in visible(owner['paneId']))
-                cli('agent', 'send-keys', owner['paneId'], 'enter')
-                until('reviewer delegation restored', lambda: 'Writer delegation remains unavailable' in visible(owner['paneId']))
+                for name in ('smoke-replacement-b', 'smoke-replacement-c'):
+                    old = json.loads(state_path.read_text())
+                    cli('agent', 'send-keys', supervisor, 'ctrl+d')
+                    until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
+                    supervisor = cli('workspace', 'create', '--label', name, '--cwd', str(work))['root_pane']['pane_id']
+                    panes.append(supervisor)
+                    until('replacement shell ready', lambda: shell_alone(supervisor))
+                    cli('agent', 'start', name, '--kind', 'pi', '--pane', supervisor)
+                    cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
+                    until('replacement start confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('replacement committed', lambda: json.loads(state_path.read_text())['ownerToken'] != old['ownerToken'])
+                    until('replacement settled', lambda: cli('agent', 'get', supervisor)['agent']['agent_status'] in ('idle', 'done'))
+                    cli('agent', 'prompt', owner['paneId'], '/continuation-delegate recover-reviewers')
+                    until('one native reviewer recovery confirmation', lambda: 'Restore read-only reviewer delegation?' in visible(owner['paneId']))
+                    cli('agent', 'send-keys', owner['paneId'], 'enter')
+                    until('reviewer delegation restored', lambda: any(
+                        r['ownerToken'] == json.loads(state_path.read_text())['ownerToken']
+                        and r['predecessor'] == {'token': old['ownerToken'], 'sessionId': old['supervisorSession']}
+                        for r in (json.loads(p.read_text()) for p in state_dir.glob('reviewer-recovery-*.json'))))
+                    until('owner command settled', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
                 cli('agent', 'prompt', owner['paneId'], REVIEW_REQUEST)
                 review = until('read-only reviewer dispatched', lambda: dispatched('read-only'), 40)
                 panes.append(review['paneId'])
@@ -433,10 +445,12 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert review['ownerToken'] == json.loads(state_path.read_text())['ownerToken']
                 assert json.loads((state_dir/f"spawn-receipt-{review['id']}.json").read_text())['status'] == 'sent'
                 assert 'Read-only delegates cannot create writers' in Path(owner['sessionFile']).read_text()
-                assert sorted(json.loads(p.read_text())['role'] for p in
-                              state_dir.glob('spawn-????????-????-????-????-????????????.json')) == ['owner', 'read-only', 'writer']
+                attempts = [json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')]
+                assert sorted(a['role'] for a in attempts if a['status'] == 'dispatched') == ['owner', 'read-only', 'writer']
+                assert len(attempts) == 4
                 assert all(p.read_bytes() == content for p, content in history.items())
-                print('Native reviewer recovery passed: one confirmation and one reviewer; second writer denied; history unchanged', flush=True)
+                print('Native reviewer recovery passed: graceful A/B/C, one confirmation per replacement, one reviewer; '
+                      'second writer denied and preflight history unchanged', flush=True)
                 return
             assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == {
                 'kind': 'child', 'children': [writer_attempt['workerId']]}, settled_owner

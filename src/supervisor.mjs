@@ -669,6 +669,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           if (Object.values(state.workers).some(w => w.sessionId === supervisorSession) ||
               Object.values(state.routes).some(r => r.coordinator?.sessionId === supervisorSession))
             throw new Error('A worker or coordinator cannot become the supervisor');
+          // Record the actual predecessor before replacing the durable owner tuple.
+          state.predecessorSupervisor = state.ownerToken ?
+            { token: state.ownerToken, sessionId: state.supervisorSession } : undefined;
           state.supervisorSession = supervisorSession;
           state.acceptStarts = verb === 'start';
           if (verb === 'start') setScopePaused(state, 'global', undefined, false);

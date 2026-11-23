@@ -2014,6 +2014,11 @@ test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting 
   await f.worker.command('start-implementation', 'Assignment A: implement the fixture.');
   const owner = f.children[0].native;
   const writer = (await owner.spawn(task)).details;
+  await assert.rejects(owner.spawn({ ...task, key: 'preflight-writer', task: 'A refused second writer.' }), /held for inspection/);
+  const preflight = (await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file)))))
+    .find(attempt => attempt.key === 'preflight-writer');
+  assert.equal(preflight.status, 'preflight-refused');
+  assert.equal(preflight.paneRequested, undefined);
   const original = await f.state();
   const historyFiles = (await readdir(f.root)).filter(file => /^(delegation-|spawn-)/.test(file));
   const history = () => Promise.all(historyFiles.map(file => readFile(join(f.root, file), 'utf8')));
@@ -2046,6 +2051,10 @@ test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting 
   await f.supervisorCommand('start');
   await assert.rejects(owner.spawn({ ...recoveredReview, key: 'new-supervisor' }), /supervisor changed/);
   await recoverReviewers(owner);
+  assert.equal(owner.confirmations.length, confirmations + 2, 'all-graceful C requires its own confirmation');
+  const next = (await owner.spawn({ ...recoveredReview, key: 'review-under-C', task: 'Review A again under C.' })).details;
+  assert.equal(next.status, 'dispatched');
+  assert.deepEqual(await history(), before);
   await owner.command('continuation-delegate', 'revoke');
   await assert.rejects(owner.spawn({ ...recoveredReview, key: 'after-revoke' }), /scope revoked/);
 });
@@ -2078,6 +2087,45 @@ for (const [name, block, message] of [
   await assert.rejects(recoverReviewers(f.children[0].native), message);
   assert.equal((await readdir(f.root)).some(file => file.startsWith('reviewer-recovery-')), false);
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P7 reviewer recovery to C cannot reuse A’s graceful end in place of B’s', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: inspect the fixture.');
+  const owner = f.children[0].native;
+  const original = await f.state();
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  const replacement = await f.state();
+  await recoverReviewers(owner);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  const witness = join(f.root, `supervisor-ended-${replacement.ownerToken}.json`);
+  await rm(witness);
+  const confirmations = owner.confirmations.length;
+  await assert.rejects(recoverReviewers(owner), /Predecessor supervisor has no proved graceful end/);
+  assert.equal(owner.confirmations.length, confirmations);
+  assert.equal((await readdir(f.root)).filter(file => file.startsWith('reviewer-recovery-')).length, 1);
+  assert.equal((await readJson(join(f.root, `supervisor-ended-${original.ownerToken}.json`))).token, original.ownerToken);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P7 reviewer recovery refuses a preflight record contradicted by a retained writer claim', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: inspect the fixture.');
+  const owner = f.children[0].native;
+  await owner.spawn(task);
+  await assert.rejects(owner.spawn({ ...task, key: 'preflight-writer', task: 'Another writer.' }), /held for inspection/);
+  const records = await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file))));
+  const refused = records.find(attempt => attempt.key === 'preflight-writer');
+  assert.equal(refused.status, 'preflight-refused');
+  const claim = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
+  await atomicJson(claim, { id: refused.id, grantId: refused.grantId });
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(recoverReviewers(owner), /no proved dispatch or no-effect preflight/);
+  assert.equal((await readJson(claim)).id, refused.id);
+  assert.equal(f.children.length, 2);
 });
 
 test('P7 reviewer recovery cannot replay an unresolved startup under a different key', async t => {
