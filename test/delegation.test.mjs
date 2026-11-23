@@ -520,37 +520,43 @@ test('P1/P7 an exact authorized worktree skips the selector and second confirmat
   }
 });
 
-test('P1/P3 new owner pins preferences, shows effective human-selection rule and saves only its override', async t => {
+test('P1/P3/P4 owner pins preferences and changing review fixes preserves its decision wait and scope pauses', async t => {
   const f = await fixture(t);
-  const original = { ...defaultDeliveryPreferences(), fixReviewFindings: 'Automatically Fix', pushBranch: 'Off' };
+  const original = { ...defaultDeliveryPreferences(), fixReviewFindings: 'Automatic', pushBranch: 'Off' };
   await saveDeliveryPreferences(f.root, original);
   await f.worker.command('start-implementation', 'Implement W123-D04.');
   const grant = await readJson(join(f.root, `delegation-${(await f.attempt()).grantId}.json`));
   const owner = f.children[0].native;
   assert.deepEqual(grant.deliveryPreferences, original);
-  assert.match(f.children[0].task, /Fix review findings: Ask First/);
+  assert.match(f.children[0].task, /Fix review findings: Automatic/);
+  assert.match(f.children[0].task, /rules requiring human selection take precedence/);
   assert.match(f.children[0].task, /Push branch: Off/);
   await saveDeliveryPreferences(f.root, { ...original, pushBranch: 'Automatic' });
   assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Off',
     'later defaults do not rewrite a running assignment');
-  let step = 0;
-  owner.select((title, choices) => {
-    if (step === 1 || step === 3) {
-      assert.match(title, /This assignment · delivery preferences/);
-      assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
-    }
-    const answer = ['This assignment: delivery', 'Push branch: Off', 'Ask First', 'Save'][step++];
-    assert.ok(choices.includes(answer), JSON.stringify(choices));
-    return answer;
-  });
-  await owner.command('continuation', '');
-  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Ask First');
-  assert.equal((await readDeliveryPreferences(f.root)).pushBranch, 'Automatic');
+  await owner.wait({ kind: 'user' });
+  await f.supervisorCommand('pause route w');
+  await f.supervisorCommand('pause global');
+  const before = await f.state();
   const effective = await owner.tool('continuation_delivery_preferences');
   assert.equal(effective.details.grantId, grant.id);
-  assert.equal(effective.details.saved, undefined, 'the model-facing tool exposes only effective choices');
-  assert.equal(effective.details.effective.fixReviewFindings, 'Ask First');
-  assert.equal(effective.details.effective.pushBranch, 'Ask First');
+  assert.equal(effective.details.effective.fixReviewFindings, 'Automatic');
+  assert.match(effective.content[0].text, /rules requiring human selection take precedence/);
+  assert.match(effective.content[0].text, /Never release an existing wait, hold or pause/);
+  for (const [from, to] of [['Automatic', 'Ask First'], ['Ask First', 'Automatic']]) {
+    const answers = ['This assignment: delivery', `Fix review findings: ${from}`, to, 'Save'];
+    owner.select((_title, choices) => {
+      const answer = answers.shift();
+      assert.ok(choices.includes(answer), JSON.stringify(choices));
+      return answer;
+    });
+    await owner.command('continuation', '');
+    assert.equal((await owner.tool('continuation_delivery_preferences')).details.effective.fixReviewFindings, to);
+    assert.deepEqual(await f.state(), before);
+  }
+  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatic');
+  assert.equal((await readAssignmentDeliveryPreferences(f.root, grant)).pushBranch, 'Off');
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
   await assert.rejects(f.worker.tool('continuation_delivery_preferences'),
     /Exact supervised coordinating owner/);
 });

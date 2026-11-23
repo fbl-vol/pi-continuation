@@ -11,7 +11,7 @@ import { unresolvedStartupForWorker } from './delegation.mjs';
 import { setScopePaused, stopWorker } from './policy.mjs';
 import { displayName, workerStatus } from './status.mjs';
 import { diagnostics } from './diagnostics.mjs';
-import { deliveryFields, effectiveDeliveryPreferences, readDeliveryPreferences,
+import { deliveryFields, reviewFixPreferenceGuidance, readDeliveryPreferences,
   saveDeliveryPreferences, readAssignmentDeliveryPreferences,
   saveAssignmentDeliveryPreferences } from './preferences.mjs';
 
@@ -139,7 +139,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
   const report = diagnostics('management');
   pi.registerTool({
     name: 'continuation_delivery_preferences', label: 'Assignment delivery preferences',
-    description: 'Read effective human-set delivery preferences for this exact coordinating owner. Choices never grant Git publication or automatic finding selection.',
+    description: 'Read current human-set delivery preferences for this exact coordinating owner, subject to repository and assignment rules. Choices never grant Git publication.',
     parameters: Type.Object({}),
     async execute(_call, _args, _signal, _update, ctx) {
       const view = await managementSnapshot(root, socketPath, ctx);
@@ -149,11 +149,10 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
       const grant = await readJson(join(root, `delegation-${owner.binding.coordinatorId}.json`));
       if (!grant.ownerLaunch || grant.id !== owner.binding.coordinatorId)
         refuse('Exact owner assignment unavailable');
-      const saved = await readAssignmentDeliveryPreferences(root, grant);
-      const effective = effectiveDeliveryPreferences(saved);
+      const effective = await readAssignmentDeliveryPreferences(root, grant);
       return { content: [{ type: 'text', text: deliveryFields.map(field =>
         `${field.label}: ${effective[field.key]}`).join('\n') +
-        '\nRepository rules and permissions still apply. User finding selection remains required; these settings do not grant publication.' }],
+        `\n${reviewFixPreferenceGuidance} These settings do not grant publication.` }],
       details: { grantId: grant.id, effective } };
     },
   });
@@ -175,9 +174,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
       const editPreferences = async (title, saved, save) => {
         const draft = { ...saved };
         while (true) {
-          const effective = effectiveDeliveryPreferences(draft);
-          const rows = deliveryFields.map(field => `${field.label}: ${draft[field.key]}` +
-            (draft[field.key] === effective[field.key] ? '' : ` (effective: ${effective[field.key]})`));
+          const rows = deliveryFields.map(field => `${field.label}: ${draft[field.key]}`);
           const choice = await select(`${title}\nRepository rules and human decisions still apply.`,
             [...rows, 'Save', 'Cancel']);
           if (!choice || choice === 'Cancel') return;
@@ -189,7 +186,8 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           }
           const field = deliveryFields[rows.indexOf(choice)];
           if (!field) refuse('Delivery preference selection changed');
-          const selected = await select(`${field.label} · ${draft[field.key]}`,
+          const selected = await select(`${field.label} · ${draft[field.key]}` +
+            (field.key === 'fixReviewFindings' ? '\nHuman-selection rules and existing waits still apply.' : ''),
             [...field.choices, 'Back']);
           if (field.choices.includes(selected)) draft[field.key] = selected;
         }
