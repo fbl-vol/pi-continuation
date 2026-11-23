@@ -2006,6 +2006,95 @@ test('P3/P4 baseline: surviving exact assignment owner loses delegation after su
   assert.equal((await f.state()).workers[(await f.attempt()).workerId]?.paused, false);
 });
 
+const recoverReviewers = owner => owner.command('continuation-delegate', 'recover-reviewers');
+const recoveredReview = { key: 'review-after-restart', task: 'Review A.', role: 'read-only' };
+
+test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting authority or history', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: implement the fixture.');
+  const owner = f.children[0].native;
+  const writer = (await owner.spawn(task)).details;
+  const original = await f.state();
+  const historyFiles = (await readdir(f.root)).filter(file => /^(delegation-|spawn-)/.test(file));
+  const history = () => Promise.all(historyFiles.map(file => readFile(join(f.root, file), 'utf8')));
+  const before = await history();
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  assert.notEqual((await f.state()).ownerToken, original.ownerToken);
+
+  await assert.rejects(recoverReviewers(f.worker), /exact surviving coordinating owner/);
+  await assert.rejects(recoverReviewers(f.children[1].native), /dispatched exact child/);
+  owner.confirm(false);
+  await recoverReviewers(owner);
+  await assert.rejects(owner.spawn(recoveredReview), /supervisor changed/);
+  owner.confirm(true);
+  const confirmations = owner.confirmations.length;
+  await recoverReviewers(owner);
+  await recoverReviewers(owner);
+  assert.equal(owner.confirmations.length, confirmations + 1);
+  assert.match(owner.confirmations.at(-1)[0], /read-only reviewer/);
+  await assert.rejects(owner.spawn({ ...task, key: 'second-writer', task: 'Second writer.' }), /cannot create writers/);
+  await assert.rejects(owner.command('continuation-delegate', 'writer Second writer.'), /only recover-reviewers/);
+  const result = (await owner.spawn(recoveredReview)).details;
+  await assert.rejects(owner.spawn(recoveredReview), { code: 'EEXIST' });
+  const after = await f.state();
+  assert.equal(after.workers[result.workerId].recipient.id, after.workers[writer.workerId].recipient.id);
+  assert.equal(f.children.length, 3);
+  assert.deepEqual(f.effects, Array(3).fill(['split', 'start', 'task']).flat());
+  assert.deepEqual(await history(), before);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(owner.spawn({ ...recoveredReview, key: 'new-supervisor' }), /supervisor changed/);
+  await recoverReviewers(owner);
+  await owner.command('continuation-delegate', 'revoke');
+  await assert.rejects(owner.spawn({ ...recoveredReview, key: 'after-revoke' }), /scope revoked/);
+});
+
+for (const [name, block, message] of [
+  ['missing shutdown witness', async (f, _owner, original) =>
+    rm(join(f.root, `supervisor-ended-${original.ownerToken}.json`)), /no proved graceful end/],
+  ['global pause', f => f.supervisorCommand('pause global'), /Global continuation is paused/],
+  ['route pause', f => f.supervisorCommand('pause route w'), /route is paused/],
+  ['owner pause', (f, owner) => f.supervisorCommand(`pause worker ${owner.workerId}`), /paused or held/],
+  ['decision wait', (f, owner) => f.children[0].native.wait({ kind: 'user' }), /waiting for a user decision/],
+  ['competing Herdr occupant', f => f.agents.push({ ...f.children[0].agent, pane_id: 'w:duplicate' }), /Competing Herdr/],
+  ['replacement during confirmation', f => f.children[0].native.confirm(async () => {
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    return true;
+  }), /supervisor evidence changed/],
+  ['revocation during confirmation', f => f.children[0].native.confirm(async () => {
+    await f.children[0].native.command('continuation-delegate', 'revoke');
+    return true;
+  }), /scope revoked/],
+]) test(`P3/P4/P7 reviewer recovery refuses ${name} without a new attempt`, async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Assignment A: inspect the fixture.');
+  const owner = await f.attempt();
+  const original = await f.state();
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await block(f, owner, original);
+  await assert.rejects(recoverReviewers(f.children[0].native), message);
+  assert.equal((await readdir(f.root)).some(file => file.startsWith('reviewer-recovery-')), false);
+  assert.deepEqual(f.effects, ['split', 'start', 'task']);
+});
+
+test('P7 reviewer recovery cannot replay an unresolved startup under a different key', async t => {
+  let splits = 0;
+  const f = await fixture(t, { beforeSplit: () => {
+    if (++splits > 1) throw Error('Lost synthetic split response');
+  } });
+  await f.worker.command('start-implementation', 'Assignment A: inspect the fixture.');
+  const owner = f.children[0].native;
+  await assert.rejects(owner.spawn(recoveredReview), /held for inspection/);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(recoverReviewers(owner), /has no proved dispatch/);
+  assert.deepEqual(f.effects, ['split', 'start', 'task', 'split']);
+  assert.equal((await f.attempts()).length, 2);
+});
+
 test('P4/P7 a verified delegated binding from a removed independent tree cannot block the free target', async t => {
   const closedPanes = [];
   const f = await fixture(t, { onSplit: () => {}, closedPanes, historicalPanes: [] });

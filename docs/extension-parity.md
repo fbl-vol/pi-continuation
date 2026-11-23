@@ -139,6 +139,16 @@ This is not automatic enrollment on package installation and does not waive
 user decisions, independent pauses or review holds. The v0.5.0 release still
 requires a running supervisor before owner launch.
 
+**Surviving-owner reviewer recovery (P1/P3/P4/P7):** After a recorded graceful
+supervisor end, the exact already-dispatched assignment owner can run
+`/continuation-delegate recover-reviewers` and confirm the named healthy
+replacement once. The confirmation authorizes reviewer delegation only for that
+replacement; the original grant and writer claim are not rewritten. Revocation,
+pauses, holds, unresolved waits/effects and attempt/receipt history remain in
+force. A missing shutdown witness, ambiguous identity or unhealthy replacement
+fails closed. This uses the ordinary native Pi confirmation boundary, not a new
+input-provenance guarantee.
+
 **Since v0.6.0 (delivery preferences):** `/continuation` offers a native Delivery preferences
 menu. Explicit Save persists per-user defaults for future assignments; Cancel
 and Escape discard drafts. Each new owner pins its defaults, while its own

@@ -731,6 +731,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   return {
     get registered() { return !!worker; }, get hold() { return hold; },
     get interactionVersion() { return stopVersion; },
+    flushObservations() { return pendingWrite; },
     launchEvidence(ctx) {
       if (!worker || worker.role !== 'owner' || !hold || holdReason !== 'typing' ||
           !commandReport || commandLeaf !== currentSession(ctx).leaf ||
