@@ -112,6 +112,15 @@ const recordPath = (root, kind, id) => {
 };
 export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
+export const endedSupervisorPath = (root, token) => recordPath(root, 'supervisor-ended', token);
+// Separate, immutable authority: revoking the original grant still revokes recovery.
+const reviewerRecoveryPath = (root, recovery) =>
+  join(root, `reviewer-recovery-${digest(`${recovery.grantId}\n${recovery.ownerToken}`)}.json`);
+
+async function optionalRecord(path) {
+  try { return await readJson(path); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
 const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
 
 async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed,
@@ -238,10 +247,13 @@ function nativeBinding(agent, session, cwd) {
   return binding;
 }
 
-export function requireDelegationParent(live, parent) {
+export function requireDelegationParent(live, parent, recovery = false) {
   const agent = live.agents.find(a => a.pane_id === parent?.paneId);
   if (!sameOccupant(agent, parent) || !['idle', 'working', 'done'].includes(agent.agent_status))
     refuse('Parent Herdr identity/status changed or blocked');
+  if (recovery && live.agents.filter(a => a.agent_session?.kind === parent.sessionKind &&
+      a.agent_session.value === parent.sessionValue).length !== 1)
+    refuse('Competing Herdr occupancy for assignment owner');
 }
 
 export async function delegationOwner(root, grant) {
@@ -253,13 +265,49 @@ export async function delegationOwner(root, grant) {
   return state;
 }
 
-export async function delegationAuthority(root, reference, binding, commandEvidence) {
+async function provedSupervisorEnd(root, token, sessionId) {
+  if (!isId(token) || typeof sessionId !== 'string' || !sessionId) return false;
+  const ended = await optionalRecord(endedSupervisorPath(root, token));
+  return ended?.token === token && ended.sessionId === sessionId && !await ownerAlive(root, token);
+}
+
+async function reviewerRecovery(root, grant, parent, state, preview) {
+  if (!isId(state.ownerToken) || state.ownerToken === grant.ownerToken)
+    refuse('No replacement supervisor to recover reviewer delegation to');
+  const predecessor = state.predecessorSupervisor;
+  const recovery = { grantId: grant.id, spawnId: parent.id, workerId: parent.workerId,
+    previousToken: grant.ownerToken, previousSession: grant.supervisorSession, predecessor,
+    ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, role: 'read-only' };
+  if (!preview && !isDeepStrictEqual(await optionalRecord(reviewerRecoveryPath(root, recovery)), recovery))
+    refuse('Intended running supervisor changed or is unavailable; in the exact owner use /continuation-delegate recover-reviewers');
+  if (!await provedSupervisorEnd(root, grant.ownerToken, grant.supervisorSession))
+    refuse('Prior supervisor has no proved graceful end for this assignment');
+  if (predecessor?.token === state.ownerToken ||
+      !await provedSupervisorEnd(root, predecessor?.token, predecessor?.sessionId))
+    refuse('Predecessor supervisor has no proved graceful end for this replacement');
+  const lock = await optionalRecord(join(root, 'supervisor.lock'));
+  if (lock?.token !== state.ownerToken || lock?.sessionId !== state.supervisorSession || lock?.pid !== state.ownerPid ||
+      await optionalRecord(join(root, 'supervisor-start-pending.json')))
+    refuse('Replacement supervisor ownership or startup is unresolved');
+  const receipt = await optionalRecord(join(root, `spawn-receipt-${parent.id}.json`));
+  if (parent.ownerToken !== grant.ownerToken || receipt?.id !== parent.id || receipt?.status !== 'sent')
+    refuse('Exact assignment owner dispatch receipt or original authority is unavailable');
+  await delegationOwner(root, state);
+  let healthy;
+  try { healthy = (await sendAction(root, { type: 'reviewer-recovery-health', ownerToken: state.ownerToken,
+    sessionId: state.supervisorSession }, 'supervisor')).healthy; }
+  catch { /* A missing or older endpoint is not a health witness. */ }
+  if (healthy !== true) refuse('Replacement supervisor is not healthy for reviewer recovery');
+  return recovery;
+}
+
+export async function delegationAuthority(root, reference, binding, commandEvidence, previewRecovery = false) {
   const grant = await readJson(grantPath(root, reference?.grantId));
   if (grant.revoked || (reference.spawnId ? grant.cwd : grant.originCwd ?? grant.cwd) !== await realpath(binding.cwd))
     refuse('Delegation scope revoked or cwd changed');
   let role = grant.role;
   if (!['writer', 'read-only'].includes(role)) refuse('Delegation has no explicit role boundary');
-  let inheritedRecipient;
+  let inheritedRecipient, launchAttempt;
   if (reference.spawnId) {
     const parent = await readJson(spawnPath(root, reference.spawnId));
     const launchOwner = grant.ownerLaunch && parent.role === 'owner';
@@ -268,8 +316,19 @@ export async function delegationAuthority(root, reference, binding, commandEvide
       refuse('Subdelegation parent is not the dispatched exact child with delegation authority');
     role = launchOwner ? 'writer' : grant.role === 'read-only' ? 'read-only' : parent.role;
     inheritedRecipient = parent.recipient;
+    if (launchOwner && parent.id === reference.spawnId && grant.id === reference.grantId) launchAttempt = parent;
   } else if (JSON.stringify(grant.parent) !== JSON.stringify(binding)) refuse('Delegation belongs to another planning session');
-  const state = await delegationOwner(root, grant);
+  if (previewRecovery && !launchAttempt) refuse('Reviewer recovery requires the exact launched coordinating owner');
+  let state, recovery;
+  if (launchAttempt) {
+    const current = await readSupervisor(root);
+    if (previewRecovery || current.ownerToken !== grant.ownerToken) {
+      recovery = await reviewerRecovery(root, grant, launchAttempt, current, previewRecovery);
+      state = current;
+      role = 'read-only';
+    }
+  }
+  state ??= await delegationOwner(root, grant);
   if (state.routes[binding.workspaceId]?.paused) refuse('Delegation route is paused');
   // A planning session may occupy a historical pane. The checkout check,
   // not a pane-only match, decides whether that prior binding blocks launch.
@@ -296,16 +355,23 @@ export async function delegationAuthority(root, reference, binding, commandEvide
             .every(key => binding[key] === w[key])))))
       refuse('Launch requires an unsupervised planner or the exact closing owner');
   }
+  if (recovery && (worker?.workerId !== recovery.workerId || worker.delegationId !== recovery.spawnId ||
+      worker.coordinatorId !== grant.id || Object.values(state.workers).filter(w => w.role === 'owner' &&
+        (w.coordinatorId === grant.id || w.sessionId === binding.sessionId || w.sessionFile === binding.sessionFile)).length !== 1))
+    refuse('Exact surviving assignment owner binding is missing or competing');
+  if (recovery && (state.ownerWaits[worker.workerId] || state.dispositions[worker.workerId]?.action === 'decision'))
+    refuse('Assignment owner has an unresolved wait or decision');
   if (worker) {
     const observation = await readObservation(root, worker.workerId);
     if (['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
       .some(key => binding[key] !== worker[key])) refuse('Parent worker identity changed');
-    const typedCloseout = grant.ownerLaunch && !reference.spawnId && worker.role === 'owner' &&
-      grant.closeAssignment === worker.coordinatorId && typedOwnerReport(observation, worker, commandEvidence);
-    if (worker.paused || (observation.hold && !typedCloseout) || observation.session.id !== binding.sessionId ||
-        observation.session.file !== binding.sessionFile) refuse('Parent worker is paused or held');
+    const typedControl = (previewRecovery || (grant.ownerLaunch && !reference.spawnId && worker.role === 'owner' &&
+      grant.closeAssignment === worker.coordinatorId)) && typedOwnerReport(observation, worker, commandEvidence);
+    if (worker.paused || (recovery && (state.routes[worker.route]?.paused || observation.bootstrapPending)) ||
+        (observation.hold && !typedControl) || observation.session.id !== binding.sessionId ||
+        observation.session.file !== binding.sessionFile) refuse('Parent worker or route is paused or held');
   }
-  return { grant, state, role };
+  return { grant, state, role, recovery, ownerToken: state.ownerToken };
 }
 
 /** Independent owner-side validation. A worker's request is not a blanket opt-in. */
@@ -319,16 +385,17 @@ export async function delegatedStart(root, id, record, state, live) {
         !['writer', 'read-only'].includes(spawn.role) || record.role === 'owner' ||
         (grant.ownerLaunch && !spawn.authority?.spawnId)) ||
       spawn.status !== 'enrolling' || grant.revoked || spawn.ownerToken !== state.ownerToken ||
-      grant.ownerToken !== state.ownerToken || grant.supervisorSession !== state.supervisorSession ||
       record.sessionId !== spawn.child?.sessionId || record.sessionFile !== spawn.child?.sessionFile ||
       record.paneId !== spawn.child?.paneId || record.cwd !== grant.cwd ||
       record.start?.nonce !== spawn.id || record.delegationId !== spawn.id || state.paused ||
       state.routes[spawn.child.workspaceId]?.paused || !sameOccupant(live.agents.find(a => a.pane_id === record.paneId), spawn.child))
     refuse('Delegated enrollment is not the newly created exact child under its active owner/scope');
-  requireDelegationParent(live, spawn.parent);
   const authority = await delegationAuthority(root, spawn.authority, spawn.parent);
-  if (authority.grant.id !== spawn.grantId || (spawn.role === 'writer' && authority.role === 'read-only'))
+  requireDelegationParent(live, spawn.parent, !!authority.recovery);
+  if (authority.grant.id !== spawn.grantId || authority.ownerToken !== spawn.ownerToken ||
+      (authority.recovery ? spawn.role !== 'read-only' : spawn.role === 'writer' && authority.role === 'read-only'))
     refuse('Delegated enrollment exceeds inherited scope');
+  if (authority.recovery) await requireSettledRecoveryEffects(root, authority, id);
   if (Object.values(state.workers).some(w => w.paneId === record.paneId || w.sessionId === record.sessionId))
     refuse('Delegated enrollment cannot replace or reactivate an existing worker');
   if (spawn.recipient && (!state.workers[spawn.parentWorkerId] ||
@@ -339,6 +406,60 @@ export async function delegatedStart(root, id, record, state, live) {
 }
 
 const unresolvedNotice = notice => ['pending', 'sending', 'uncertain'].includes(notice.status);
+
+// Only a writer's recorded no-effect preflight refusal is settled here; it
+// remains a retained attempt and this classification never authorizes retry.
+async function settledWriterPreflight(root, attempt, grant, recovery, owner) {
+  if (attempt.status !== 'preflight-refused' || attempt.role !== 'writer' ||
+      attempt.grantId !== grant.id || attempt.authority?.grantId !== grant.id ||
+      attempt.authority.spawnId !== recovery.spawnId || attempt.parentWorkerId !== recovery.workerId ||
+      attempt.ownerToken !== grant.ownerToken || attempt.recipient?.id !== grant.id ||
+      !sameSession({ id: attempt.parent?.sessionId, file: attempt.parent?.sessionFile }, owner) ||
+      !['paneId', 'terminalId', 'workspaceId', 'tabId', 'cwd'].every(key => attempt.parent[key] === owner[key]) ||
+      ![undefined, false].includes(attempt.paneRequested) || attempt.paneId || attempt.child || attempt.workerId ||
+      attempt.terminalId || attempt.workspaceId || attempt.tabId || attempt.closeRequested || attempt.abandonRequested ||
+      !attempt.failure || attempt.preflightFailures?.at(-1)?.reason !== attempt.failure ||
+      typeof attempt.key !== 'string' || typeof attempt.task !== 'string') return false;
+  for (const [kind, value] of [['key', attempt.key], ['assignment', attempt.task]]) {
+    const index = await optionalRecord(join(root, `spawn-${kind}-${digest(`${grant.id}\n${value}`)}.json`));
+    if (index?.id !== attempt.id) return false;
+  }
+  if (await optionalRecord(join(root, `spawn-receipt-${attempt.id}.json`)) !== undefined) return false;
+  const fence = await optionalRecord(ownerLaunchPath(root, grant.checkout));
+  if (fence?.token === attempt.id) return false;
+  for (const checkout of new Set([grant.checkout, await commonDirectory(grant.cwd)])) {
+    const writer = await optionalRecord(writerClaimPath(root, checkout));
+    if (writer?.id === attempt.id) return false;
+  }
+  return true;
+}
+
+async function requireSettledRecoveryEffects(root, { grant, state, recovery }, currentAttempt) {
+  const workers = new Set([recovery.workerId, ...Object.values(state.workers)
+    .filter(w => w.recipient?.id === grant.id).map(w => w.workerId)]);
+  for (const id of workers) {
+    if (state.inflight[id] || state.ownerWaits[id] || state.dispositions[id]?.action === 'decision')
+      refuse(`Assignment worker ${id} has an unresolved resume, wait or decision`);
+  }
+  for (const notice of Object.values(state.notices)) {
+    if ((workers.has(notice.workerId) || notice.recipient?.id === grant.id) && unresolvedNotice(notice))
+      refuse(`Assignment notice ${notice.id} is unresolved`);
+  }
+  for (const file of await readdir(root)) {
+    if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
+    const attempt = await readJson(join(root, file));
+    if (file === `spawn-${currentAttempt}.json`) continue;
+    if (attempt.grantId !== grant.id && !workers.has(attempt.workerId) && !workers.has(attempt.parentWorkerId)) continue;
+    if (file === `spawn-${attempt.id}.json`) {
+      if (attempt.status === 'dispatched') {
+        const receipt = await optionalRecord(join(root, `spawn-receipt-${attempt.id}.json`));
+        if (receipt?.id === attempt.id && receipt.status === 'sent') continue;
+      }
+      if (await settledWriterPreflight(root, attempt, grant, recovery, state.workers[recovery.workerId])) continue;
+    }
+    refuse(`Assignment startup ${file} has no proved dispatch or no-effect preflight`);
+  }
+}
 
 function exactSessionReference(binding) {
   return ['paneId', 'terminalId', 'workspaceId', 'tabId', 'sessionId', 'sessionFile', 'cwd']
@@ -1070,6 +1191,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
   const authority = await delegationAuthority(root, reference, parent, commandEvidence);
   if (role === 'writer' && authority.role === 'read-only') refuse('Read-only delegates cannot create writers');
+  if (authority.recovery) await requireSettledRecoveryEffects(root, authority);
   if (ownerLaunch ? !authority.grant.ownerLaunch || reference.spawnId || task !== authority.grant.scope :
     authority.grant.ownerLaunch && !reference.spawnId) refuse('Owner launch requires the native start command');
   const checkLocal = () => {
@@ -1078,10 +1200,12 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   };
   const check = async () => {
     checkLocal();
-    const state = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
+    const current = await delegationAuthority(root, reference, parent, commandEvidence);
+    if (current.ownerToken !== authority.ownerToken) refuse('Supervisor changed during delegation');
+    const state = current.state;
     const fresh = await readSnapshot(socketPath);
-    requireDelegationParent(fresh, parent);
-    return { state, fresh };
+    requireDelegationParent(fresh, parent, !!current.recovery);
+    return { state, fresh, current };
   };
   await check();
   const attemptKey = digest(`${authority.grant.id}\n${key}`);
@@ -1127,7 +1251,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
   const confirmedRetry = !!retry && confirmedRetryAbandonment(authority.grant, retry);
   if (retryAbandonAssignment && (!ownerLaunch || !retry || resumingClose || authority.grant.closeAssignment ||
       retry.closeRequested || retry.abandonRequested)) refuse('Prior launch cannot adopt the abandonment choice');
-  const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.grant.ownerToken,
+  const spawn = retry ?? { id, grantId: authority.grant.id, authority: reference, ownerToken: authority.ownerToken,
     parent, role, key, task, status: 'prepared', at: new Date().toISOString(),
     ...(recipient ? { recipient, parentWorkerId: parentWorker.workerId } : {}) };
   if (!retry) await claim(spawnPath(root, id), spawn);
@@ -1249,6 +1373,7 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
       if (!isDeepStrictEqual(eligibilityState(beforeSplit.state), eligibilityState(latest.state)))
         refuse('Checkout eligibility changed before creation; inspect ownership');
     }
+    if (authority.recovery) await requireSettledRecoveryEffects(root, (await check()).current, id);
     checkLocal();
     // From the first possible native effect until observed dispatch, retain the
     // checkout fence even if the response is lost or this process exits.
@@ -1631,7 +1756,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     },
   });
   pi.registerCommand('continuation-delegate', {
-    description: 'Authorize one scoped delegation tree: <writer|read-only> <assignment scope> | revoke',
+    description: 'Authorize scoped delegation: <writer|read-only> <scope> | revoke | recover-reviewers',
     handler: async (argument, ctx) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || !ctx.isIdle()) refuse('Idle Herdr Pi TUI required');
       await ensureRoot(root);
@@ -1648,9 +1773,54 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
         return;
       }
+      if (argument.trim() === 'recover-reviewers') {
+        const ref = reference(ctx);
+        if (!ref?.spawnId) refuse('Run reviewer recovery in the exact surviving coordinating owner');
+        await worker.flushObservations();
+        const version = generation;
+        const evidence = worker.launchEvidence(ctx);
+        const session = currentSession(ctx);
+        const candidate = async () => {
+          if (generation !== version || !ctx.isIdle() || worker.promptBlocked ||
+              !isDeepStrictEqual(currentSession(ctx), session) ||
+              (worker.hold && (!evidence || !isDeepStrictEqual(worker.launchEvidence(ctx), evidence))))
+            refuse('Owner interaction or hold changed during reviewer recovery');
+          const live = await snapshot(socketPath);
+          const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
+          requireDelegationParent(live, parent, true);
+          const authority = await delegationAuthority(root, ref, parent, evidence, true);
+          await requireSettledRecoveryEffects(root, authority);
+          return authority;
+        };
+        const { grant, recovery } = await candidate();
+        const path = reviewerRecoveryPath(root, recovery);
+        const existing = await optionalRecord(path);
+        if (existing) {
+          if (!isDeepStrictEqual(existing, recovery)) refuse('Existing reviewer recovery evidence does not match');
+          ctx.ui.notify('Reviewer-only delegation is already restored for this supervisor.', 'info');
+          return;
+        }
+        if (!await worker.confirmDelegation(ctx, 'Restore read-only reviewer delegation?',
+          `Assignment ${grant.id}: ${grant.scope}\nEnded supervisor ${recovery.previousSession}\n` +
+          `Predecessor ${recovery.predecessor.sessionId}\nReplacement ${recovery.supervisorSession}\n` +
+          'No writer authority, pause, wait or prior attempt will change.')) return;
+        const final = await candidate();
+        if (!isDeepStrictEqual(grant, final.grant) || !isDeepStrictEqual(recovery, final.recovery) ||
+            generation !== version || !ctx.isIdle() || worker.promptBlocked ||
+            !isDeepStrictEqual(currentSession(ctx), session))
+          refuse('Assignment or supervisor evidence changed during confirmation');
+        await claim(path, recovery);
+        ctx.ui.notify('Read-only reviewer delegation restored for this supervisor. Writer delegation remains unavailable.', 'info');
+        return;
+      }
       const existing = reference(ctx);
       if (existing && !existing.spawnId && !(await readJson(grantPath(root, existing.grantId))).revoked)
         refuse('Revoke the current delegation tree before authorizing another scope in this planning session');
+      if (existing?.spawnId) {
+        const inherited = await readJson(grantPath(root, existing.grantId));
+        if (inherited.ownerLaunch && (await readSupervisor(root)).ownerToken !== inherited.ownerToken)
+          refuse('Stale assignment authority cannot be replaced here; only recover-reviewers is available');
+      }
       const [role, ...words] = argument.trim().split(/\s+/);
       const scope = words.join(' ');
       if (!['writer', 'read-only'].includes(role) || !scope || Buffer.byteLength(scope) > 8000)
@@ -1732,7 +1902,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
             await registerOwner(ctx, grant.id);
           }
           await worker.enrollDelegated(ctx, ticket, () => generation === bootstrapVersion);
-          const state = await delegationOwner(root, await readJson(grantPath(root, ticket.grantId)));
+          const { state, ownerToken } = await delegationAuthority(root, ticket.authority, ticket.parent);
+          if (ownerToken !== ticket.ownerToken) refuse('Delegated enrollment supervisor changed');
           const binding = Object.values(state.workers).find(w => w.sessionId === ticket.child.sessionId);
           if (!binding || binding.lastStartNonce !== ticket.id || binding.paused) refuse('Delegated worker did not join');
           pi.appendEntry('pi-continuation-delegation', { grantId: ticket.grantId, spawnId: ticket.id,
@@ -1740,14 +1911,16 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
           return { accepted: true, id: ticket.id, workerId: binding.workerId };
         }
         if (action.type === 'assignment' && ticket.status === 'dispatching') {
-          const grant = await readJson(grantPath(root, ticket.grantId));
-          const state = await delegationOwner(root, grant);
-          const binding = state.workers[ticket.workerId];
           const fresh = await snapshot(socketPath);
-          requireDelegationParent(fresh, ticket.parent);
+          const authority = await delegationAuthority(root, ticket.authority, ticket.parent);
+          const { grant, state, role, ownerToken, recovery } = authority;
+          if (ownerToken !== ticket.ownerToken || (ticket.role === 'writer' && role === 'read-only'))
+            refuse('Assignment delegation authority changed');
+          const binding = state.workers[ticket.workerId];
+          requireDelegationParent(fresh, ticket.parent, !!recovery);
           if (!binding || binding.paused || state.routes[binding.route]?.paused ||
               !sameOccupant(fresh.agents.find(a => a.pane_id === paneId), binding)) refuse('Assignment scope/identity changed');
-          await delegationAuthority(root, ticket.authority, ticket.parent);
+          if (recovery) await requireSettledRecoveryEffects(root, authority, ticket.id);
           const preferences = ticket.role === 'owner' ? effectiveDeliveryPreferences(
             await readAssignmentDeliveryPreferences(root, grant)) : undefined;
           const delivery = preferences ? deliveryFields.map(field =>

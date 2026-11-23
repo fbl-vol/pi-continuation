@@ -139,6 +139,20 @@ This is not automatic enrollment on package installation and does not waive
 user decisions, independent pauses or review holds. The v0.5.0 release still
 requires a running supervisor before owner launch.
 
+**Surviving-owner reviewer recovery (P1/P3/P4/P7):** After a recorded graceful
+supervisor end, the exact already-dispatched assignment owner can run
+`/continuation-delegate recover-reviewers` and confirm the named healthy
+replacement once. The confirmation authorizes reviewer delegation only for that
+replacement; the original grant and writer claim are not rewritten. Revocation,
+pauses, holds, unresolved waits/effects and attempt/receipt history remain in
+force. Each replacement needs a graceful-end witness for its immediate
+predecessor, even when the original grant names an earlier supervisor. An exact
+writer preflight refusal proved to have left no claim or pane effect does not
+block reviewer recovery; its attempt stays unchanged and is not retried. A
+missing shutdown witness, ambiguous identity or unhealthy replacement fails
+closed. This uses the ordinary native Pi confirmation boundary, not a new
+input-provenance guarantee.
+
 **Since v0.6.0 (delivery preferences):** `/continuation` offers a native Delivery preferences
 menu. Explicit Save persists per-user defaults for future assignments; Cancel
 and Escape discard drafts. Each new owner pins its defaults, while its own

@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 REPO = Path(__file__).resolve().parents[1]
 TASK = 'Implement synthetic W123: delegate one fixture writer, then acknowledge.'
 WRITER_TASK = 'Run the synthetic writer fixture; reply without tools.'
+REVIEW_REQUEST = 'Check reviewer-only authority with the synthetic fixture.'
+REVIEW_TASK = 'Read-only review of the synthetic fixture; reply without tools.'
 ANSWER = 'Native smoke acknowledgement.'
 
 
@@ -35,7 +37,15 @@ class Model(BaseHTTPRequestHandler):
         tool = None
         if last['role'] == 'user' and self.server.task in json.dumps(last):
             tool = ('continuation_spawn', dict(key='native-writer', task=WRITER_TASK, role='writer'))
-        elif last['role'] == 'tool' and last.get('tool_call_id') == 'fixture-continuation_spawn':
+        elif self.server.reviewer_recovery and last['role'] == 'user' and REVIEW_REQUEST in json.dumps(last):
+            tool = ('continuation_spawn', dict(key='denied-writer', task='Synthetic second writer.', role='writer'))
+        elif self.server.reviewer_recovery and last.get('tool_call_id') == 'fixture-denied-writer':
+            tool = ('continuation_spawn', dict(key='recovered-review', task=REVIEW_TASK, role='read-only'))
+        elif (self.server.reviewer_recovery and last.get('tool_call_id') == 'fixture-continuation_spawn' and
+              WRITER_TASK in json.dumps(messages) and REVIEW_REQUEST not in json.dumps(messages)):
+            tool = ('continuation_spawn', dict(key='preflight-writer', task='Synthetic refused preflight.', role='writer'))
+        elif (not self.server.reviewer_recovery and last['role'] == 'tool' and
+              last.get('tool_call_id') == 'fixture-continuation_spawn'):
             try:
                 worker = json.loads(last['content'])['workerId']
             except (ValueError, KeyError, TypeError):
@@ -54,7 +64,9 @@ class Model(BaseHTTPRequestHandler):
         self.end_headers()
         if tool:
             name, arguments = tool
-            call = dict(index=0, id=f'fixture-{name}', type='function',
+            call_id = {'denied-writer': 'fixture-denied-writer', 'preflight-writer': 'fixture-preflight-writer'}.get(
+                arguments.get('key'), f'fixture-{name}')
+            call = dict(index=0, id=call_id, type='function',
                         function=dict(name=name, arguments=json.dumps(arguments)))
             response = [({'role': 'assistant', 'tool_calls': [call]}, None), ({}, 'tool_calls')]
         else:
@@ -113,7 +125,8 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
-        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences):
+        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery):
+    model.reviewer_recovery = reviewer_recovery
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -398,6 +411,47 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             until('owner turn settled', lambda: json.loads(observation_path.read_text())['outcome'] == 'completed')
             settled_owner = json.loads(state_path.read_text())['workers'][attempt['workerId']]
             assert not settled_owner['paused'], settled_owner
+            if reviewer_recovery:
+                preflight, = (json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')
+                              if json.loads(p.read_text())['key'] == 'preflight-writer')
+                assert preflight['status'] == 'preflight-refused' and not preflight.get('paneRequested') and not preflight.get('child')
+                history = {p: p.read_bytes() for p in state_dir.glob('*.json')
+                           if p.name.startswith(('spawn-', 'delegation-'))}
+                for name in ('smoke-replacement-b', 'smoke-replacement-c'):
+                    old = json.loads(state_path.read_text())
+                    cli('agent', 'send-keys', supervisor, 'ctrl+d')
+                    until('graceful supervisor release', lambda: not (state_dir/'supervisor.lock').exists())
+                    supervisor = cli('workspace', 'create', '--label', name, '--cwd', str(work))['root_pane']['pane_id']
+                    panes.append(supervisor)
+                    until('replacement shell ready', lambda: shell_alone(supervisor))
+                    cli('agent', 'start', name, '--kind', 'pi', '--pane', supervisor)
+                    cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
+                    until('replacement start confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('replacement committed', lambda: json.loads(state_path.read_text())['ownerToken'] != old['ownerToken'])
+                    until('replacement settled', lambda: cli('agent', 'get', supervisor)['agent']['agent_status'] in ('idle', 'done'))
+                    cli('agent', 'prompt', owner['paneId'], '/continuation-delegate recover-reviewers')
+                    until('one native reviewer recovery confirmation', lambda: 'Restore read-only reviewer delegation?' in visible(owner['paneId']))
+                    cli('agent', 'send-keys', owner['paneId'], 'enter')
+                    until('reviewer delegation restored', lambda: any(
+                        r['ownerToken'] == json.loads(state_path.read_text())['ownerToken']
+                        and r['predecessor'] == {'token': old['ownerToken'], 'sessionId': old['supervisorSession']}
+                        for r in (json.loads(p.read_text()) for p in state_dir.glob('reviewer-recovery-*.json'))))
+                    until('owner command settled', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', owner['paneId'], REVIEW_REQUEST)
+                review = until('read-only reviewer dispatched', lambda: dispatched('read-only'), 40)
+                panes.append(review['paneId'])
+                assert review['authority']['spawnId'] == attempt['id'] and review['grantId'] == attempt['grantId']
+                assert review['ownerToken'] == json.loads(state_path.read_text())['ownerToken']
+                assert json.loads((state_dir/f"spawn-receipt-{review['id']}.json").read_text())['status'] == 'sent'
+                assert 'Read-only delegates cannot create writers' in Path(owner['sessionFile']).read_text()
+                attempts = [json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')]
+                assert sorted(a['role'] for a in attempts if a['status'] == 'dispatched') == ['owner', 'read-only', 'writer']
+                assert len(attempts) == 4
+                assert all(p.read_bytes() == content for p, content in history.items())
+                print('Native reviewer recovery passed: graceful A/B/C, one confirmation per replacement, one reviewer; '
+                      'second writer denied and preflight history unchanged', flush=True)
+                return
             assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == {
                 'kind': 'child', 'children': [writer_attempt['workerId']]}, settled_owner
             turns = [json.loads(line) for line in Path(owner['sessionFile']).read_text().splitlines()]
@@ -530,6 +584,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-supervisor', action='store_true', help='bootstrap a new supervisor in the same invocation')
     parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
     parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
+    parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -543,6 +598,6 @@ if __name__ == '__main__':
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
-                args.delivery_preferences)
+                args.delivery_preferences, args.reviewer_recovery)
         finally:
             model.shutdown()

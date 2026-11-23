@@ -9,7 +9,8 @@ import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
-import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment, spawnPath } from './delegation.mjs';
+import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
+  endedSupervisorPath, spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -655,6 +656,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
               request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :
               request?.type === 'launch-close' ? acceptLaunchClose(request) :
+              request?.type === 'reviewer-recovery-health' ? { healthy: active() && subscriptionLive &&
+                !promptActive && !persistenceFailed && state.acceptStarts && !state.paused &&
+                request.ownerToken === state.ownerToken && request.sessionId === state.supervisorSession } :
               request?.type === 'checkpoint-recovered' ? acceptCheckpointRecovery(request, ctx) : acceptWorkerStart(request, ctx));
           try { state = await readSupervisor(root); }
           catch (error) {
@@ -665,6 +669,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           if (Object.values(state.workers).some(w => w.sessionId === supervisorSession) ||
               Object.values(state.routes).some(r => r.coordinator?.sessionId === supervisorSession))
             throw new Error('A worker or coordinator cannot become the supervisor');
+          // Record the actual predecessor before replacing the durable owner tuple.
+          state.predecessorSupervisor = state.ownerToken ?
+            { token: state.ownerToken, sessionId: state.supervisorSession } : undefined;
           state.supervisorSession = supervisorSession;
           state.acceptStarts = verb === 'start';
           if (verb === 'start') setScopePaused(state, 'global', undefined, false);
@@ -1047,6 +1054,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (closeOwner) {
       const token = state.ownerToken;
       await closeOwner(); closeOwner = undefined;
+      try {
+        await claim(endedSupervisorPath(root, token), { token, sessionId: state.supervisorSession });
+      } catch (error) { report('record ended supervisor for reviewer recovery', error); }
       await release(lockFile(root), token);
     }
     // A failed-save handler cannot wait for its own drain. Shutdown can and must.
