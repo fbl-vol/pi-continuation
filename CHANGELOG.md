@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.5] - 2026-11-24
+
+- Use **Submit owner decision** in the exact waiting owner pane to enter a
+  decision once. The extension relays it to the existing eligible writer and
+  releases that wait only after a confirmed receipt. Earlier decisions on a
+  different writer stop no longer block a new cycle.
+- Keep explicit release for older or unsubmitted waits. Independent pauses and
+  holds still apply; uncertain relays stay fenced and must not be retried.
+
+The prompt trusts input in the exact owner pane; it cannot verify who typed it.
+This is a controlled trial with disposable native Linux validation for one
+cycle and isolated tests for repeat cycles. Use the same extension version in
+participating sessions. Installation does not reload sessions or migrate workers.
+
 ## [0.7.4] - 2026-11-23
 
 - The exact surviving assignment owner can confirm `/continuation-delegate recover-reviewers`
