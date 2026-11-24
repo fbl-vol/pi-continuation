@@ -83,6 +83,7 @@ export function guardPromptUI(ui, onExternalPrompt, scope) {
     end() { lifecycleExternal = false; },
     async confirm(...args) { return await owned('confirm', args) === true; },
     select(...args) { return owned('select', args); },
+    input(...args) { return owned('input', args); },
     dispose: restore,
   };
 }

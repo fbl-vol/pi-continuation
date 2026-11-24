@@ -87,7 +87,7 @@ v0.3.0 uses the earlier flat list.
   It refuses unresolved continuation, notices or delegated startup. This is not
   permanent retirement and never terminates the Pi session.
 - **Clear this session hold** appears only for the exact held worker in its own menu. It requires confirmation after resolving the cause and reassesses the current report; it does not approve an action, lift a pause or replay an effect.
-- **Release this owner decision wait** appears only for the exact owner awaiting a user decision. It retains the explicit confirmation and requires the actual selected instruction in an ordinary user turn; `/continuation-owner resume` remains available for the same distinct recovery gate.
+- **Submit owner decision** opens the exact owner's decision input (`/continuation-owner decide`). Enter the actual decision and its scope once. The separate **Release this owner decision wait** control (`/continuation-owner resume`) retains the explicit recovery path for older or unsubmitted waits.
 - **Return** is available only in that worker's own session, through the menu or
   `/continuation-worker start`. It requires fresh explicit confirmation after Stop,
   not an old in-flight start. A pause that predated Stop remains paused on return,
@@ -230,12 +230,15 @@ an intended owner can register
 its bounded `writer` delegation scope with `/continuation-delegate`. The owner is a
 supervised non-writer and an exact recipient for its delegated children, not another
 supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
-user-decision wait. A child material notice wakes only its owner; user selection
-requires `/continuation` → **Release this owner decision wait** (or the advanced
-`/continuation-owner resume`) in that exact owner session after the actual user
-decision, then a successful ordinary user-input turn before pending notices
-can deliver. Neither release nor a child can bypass the decision fence. No command
-assumes approval or repairs an uncertain effect. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
+user-decision wait. Child notices never answer a decision. In current source, use
+**Submit owner decision** in that exact owner pane and enter the chosen scope once.
+The extension relays the submitted text to the existing eligible writer and releases
+only that wait after a confirmed receipt. Ordinary chat is not a decision submission.
+An agent with terminal-input access could type the same response; Pi/Herdr do not
+identify who typed it. Existing holds and pauses remain in force. For older or
+unsubmitted waits, the explicit release path still requires confirmation and a
+successfully settled ordinary turn. An uncertain relay stays fenced for inspection;
+do not repeat the decision through either path. See [P1–P7](docs/extension-parity.md) and [the contract](docs/contract.md)
 for the bounded safeguards. No live owner bootstrap or unattended delivery is claimed.
 
 ## Development and disposable use

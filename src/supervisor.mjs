@@ -1,13 +1,14 @@
 import { watch } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { ensureRoot, defaultRoot, readJson, atomicJson, claim, release } from './store.mjs';
 import { sameOccupant, snapshot, isSettled, request as herdrRequest } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
-import { readSupervisor, readObservation, newSupervisor, isId as uuid } from './contracts.mjs';
+import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
   endedSupervisorPath, spawnPath } from './delegation.mjs';
@@ -492,6 +493,64 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  async function submitOwnerDecision(owner, captureId) {
+    const refuse = message => ({ accepted: false, message });
+    if (!uuid(captureId)) return refuse('No exact native decision capture');
+    const decision = await readJson(join(root, `decision-input-${captureId}.json`));
+    const wait = state.ownerWaits[owner.workerId];
+    if (!uuid(wait?.id) || wait.kind !== 'user' || wait.decisionId || decision.waitId !== wait.id ||
+        decision.id !== captureId || decision.workerId !== owner.workerId || decision.coordinatorId !== owner.coordinatorId ||
+        decision.sessionId !== owner.sessionId || decision.sessionFile !== owner.sessionFile ||
+        decision.ownerToken !== state.ownerToken || typeof decision.answer !== 'string' ||
+        !decision.answer.trim() || Buffer.byteLength(JSON.stringify(decision.answer)) > 4000)
+      return refuse('Decision wait changed or already submitted; do not replay');
+    const evidence = ownerDecisionEvidence(await readObservation(root, owner.workerId), owner);
+    if (!evidence || !isDeepStrictEqual(evidence, decision.evidence)) return refuse('Owner decision stop changed');
+    const writers = [];
+    for (const candidate of Object.values(state.workers)) {
+      if (candidate.recipient?.id !== owner.coordinatorId || candidate.recipient.sessionId !== owner.sessionId ||
+          !candidate.delegationId) continue;
+      const attempt = await readJson(spawnPath(root, candidate.delegationId));
+      if (attempt.role === 'writer' && attempt.status === 'dispatched' && attempt.workerId === candidate.workerId &&
+          attempt.parentWorkerId === owner.workerId && attempt.parent?.sessionId === owner.sessionId &&
+          attempt.parent?.sessionFile === owner.sessionFile && attempt.child?.sessionId === candidate.sessionId &&
+          attempt.child?.sessionFile === candidate.sessionFile) writers.push(candidate);
+    }
+    const [writer] = writers;
+    const live = await snapshot(socketPath);
+    const agent = live.agents.find(a => a.pane_id === writer?.paneId);
+    if (!sameOccupant(live.agents.find(a => a.pane_id === owner.paneId), owner) ||
+        writers.length !== 1 || !sameOccupant(agent, writer) || !isSettled(agent))
+      return refuse('One exact settled existing writer is required');
+    const observed = await readObservation(root, writer.workerId);
+    if (!active() || !subscriptionLive || state.paused || owner.paused || writer.paused ||
+        state.routes[owner.route]?.paused || state.routes[writer.route]?.paused || state.inflight[writer.workerId] ||
+        state.dispositions[writer.workerId]?.action === 'decision' || observed.hold || observed.bootstrapPending ||
+        observed.outcome !== 'completed' || !observed.stop || observed.session.id !== writer.sessionId ||
+        observed.session.file !== writer.sessionFile) return refuse('Owner or writer is held, paused, or has unresolved work');
+    const intent = { id: wait.id, status: 'sending', type: 'owner-decision', ownerToken: state.ownerToken,
+      workerId: writer.workerId, stop: observed.stop, sourceWorkerId: owner.workerId, captureId, evidence, answer: decision.answer };
+    // Commit the one-use fence before making any writer request. An uncertain
+    // response keeps the exact wait fenced and is never retried or legacy-released.
+    wait.decisionId = intent.id;
+    await commit();
+    try {
+      await claim(join(root, `intent-${intent.id}.json`), intent);
+      const result = await sendAction(root, { id: intent.id, workerId: intent.workerId,
+        ownerToken: intent.ownerToken, stop: intent.stop });
+      const receipt = await readJson(join(root, `receipt-${intent.id}.json`));
+      if (!result.accepted || result.id !== intent.id || receipt.id !== intent.id || receipt.status !== 'sent')
+        throw new Error('Decision receipt unconfirmed');
+    } catch {
+      return refuse(`Decision delivery ${intent.id} is unconfirmed; wait retained. Inspect the receipt; do not resend.`);
+    }
+    if (state.handled[owner.workerId] !== evidence.stop)
+      recordDisposition(state, owner.workerId, evidence.stop, 'acknowledge');
+    delete state.ownerWaits[owner.workerId];
+    await commit();
+    return { accepted: true };
+  }
+
   const acceptOwnerWait = request => queue(async () => {
     if (!active() || !subscriptionLive || state.paused || !state.acceptStarts) return { accepted: false };
     const worker = state.workers[request.workerId];
@@ -502,8 +561,13 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!sameOccupant(live.agents.find(a => a.pane_id === worker.paneId), worker)) return { accepted: false };
     const recipient = await coordinatorCandidate(root, request.coordinatorId, state, live, paneId);
     if (recipient.role !== 'owner' || recipient.sessionId !== worker.sessionId) return { accepted: false };
+    if (request.kind === 'submit-decision') {
+      try { return await submitOwnerDecision(worker, request.decision); }
+      catch { return { accepted: false, message: 'Decision evidence unavailable or commit uncertain; inspect the exact wait before proceeding' }; }
+    }
     if (request.kind === 'resume-user') {
-      if (state.ownerWaits[request.workerId]?.kind !== 'user') return { accepted: false };
+      if (state.ownerWaits[request.workerId]?.kind !== 'user' || state.ownerWaits[request.workerId].decisionId)
+        return { accepted: false };
       await acknowledgeWaitingOwner(request.workerId);
       state.ownerWaits[request.workerId] = { kind: 'released',
         stop: (await readObservation(root, request.workerId)).stop };
@@ -515,8 +579,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           observed.outcome !== 'completed' || observed.hold || !observed.stop || observed.stop === wait.stop)
         return { accepted: false };
       delete state.ownerWaits[request.workerId];
-    } else if (request.kind === 'user') state.ownerWaits[request.workerId] = { kind: 'user' };
-    else if (request.kind === 'child' && Array.isArray(request.children) && request.children.length &&
+    } else if (request.kind === 'user') {
+      if (state.ownerWaits[request.workerId]?.kind === 'released') return { accepted: false };
+      if (state.ownerWaits[request.workerId]?.kind === 'user') return { accepted: true };
+      state.ownerWaits[request.workerId] = { kind: 'user', id: randomUUID() };
+    } else if (request.kind === 'child' && Array.isArray(request.children) && request.children.length &&
         request.children.every(id => uuid(id) && state.workers[id]?.recipient?.id === recipient.id &&
           state.workers[id]?.recipient?.sessionId === recipient.sessionId)) {
       if (['user', 'released'].includes(state.ownerWaits[request.workerId]?.kind)) return { accepted: false };

@@ -1,8 +1,9 @@
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { readJson, atomicJson, claim } from './store.mjs';
 import { currentSession } from './session.mjs';
 import { listenJson, ownerAlive } from './ipc.mjs';
-import { readSupervisor, readObservation, isId } from './contracts.mjs';
+import { ownerDecisionEvidence, readSupervisor, readObservation, isId } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { withWorkerHandoff } from './ownership.mjs';
 import { spawnPath } from './delegation.mjs';
@@ -31,6 +32,17 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
   }
 }
 
+async function currentDecision(root, state, binding, intent) {
+  if (intent.type !== 'owner-decision') return true;
+  const owner = state.workers[intent.sourceWorkerId];
+  const wait = state.ownerWaits[intent.sourceWorkerId];
+  return owner?.role === 'owner' && !owner.paused && !state.routes[owner.route]?.paused &&
+    binding?.recipient?.id === owner.coordinatorId && binding.recipient.sessionId === owner.sessionId &&
+    intent.workerId === binding.workerId && wait?.kind === 'user' && wait.id === intent.id && wait.decisionId === intent.id &&
+    !state.inflight[binding.workerId] && state.dispositions[binding.workerId]?.action !== 'decision' &&
+    isDeepStrictEqual(ownerDecisionEvidence(await readObservation(root, owner.workerId), owner), intent.evidence);
+}
+
 async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, handoff) {
   const state = await readSupervisor(root);
   const owner = await readJson(join(root, 'supervisor.lock'));
@@ -43,7 +55,7 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
     return { accepted: false, reason: 'delegated assignment requires inspection' };
   if (JSON.stringify(binding?.handoff) !== JSON.stringify(handoff) ||
       observation.version !== version || observation.hold || isHeld() ||
-      !await ownerAlive(root, owner.token))
+      !await ownerAlive(root, owner.token) || !await currentDecision(root, state, binding, intent))
     return { accepted: false, reason: 'stop changed or supervisor unavailable' };
   // Persist the one-use receipt, then recheck current state and stop generation.
   // The final eligibility check and message injection have no intervening await.
@@ -71,7 +83,8 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
   const latestObservation = await readObservation(root, worker.workerId);
   const delegatedReady = !worker.delegationId ||
     (await readJson(spawnPath(root, worker.delegationId))).status === 'dispatched';
-  if (!delegatedReady || JSON.stringify(latest.workers?.[worker.workerId]?.handoff) !== JSON.stringify(handoff) ||
+  if (!delegatedReady || !await currentDecision(root, latest, latest.workers[worker.workerId], intent) ||
+      JSON.stringify(latest.workers?.[worker.workerId]?.handoff) !== JSON.stringify(handoff) ||
       latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
       latestObservation.hold || latestObservation.version !== version ||
@@ -80,8 +93,12 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
       !ctx.isIdle() || currentSession(ctx).leaf !== session.leaf || isHeld() || stopVersion() !== version) {
     return { accepted: false, reason: 'session changed after receipt' };
   }
+  const content = intent.type === 'owner-decision' ?
+    `Decision submitted in your exact coordinating owner pane (action ${action.id}). Apply only the selected scope within the existing assignment. ` +
+    `Do not infer missing selections or bypass independent review. If the selection is unclear, report it without editing.\n\n${intent.answer}` :
+    `Continue the already approved assignment from your existing checkpoint. Do not bypass pauses, approvals, or review requirements. Action ${action.id}.`;
   pi.sendMessage({ customType: 'pi-continuation',
-    content: `Continue the already approved assignment from your existing checkpoint. Do not bypass pauses, approvals, or review requirements. Action ${action.id}.`,
+    content,
     display: true }, { triggerTurn: true });
   await atomicJson(join(root, `receipt-${action.id}.json`), { id: action.id, status: 'sent' });
   return { accepted: true, id: action.id };

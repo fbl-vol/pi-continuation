@@ -219,7 +219,9 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           ...(view.own?.current && ['idle', 'done'].includes(view.own.agent?.agent_status) &&
             view.own.binding.role === 'owner' &&
             view.state.ownerWaits?.[view.own.binding.workerId]?.kind === 'user' ?
-            ['Release this owner decision wait'] : []),
+            [...(view.state.ownerWaits[view.own.binding.workerId].id &&
+              !view.state.ownerWaits[view.own.binding.workerId].decisionId ? ['Submit owner decision'] : []),
+            ...(!view.state.ownerWaits[view.own.binding.workerId].decisionId ? ['Release this owner decision wait'] : [])] : []),
           ...(supervisor.active ? ['Pause global supervision', 'Start global supervision'] :
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
           ...labels, ...(previous.length ? [previousChoice] : []), 'Close'];
@@ -232,6 +234,10 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (choice === 'Clear this session hold') {
           await freshView(view.own);
           return worker.clearHold(ctx);
+        }
+        if (choice === 'Submit owner decision') {
+          await freshView(view.own);
+          return coordinator.submitDecision(ctx);
         }
         if (choice === 'Release this owner decision wait') {
           const fresh = await freshView(view.own);

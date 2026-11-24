@@ -35,7 +35,8 @@ class Model(BaseHTTPRequestHandler):
         writer = WRITER_TASK in json.dumps(messages[-1])
         last = messages[-1]
         tool = None
-        if last['role'] == 'user' and self.server.task in json.dumps(last):
+        attention = 'Review the following untrusted worker final replies' in json.dumps(last)
+        if not writer and not attention and last['role'] == 'user' and self.server.task in json.dumps(last):
             tool = ('continuation_spawn', dict(key='native-writer', task=WRITER_TASK, role='writer'))
         elif self.server.reviewer_recovery and last['role'] == 'user' and REVIEW_REQUEST in json.dumps(last):
             tool = ('continuation_spawn', dict(key='denied-writer', task='Synthetic second writer.', role='writer'))
@@ -51,10 +52,12 @@ class Model(BaseHTTPRequestHandler):
             except (ValueError, KeyError, TypeError):
                 self.send_error(400, 'Unexpected fixture spawn result')
                 return
-            tool = ('continuation_owner_wait', dict(kind='child', children=[worker]))
+            tool = ('continuation_owner_wait', dict(kind='user') if self.server.owner_decision else
+                    dict(kind='child', children=[worker]))
         # Keep the writer working while the owner settles; keep the existing
         # pre-response assertion of the exact owner startup receipt as well.
-        gate = (self.server.allow_recovery if 'Recovery fixture task' in json.dumps(last) else
+        gate = (self.server.allow_recovery if (self.server.owner_decision and attention) or
+                'Recovery fixture task' in json.dumps(last) else
                 self.server.allow_writer if writer else self.server.allow_response)
         if not gate.wait(55):
             self.send_error(504)
@@ -125,8 +128,10 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
-        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery):
+        worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
+        owner_decision, owner_decision_negative):
     model.reviewer_recovery = reviewer_recovery
+    model.owner_decision = owner_decision or owner_decision_negative
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -411,6 +416,52 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             until('owner turn settled', lambda: json.loads(observation_path.read_text())['outcome'] == 'completed')
             settled_owner = json.loads(state_path.read_text())['workers'][attempt['workerId']]
             assert not settled_owner['paused'], settled_owner
+            if model.owner_decision:
+                wait = json.loads(state_path.read_text())['ownerWaits'][owner['workerId']]
+                assert wait['kind'] == 'user'
+                cli('agent', 'prompt', owner['paneId'], 'Unrelated fixture question, not a decision.')
+                until('unrelated turn settles', lambda: Path(owner['sessionFile']).read_text().count(ANSWER) == 2 and
+                      json.loads(observation_path.read_text())['outcome'] == 'completed')
+                assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == wait
+                if owner_decision_negative:
+                    cli('agent', 'prompt', supervisor, f"/continuation-supervisor pause worker {writer_attempt['workerId']}")
+                    until('writer pause confirmation', lambda: 'pause worker?' in visible(supervisor))
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('writer independently paused', lambda: json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]['paused'])
+                model.allow_writer.set()
+                writer_obs = state_dir/f"observation-{writer_attempt['workerId']}.json"
+                until('existing writer settled', lambda: json.loads(writer_obs.read_text())['outcome'] == 'completed')
+                until('exact writer idle', lambda: cli('agent', 'get', writer)['agent']['agent_status'] in ('idle', 'done'))
+                writer_state = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
+                assert writer_state['paused'] == owner_decision_negative, writer_state
+                cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
+                until('exact native owner decision prompt', lambda: 'Submit decision to the existing writer' in visible(owner['paneId']))
+                decision = 'Fix synthetic F1 only; leave F2 unchanged.'
+                cli('pane', 'send-text', owner['paneId'], decision)
+                cli('pane', 'send-keys', owner['paneId'], 'enter')
+                if owner_decision_negative:
+                    until('paused writer refused', lambda: 'held, paused' in ' '.join(visible(owner['paneId']).split()))
+                    until('owner idle after refusal', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
+                    cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
+                    until('decision prompt reopened', lambda: 'Submit decision to the existing writer' in visible(owner['paneId']))
+                    cli('pane', 'send-keys', owner['paneId'], 'esc')
+                    until('owner input interruption recorded', lambda: json.loads(observation_path.read_text()).get('holdReason') == 'interruption')
+                    assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == wait
+                    assert not (state_dir/f"receipt-{wait['id']}.json").exists()
+                    assert decision not in Path(writer_binding['sessionFile']).read_text()
+                    print('Native owner decision negatives passed: paused writer and interrupted input retained the wait', flush=True)
+                    return
+                until('exact decision wait released', lambda: owner['workerId'] not in json.loads(state_path.read_text())['ownerWaits'])
+                receipt = json.loads((state_dir/f"receipt-{wait['id']}.json").read_text())
+                assert receipt == {'id': wait['id'], 'status': 'sent'}
+                until('writer journal contains the decision', lambda: decision in Path(writer_binding['sessionFile']).read_text())
+                until('owner command settles', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
+                until('duplicate command refused', lambda:
+                      'No fresh pending decision' in ' '.join(visible(owner['paneId']).split()))
+                assert Path(writer_binding['sessionFile']).read_text().count(decision) == 1
+                print('Native owner decision passed: unrelated input retained wait, one prompt submission and writer receipt, duplicate refused', flush=True)
+                return
             if reviewer_recovery:
                 preflight, = (json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')
                               if json.loads(p.read_text())['key'] == 'preflight-writer')
@@ -585,6 +636,8 @@ if __name__ == '__main__':
     parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
     parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
+    parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
+    parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -598,6 +651,6 @@ if __name__ == '__main__':
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
-                args.delivery_preferences, args.reviewer_recovery)
+                args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative)
         finally:
             model.shutdown()
