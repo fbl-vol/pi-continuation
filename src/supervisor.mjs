@@ -19,7 +19,7 @@ import { checkWorkerHandoff, withWorkerHandoff } from './ownership.mjs';
 import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartCandidate,
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
-  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention,
+  resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention, unresolvedDecisionAtStop,
   recipientFor } from './policy.mjs';
 
 const stateFile = root => join(root, 'supervisor.json');
@@ -525,7 +525,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const observed = await readObservation(root, writer.workerId);
     if (!active() || !subscriptionLive || state.paused || owner.paused || writer.paused ||
         state.routes[owner.route]?.paused || state.routes[writer.route]?.paused || state.inflight[writer.workerId] ||
-        state.dispositions[writer.workerId]?.action === 'decision' || observed.hold || observed.bootstrapPending ||
+        unresolvedDecisionAtStop(state.dispositions[writer.workerId], observed.stop) || observed.hold || observed.bootstrapPending ||
         observed.outcome !== 'completed' || !observed.stop || observed.session.id !== writer.sessionId ||
         observed.session.file !== writer.sessionFile) return refuse('Owner or writer is held, paused, or has unresolved work');
     const intent = { id: wait.id, status: 'sending', type: 'owner-decision', ownerToken: state.ownerToken,

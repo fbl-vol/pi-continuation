@@ -12,6 +12,11 @@ function existingNotice(state, workerId, stop, kind) {
 export const recipientFor = (state, workerId) => state.workers[workerId]?.recipient ??
   state.routes[state.workers[workerId]?.route]?.coordinator;
 
+export function unresolvedDecisionAtStop(disposition, stop) {
+  // A recorded decision is historical only when both stops are known and differ.
+  return disposition?.action === 'decision' && (!stop || !disposition.stop || disposition.stop === stop);
+}
+
 export function planDisposition(state, args, checkpoint, materialEvidence = '') {
   const reject = message => ({ kind: 'reject', message });
   const evidence = args.evidence.trim();

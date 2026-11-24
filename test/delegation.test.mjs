@@ -1783,6 +1783,50 @@ test('P3/P4/P7 native owner decision input relays the exact answer once to the s
   assert.equal(writer.messages.length, 1);
 });
 
+test('P3/P7 a historical writer decision does not block a second selected owner decision cycle', async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t);
+  const writerObservation = () => readJson(join(f.root, `observation-${writerId}.json`));
+  const first = (await f.state()).ownerWaits[ownerId];
+  owner.answer('Apply F1 only.');
+  await answerOwnerDecision(owner);
+  await writer.emit('agent_start');
+  writer.assistant('F1 is complete. F2 still needs a decision.');
+  await writer.emit('agent_settled');
+  const stopped = await writerObservation();
+  await owner.wait({ kind: 'user' });
+  const second = (await f.state()).ownerWaits[ownerId];
+  assert.notEqual(second.id, first.id);
+  await f.supervisor.dispose({ workerId: writerId, stop: stopped.stop, action: 'notify', kind: 'decision',
+    evidence: 'F2 still needs a decision.' });
+  const historical = { action: 'decision', stop: stopped.stop };
+  assert.deepEqual((await f.state()).dispositions[writerId], historical);
+  assert.equal((await f.state()).workers[writerId].paused, true);
+  // Explicit activation in the fixture removes the independent pause, not the decision record.
+  await f.supervisorCommand(`activate worker ${writerId}`);
+  assert.equal((await f.state()).workers[writerId].paused, false);
+  assert.deepEqual((await f.state()).dispositions[writerId], historical);
+
+  owner.answer('Apply F2 only.');
+  await assert.rejects(answerOwnerDecision(owner), /held, paused, or has unresolved work/);
+  assert.equal(writer.messages.length, 1);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], second);
+
+  await writer.emit('agent_start');
+  assert.equal((await writerObservation()).stop, null);
+  await assert.rejects(answerOwnerDecision(owner), /held, paused, or has unresolved work/);
+  assert.equal(writer.messages.length, 1);
+  writer.assistant('The prior concern is resolved. Ready for the selected follow-up.');
+  await writer.emit('agent_settled');
+  assert.notEqual((await writerObservation()).stop, historical.stop);
+  await answerOwnerDecision(owner);
+  assert.equal((await f.state()).ownerWaits[ownerId], undefined);
+  assert.deepEqual((await f.state()).dispositions[writerId], historical, 'retain the prior decision record');
+  assert.equal(writer.messages.length, 2);
+  assert.match(writer.messages[1][0].content, /\n\nApply F2 only\.$/);
+  for (const wait of [first, second])
+    assert.deepEqual(await readJson(join(f.root, `receipt-${wait.id}.json`)), { id: wait.id, status: 'sent' });
+});
+
 for (const [label, change, expected] of [
   ['cancelled prompt', async () => undefined],
   ['interrupted prompt', async ({ owner }) => { owner.raw('\u001b'); return 'Fix F1.'; }, /changed during input/],

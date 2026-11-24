@@ -7,6 +7,7 @@ import { ownerDecisionEvidence, readSupervisor, readObservation, isId } from './
 import { diagnostics } from './diagnostics.mjs';
 import { withWorkerHandoff } from './ownership.mjs';
 import { spawnPath } from './delegation.mjs';
+import { unresolvedDecisionAtStop } from './policy.mjs';
 
 // Never start this listener without an explicitly registered native worker session.
 export function receive(root, worker, pi, context, stopVersion, isHeld) {
@@ -32,14 +33,14 @@ export async function accept(root, worker, action, ctx, pi, stopVersion = () => 
   }
 }
 
-async function currentDecision(root, state, binding, intent) {
+async function currentDecision(root, state, binding, intent, stop) {
   if (intent.type !== 'owner-decision') return true;
   const owner = state.workers[intent.sourceWorkerId];
   const wait = state.ownerWaits[intent.sourceWorkerId];
   return owner?.role === 'owner' && !owner.paused && !state.routes[owner.route]?.paused &&
     binding?.recipient?.id === owner.coordinatorId && binding.recipient.sessionId === owner.sessionId &&
     intent.workerId === binding.workerId && wait?.kind === 'user' && wait.id === intent.id && wait.decisionId === intent.id &&
-    !state.inflight[binding.workerId] && state.dispositions[binding.workerId]?.action !== 'decision' &&
+    !state.inflight[binding.workerId] && !unresolvedDecisionAtStop(state.dispositions[binding.workerId], stop) &&
     isDeepStrictEqual(ownerDecisionEvidence(await readObservation(root, owner.workerId), owner), intent.evidence);
 }
 
@@ -55,7 +56,7 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
     return { accepted: false, reason: 'delegated assignment requires inspection' };
   if (JSON.stringify(binding?.handoff) !== JSON.stringify(handoff) ||
       observation.version !== version || observation.hold || isHeld() ||
-      !await ownerAlive(root, owner.token) || !await currentDecision(root, state, binding, intent))
+      !await ownerAlive(root, owner.token) || !await currentDecision(root, state, binding, intent, observation.stop))
     return { accepted: false, reason: 'stop changed or supervisor unavailable' };
   // Persist the one-use receipt, then recheck current state and stop generation.
   // The final eligibility check and message injection have no intervening await.
@@ -83,7 +84,7 @@ async function acceptOwned(root, worker, action, ctx, pi, stopVersion, isHeld, h
   const latestObservation = await readObservation(root, worker.workerId);
   const delegatedReady = !worker.delegationId ||
     (await readJson(spawnPath(root, worker.delegationId))).status === 'dispatched';
-  if (!delegatedReady || !await currentDecision(root, latest, latest.workers[worker.workerId], intent) ||
+  if (!delegatedReady || !await currentDecision(root, latest, latest.workers[worker.workerId], intent, latestObservation.stop) ||
       JSON.stringify(latest.workers?.[worker.workerId]?.handoff) !== JSON.stringify(handoff) ||
       latest.paused || latest.routes?.[binding.route]?.paused !== false ||
       latest.workers?.[worker.workerId]?.paused !== false || latest.ownerToken !== owner.token ||
