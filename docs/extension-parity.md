@@ -6,6 +6,14 @@ The delivery target is an ordinary Pi extension, loaded through Pi's normal exte
 
 The baseline comparison used the available local continuation workflow and its isolated adapter, not a claim of stronger guarantees than that workflow supplied.
 
+**Exact owner decision submission (P3/P4/P7):** One explicit native input in the
+waiting owner pane relays only the entered decision to the exact existing eligible
+writer. A confirmed receiver receipt releases only the matching owner wait.
+Ordinary chat, child notices, cancelled or stale input and independent pauses do
+not release it. An uncertain delivery remains fenced without replay. Legacy and
+unsubmitted cases retain their separate recovery path. This accepts terminal-input
+access as a trust boundary: an agent with that access can type the same answer.
+
 | Concern | Preserved contract |
 | --- | --- |
 | Identity | Explicit saved Pi session, terminal, pane, cwd and workspace; never follow a replacement automatically. |
@@ -230,7 +238,8 @@ An owner may durably declare `continuation_owner_wait` with named exact child ID
 a user-decision wait. Child wait suppresses repetitive owner-stop attention and only
 a matching child material notice wakes the owner; receipt and native stop checks
 remain intact. A user wait suppresses automatic wake, inherited child delegation
-and direct stale owner continuation. Human `/continuation-owner resume` confirmation
+and direct stale owner continuation. In the legacy recovery path, human
+`/continuation-owner resume` confirmation
 after the actual decision persists a release fence rather than flushing notices;
 only the following ordinary user-input turn's successful settlement clears it.
 Pending notices then deliver without preempting the selected instruction. Aborted
@@ -275,7 +284,7 @@ withdraws the exact worker from the active list while retaining identity, histor
 checkpoint, budgets, handled stops, receipts and notices; unresolved effects refuse
 Stop. Only a fresh explicit OWN-session Start/Return may rejoin. A pre-Stop start,
 independent pauses, holds, consumed stops and uncertainty cannot be bypassed by
-returning. Permanent replacement retirement remains distinct. Current source also places confirmed own-session hold clearing and exact-owner user-decision release in this menu. These reuse the existing distinct transitions, do not confer approval or activation, and keep the separate explicit decision release available for recovery where a single human decision submission has not been proven. Manual supervisor/worker setup and advanced delegation remain distinct. This extends the
+returning. Permanent replacement retirement remains distinct. Current source also places confirmed own-session hold clearing and exact-owner decision submission in this menu. It retains separate explicit release for legacy or unsubmitted waits. Neither path confers approval or activation. Manual supervisor/worker setup and advanced delegation remain distinct. This extends the
 human control surface within P1/P3/P4/P7, not the seven-scenario acceptance set.
 
 Display-only Herdr annotations reuse the existing Agents/Spaces views and native

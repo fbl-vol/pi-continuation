@@ -33,7 +33,7 @@ import { readJson } from './store.mjs';
  *   repair: Object<string, {stop: string, count: number, noticeId?: string, failure?: string}>,
  *   blocked: Object<string, {stop: string, sequence: number, handled?: boolean}>,
  *   notices: Object<string, Notice>, inflight: Object<string, {id: string, stop: string}>,
- *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null}>,
+ *   ownerWaits: Object<string, {kind: 'child'|'user'|'released', children?: string[], stop?: string|null, id?: string, decisionId?: string}>,
  *   closedAssignments: Object<string, {launchId: string, writerId: string, ownerToken?: string, at: string}>}} SupervisorState
  */
 
@@ -97,7 +97,9 @@ export function decodeSupervisor(record) {
         (wait.kind === 'child' ? !Array.isArray(wait.children) || !wait.children.length ||
           wait.children.some(child => !isId(child)) : wait.children !== undefined) ||
         (wait.kind === 'released' ? !(wait.stop === null || typeof wait.stop === 'string') :
-          wait.stop !== undefined)) invalid();
+          wait.stop !== undefined) ||
+        (wait.id !== undefined && (wait.kind !== 'user' || !isId(wait.id))) ||
+        (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId)))) invalid();
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
@@ -147,6 +149,17 @@ export function decodeSupervisor(record) {
   }
   state.schemaVersion = version || SCHEMA_VERSION;
   return state;
+}
+
+// Only an unchanged settled report (or its exact native-command typing witness)
+// can identify the current owner decision stop.
+export function ownerDecisionEvidence(observed, binding) {
+  const report = observed?.hold && observed.holdReason === 'typing' &&
+    observed.parkedReport?.stop === observed.commandReport?.stop ? observed.commandReport : observed;
+  if (!report?.hold && report?.outcome === 'completed' && report.stop && !observed.bootstrapPending &&
+      report.session.id === binding.sessionId && report.session.file === binding.sessionFile &&
+      report.session.leaf === observed.session.leaf)
+    return { stop: report.stop, leaf: report.session.leaf, version: observed.version };
 }
 
 export function newSupervisor() {

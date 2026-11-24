@@ -741,6 +741,17 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       return { workerId: worker.workerId, stop: commandReport.stop, version: stopVersion };
     },
     selectManagement(ctx, title, choices) { return promptsFor(ctx).select(title, choices); },
+    inputDecision(ctx, title) { return promptsFor(ctx).input(title); },
+    async finishDecisionCommand(ctx, evidence) {
+      // Do not clear a real hold, only the exact provisional typing fence for this command.
+      const typing = this.launchEvidence(ctx);
+      if (!typing || typing.stop !== evidence.stop || typing.version !== evidence.version) return;
+      const report = commandReport;
+      hold = false; holdReason = undefined; parkedReport = undefined;
+      commandReport = undefined; commandLeaf = undefined;
+      stopVersion++;
+      await observe(report, ctx);
+    },
     start: requestStart, clearHold,
     get confirming() { return prompts?.confirming === true; },
     get promptBlocked() { return !prompts?.intact || prompts.blocked; },

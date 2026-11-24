@@ -40,14 +40,15 @@ export async function startFixture(t, { blank = false, sessionManagerFactory, st
     const file = manager?.getSessionFile() ?? join(root, `${id}.jsonl`);
     const handlers = new Map(), commands = new Map(), tools = new Map(), input = new Set();
     const entries = [], messages = [], notifications = [], confirmations = [];
-    let leaf = 'initial', confirm = true, selection;
+    let leaf = 'initial', confirm = true, selection, answer;
     const ctx = { mode: 'tui', cwd: root, isIdle: () => true,
       sessionManager: manager ?? { getSessionId: () => id, getSessionFile: () => file,
         getLeafId: () => leaf, getBranch: () => entries, getEntries: () => entries,
         buildSessionProjection: () => ({ messages: entries.filter(e => e.type === 'message').map(e => e.message) }) },
       ui: { confirm: async (...args) => { confirmations.push(args); return typeof confirm === 'function' ? confirm(...args) : confirm; },
         select: async (...args) => typeof selection === 'function' ? selection(...args) : selection,
-        input: async () => undefined, editor: async () => undefined,
+        input: async (...args) => typeof answer === 'function' ? answer(...args) : answer,
+        editor: async () => undefined,
         custom: async () => undefined, onTerminalInput: fn => { input.add(fn); return () => input.delete(fn); },
         notify: (...args) => notifications.push(args) } };
     const append = entry => {
@@ -79,6 +80,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory, st
       messages, notifications, confirmations,
       confirm: value => { confirm = value; },
       select: value => { selection = value; },
+      answer: value => { answer = value; },
       raw: data => { for (const fn of input) fn(data); },
       user: text => append({ type: 'message', message: { role: 'user', content: text } }),
       assistant: (text, stopReason = 'stop') => append({ type: 'message',

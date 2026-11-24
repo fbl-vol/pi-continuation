@@ -1,18 +1,19 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
 import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 import { currentSession } from './session.mjs';
-import { readSupervisor, readObservation } from './contracts.mjs';
+import { ownerDecisionEvidence, readSupervisor, readObservation } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { snapshot, sameOccupant, isSettled } from './herdr.mjs';
 import { pinnedCheckpoint, coordinatorCandidate } from './bindings.mjs';
 import { checkpointHash } from './policy.mjs';
 
 export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env.HERDR_PANE_ID,
-  socketPath = process.env.HERDR_SOCKET_PATH, confirmOwner } = {}) {
+  socketPath = process.env.HERDR_SOCKET_PATH, confirmOwner, decisionUI } = {}) {
   let close;
   let coordinator;
   let generation = 0;
@@ -194,7 +195,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       } catch (error) { throw report('register', error); }
     },
   });
-  const ownerRequest = async (ctx, kind, children) => {
+  const ownerRequest = async (ctx, kind, children, decision) => {
     if (!coordinator || coordinator.role !== 'owner')
       throw new Error('Exact registered coordinating owner required');
     const state = await readSupervisor(root);
@@ -202,15 +203,15 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       w.coordinatorId === coordinator.id && w.sessionId === currentSession(ctx).id &&
       w.sessionFile === currentSession(ctx).file && w.paneId === paneId);
     if (!worker) throw new Error('Start supervision for this owner before setting its wait state');
-    const result = await sendAction(root, { type: 'owner-wait', kind, children,
+    const result = await sendAction(root, { type: 'owner-wait', kind, children, decision,
       workerId: worker.workerId, coordinatorId: coordinator.id,
-      sessionId: worker.sessionId, sessionFile: worker.sessionFile }, 'supervisor');
-    if (!result.accepted) throw new Error('Owner wait rejected; inspect exact supervision and decision state');
+      sessionId: worker.sessionId, sessionFile: worker.sessionFile }, 'supervisor', decision ? { timeoutMs: 15000 } : undefined);
+    if (!result.accepted) throw new Error(result.message ?? 'Owner wait rejected; inspect exact supervision and decision state');
     return result;
   };
   pi.registerTool({
     name: 'continuation_owner_wait', label: 'Wait as coordinating owner',
-    description: 'Record a supervised owner wait for named child worker IDs or a real user decision. Child notices wake only a child wait. A user wait requires explicit human release; this tool cannot release it.',
+    description: 'Record an owner wait for named children or a real user decision. Child notices wake only a child wait. For decisions, direct the user to /continuation-owner decide; this tool cannot release a decision.',
     parameters: Type.Object({ kind: Type.Union([Type.Literal('child'), Type.Literal('user')]),
       children: Type.Optional(Type.Array(Type.String())) }),
     async execute(_call, args, _signal, _update, ctx) {
@@ -227,10 +228,44 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     await ownerRequest(ctx, 'resume-user');
     ctx.ui.notify('User-decision wait awaits an ordinary user turn; send the selected instruction as user input', 'info');
   };
+  const submitDecision = async ctx => {
+    if (ctx.mode !== 'tui' || !decisionUI || coordinator?.role !== 'owner' || !ctx.isIdle())
+      throw new Error('Submit in the idle exact coordinating owner pane');
+    const session = currentSession(ctx);
+    await decisionUI.flushObservations();
+    const state = await readSupervisor(root);
+    const owner = Object.values(state.workers).find(w => w.role === 'owner' && w.coordinatorId === coordinator?.id &&
+      w.paneId === paneId && w.sessionId === session.id && w.sessionFile === session.file);
+    const wait = state.ownerWaits[owner?.workerId];
+    if (wait?.kind !== 'user' || !wait.id || wait.decisionId)
+      throw new Error('No fresh pending decision; inspect any earlier submission, or use explicit recovery for legacy waits');
+    if (state.paused || owner.paused || state.routes[owner.route]?.paused)
+      throw new Error('Owner supervision is paused');
+    const observed = await readObservation(root, owner.workerId);
+    const evidence = ownerDecisionEvidence(observed, owner);
+    if (!evidence || evidence.leaf !== session.leaf || evidence.version !== decisionUI.interactionVersion ||
+        (decisionUI.hold && !decisionUI.launchEvidence(ctx))) throw new Error('Owner decision stop is stale or held');
+    const answer = await decisionUI.inputDecision(ctx,
+      'Submit decision to the existing writer\nEnter the exact decision and scope, not a question. Escape cancels.');
+    if (answer === undefined) return;
+    if (!answer.trim() || Buffer.byteLength(JSON.stringify(answer)) > 4000)
+      throw new Error('Enter a nonempty decision of at most 4000 encoded bytes');
+    const stillCurrent = () => ctx.isIdle() && !decisionUI.promptBlocked && evidence.version === decisionUI.interactionVersion &&
+      isDeepStrictEqual(currentSession(ctx), session);
+    if (!stillCurrent()) throw new Error('Owner decision changed during input');
+    const id = randomUUID();
+    await claim(join(root, `decision-input-${id}.json`), { id, workerId: owner.workerId, coordinatorId: owner.coordinatorId,
+      sessionId: owner.sessionId, sessionFile: owner.sessionFile, waitId: wait.id, ownerToken: state.ownerToken, evidence, answer });
+    if (!stillCurrent()) throw new Error('Owner decision changed after capture; no delivery requested');
+    await ownerRequest(ctx, 'submit-decision', undefined, id);
+    await decisionUI.finishDecisionCommand(ctx, evidence);
+    ctx.ui.notify('Decision delivered to the existing writer; exact owner wait released.', 'info');
+  };
   pi.registerCommand('continuation-owner', {
-    description: 'Explicit user-decision release for existing owners: resume',
+    description: 'Submit the pending decision (decide) or explicitly release a legacy wait (resume)',
     handler: (args, ctx) => {
-      if (args.trim() !== 'resume') throw new Error('Usage: /continuation-owner resume');
+      if (args.trim() === 'decide') return submitDecision(ctx);
+      if (args.trim() !== 'resume') throw new Error('Usage: /continuation-owner decide | resume');
       return releaseDecision(ctx);
     },
   });
@@ -238,5 +273,5 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     await close?.(); close = undefined;
   });
-  return { registerOwner: (ctx, id) => register(ctx, id, true), releaseDecision };
+  return { registerOwner: (ctx, id) => register(ctx, id, true), releaseDecision, submitDecision };
 }

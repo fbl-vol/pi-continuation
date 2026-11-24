@@ -1744,6 +1744,137 @@ test('P1 an existing ordinary worker cannot silently upgrade into a coordinating
   assert.equal((await f.state()).workers[f.workerId()].role, undefined);
 });
 
+const answerOwnerDecision = owner => owner.command('continuation-owner', 'decide');
+async function decisionFixture(t) {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
+  const owner = f.children[0].native;
+  const ownerId = (await f.attempt()).workerId;
+  const writerId = (await owner.spawn(task)).details.workerId;
+  const writer = f.children[1].native;
+  await owner.wait({ kind: 'user' });
+  for (const [native, reply] of [[owner, 'Choose F1 or F2.'], [writer, 'Review preparation complete.']]) {
+    native.assistant(reply);
+    await native.emit('agent_settled');
+  }
+  return { f, owner, ownerId, writer, writerId };
+}
+
+test('P3/P4/P7 native owner decision input relays the exact answer once to the same writer', async t => {
+  const { f, owner, ownerId, writer } = await decisionFixture(t);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  await f.supervisor.emit('session_shutdown');
+  const saved = await f.state();
+  saved.routes.unrelated = { paused: true };
+  await atomicJson(join(f.root, 'supervisor.json'), saved);
+  await f.supervisorCommand('start');
+  owner.raw('/'); // Native command typing fences the prior report without discarding it.
+  owner.answer(title => {
+    assert.match(title, /existing writer/);
+    return 'Fix F1 only; leave F2 unchanged.';
+  });
+  await answerOwnerDecision(owner);
+  assert.equal((await f.state()).ownerWaits[ownerId], undefined);
+  assert.equal((await f.state()).routes.unrelated.paused, true);
+  assert.equal(writer.messages.length, 1);
+  assert.match(writer.messages[0][0].content, /\n\nFix F1 only; leave F2 unchanged\.$/);
+  assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
+  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
+  assert.equal(writer.messages.length, 1);
+});
+
+test('P3/P7 a historical writer decision does not block a second selected owner decision cycle', async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t);
+  const writerObservation = () => readJson(join(f.root, `observation-${writerId}.json`));
+  const first = (await f.state()).ownerWaits[ownerId];
+  owner.answer('Apply F1 only.');
+  await answerOwnerDecision(owner);
+  await writer.emit('agent_start');
+  writer.assistant('F1 is complete. F2 still needs a decision.');
+  await writer.emit('agent_settled');
+  const stopped = await writerObservation();
+  await owner.wait({ kind: 'user' });
+  const second = (await f.state()).ownerWaits[ownerId];
+  assert.notEqual(second.id, first.id);
+  await f.supervisor.dispose({ workerId: writerId, stop: stopped.stop, action: 'notify', kind: 'decision',
+    evidence: 'F2 still needs a decision.' });
+  const historical = { action: 'decision', stop: stopped.stop };
+  assert.deepEqual((await f.state()).dispositions[writerId], historical);
+  assert.equal((await f.state()).workers[writerId].paused, true);
+  // Explicit activation in the fixture removes the independent pause, not the decision record.
+  await f.supervisorCommand(`activate worker ${writerId}`);
+  assert.equal((await f.state()).workers[writerId].paused, false);
+  assert.deepEqual((await f.state()).dispositions[writerId], historical);
+
+  owner.answer('Apply F2 only.');
+  await assert.rejects(answerOwnerDecision(owner), /held, paused, or has unresolved work/);
+  assert.equal(writer.messages.length, 1);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], second);
+
+  await writer.emit('agent_start');
+  assert.equal((await writerObservation()).stop, null);
+  await assert.rejects(answerOwnerDecision(owner), /held, paused, or has unresolved work/);
+  assert.equal(writer.messages.length, 1);
+  writer.assistant('The prior concern is resolved. Ready for the selected follow-up.');
+  await writer.emit('agent_settled');
+  assert.notEqual((await writerObservation()).stop, historical.stop);
+  await answerOwnerDecision(owner);
+  assert.equal((await f.state()).ownerWaits[ownerId], undefined);
+  assert.deepEqual((await f.state()).dispositions[writerId], historical, 'retain the prior decision record');
+  assert.equal(writer.messages.length, 2);
+  assert.match(writer.messages[1][0].content, /\n\nApply F2 only\.$/);
+  for (const wait of [first, second])
+    assert.deepEqual(await readJson(join(f.root, `receipt-${wait.id}.json`)), { id: wait.id, status: 'sent' });
+});
+
+for (const [label, change, expected] of [
+  ['cancelled prompt', async () => undefined],
+  ['interrupted prompt', async ({ owner }) => { owner.raw('\u001b'); return 'Fix F1.'; }, /changed during input/],
+  ['unrelated input', async ({ owner }) => { await owner.emit('input', { source: 'interactive', text: 'What is F1?' }); return 'Fix F1.'; }, /changed during input/],
+  ['pause during input', async ({ f, writerId }) => { await f.supervisorCommand(`pause worker ${writerId}`); return 'Fix F1.'; }, /held, paused/],
+  ['changed assignment stop', async ({ owner }) => { owner.user('Different message'); return 'Fix F1.'; }, /changed during input/],
+]) test(`P3/P4/P7 owner decision does not release on ${label}`, async t => {
+  const fixture = await decisionFixture(t);
+  const { f, owner, ownerId, writer } = fixture;
+  const wait = (await f.state()).ownerWaits[ownerId];
+  owner.answer(() => change(fixture));
+  if (expected) await assert.rejects(answerOwnerDecision(owner), expected);
+  else await answerOwnerDecision(owner);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+  assert.equal(writer.messages.length, 0);
+});
+
+test('P3 model messages and a submit request without native capture cannot answer an owner wait', async t => {
+  const { f, owner, ownerId, writer } = await decisionFixture(t);
+  const state = await f.state();
+  const binding = state.workers[ownerId];
+  const wait = state.ownerWaits[ownerId];
+  await owner.emit('input', { source: 'extension', text: 'Fix F1.' });
+  await owner.emit('before_agent_start', { messageType: 'user', prompt: 'Fix F1.' });
+  const response = await sendAction(f.root, { type: 'owner-wait', kind: 'submit-decision',
+    workerId: ownerId, coordinatorId: binding.coordinatorId, sessionId: binding.sessionId, sessionFile: binding.sessionFile,
+    decision: { waitId: wait.id, answer: 'Fix F1.' } }, 'supervisor');
+  assert.equal(response.accepted, false);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+  assert.equal(writer.messages.length, 0);
+});
+
+test('P7 uncertain decision delivery retains the exact wait and prevents resend after restart', async t => {
+  const { f, owner, ownerId, writer } = await decisionFixture(t);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const send = writer.pi.sendMessage;
+  writer.pi.sendMessage = (...args) => { send(...args); throw new Error('Synthetic failure after invocation'); };
+  owner.answer('Fix F1 only.');
+  await assert.rejects(answerOwnerDecision(owner), /unconfirmed; wait retained/);
+  assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'accepted');
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { ...wait, decisionId: wait.id });
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
+  await assert.rejects(owner.command('continuation-owner', 'resume'), /Owner wait rejected/);
+  assert.equal(writer.messages.length, 1);
+});
+
 test('P3 owner child wait persists; user selection gate blocks child notices and delegation', async t => {
   const f = await fixture(t);
   await f.worker.command('continuation-coordinator', 'owner');
@@ -1753,7 +1884,7 @@ test('P3 owner child wait persists; user selection gate blocks child notices and
   await f.worker.wait({ kind: 'child', children: [child.workerId] });
   assert.deepEqual((await f.state()).ownerWaits[f.workerId()], { kind: 'child', children: [child.workerId] });
   await f.worker.wait({ kind: 'user' });
-  assert.deepEqual((await f.state()).ownerWaits[f.workerId()], { kind: 'user' });
+  assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'user');
   f.worker.assistant('Waiting for the actual user selection.');
   await f.worker.emit('agent_settled');
   const waitingStop = (await readJson(join(f.root, `observation-${f.workerId()}.json`))).stop;

@@ -48,8 +48,19 @@ waiting so it cannot be nudged again when the wait ends; this is not assignment
 completion. A matching material notice consumes a child wait only after the
 existing receipt confirms delivery. A user wait defers all notices to that owner
 and rejects further delegation, including inherited already-dispatched children.
-Direct owner continuation is refused at the disposition and effect boundary. The
-confirmed own-session `/continuation-owner resume` records a durable release
+Direct owner continuation is refused at the disposition and effect boundary.
+**Submit owner decision** (`/continuation-owner decide`) captures the exact entered
+text, bound to the current owner, assignment, wait ID and settled stop. The
+supervisor checks the exact existing writer, records a one-use relay intent, and
+releases only that wait after the writer receiver confirms delivery. This uses
+native owner-pane input, not a human-origin guarantee: agents with terminal-input
+access can type the same response. Chat, model tool calls and notices do not
+stand in for the native decision input. Cancelled or interrupted input does not
+release the wait; an uncertain relay retains the fence and cannot be retried
+through the legacy path. Use matching extension versions in participating sessions.
+
+For legacy or unsubmitted waits, the confirmed own-session
+`/continuation-owner resume` records a durable release
 fence after the user has supplied the decision; it does not flush pending notices.
 Only a subsequent ordinary interactive/RPC user turn that completes without a
 hold clears that fence, after which pending notices may deliver. Aborted/held
@@ -82,7 +93,7 @@ owner endpoint revalidates these under the worker ownership mutex and serializes
 the durable transition. This IPC accepts only Pause and Stop, never activation or
 hold-clear. Loss/uncertainty is inspection work, not replay permission. Native own
 Return and supervisor-global controls reuse the existing confirmed start/control
-paths; another session cannot remotely clear a worker's hold. Current-source `/continuation` exposes the existing guarded own-session Clear hold only for that exact held worker, and the existing confirmed user-decision release only for the exact owner with a user wait. Clear does not approve, activate or replay a report; decision release still requires the actual human selection followed by an ordinary user turn. The advanced explicit owner-resume command remains available while single-submission decision provenance is unresolved. Manual supervisor/worker setup, scoped delegation and supervisor route/worker recovery retain their distinct controls rather than becoming implicit launch effects.
+paths; another session cannot remotely clear a worker's hold. Current-source `/continuation` exposes the existing guarded own-session Clear hold only for that exact held worker, and decision controls only for the exact owner with an eligible user wait. Clear does not approve, activate or replay a report; native submission relays the actual decision once, and explicit owner-resume remains a separate recovery path. Manual supervisor/worker setup, scoped delegation and supervisor route/worker recovery retain their distinct controls rather than becoming implicit launch effects.
 
 Pause stays in the active list. Retained Stop keeps the worker binding and keyed
 history but marks it stopped/paused and withdraws it from active attention/listing.
