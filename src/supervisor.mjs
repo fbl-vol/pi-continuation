@@ -8,7 +8,8 @@ import { ensureRoot, defaultRoot, readJson, atomicJson, claim, release } from '.
 import { sameOccupant, snapshot, isSettled, request as herdrRequest } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
-import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid } from './contracts.mjs';
+import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid,
+  selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
   endedSupervisorPath, spawnPath } from './delegation.mjs';
@@ -504,6 +505,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         decision.ownerToken !== state.ownerToken || typeof decision.answer !== 'string' ||
         !decision.answer.trim() || Buffer.byteLength(JSON.stringify(decision.answer)) > 4000)
       return refuse('Decision wait changed or already submitted; do not replay');
+    const fromChat = decision.chatReply !== undefined;
+    if (fromChat && selectedReviewFinding(decision.chatReply, wait.findings) !== decision.answer)
+      return refuse('The chat reply does not select a finding from the exact pending question');
     const evidence = ownerDecisionEvidence(await readObservation(root, owner.workerId), owner);
     if (!evidence || !isDeepStrictEqual(evidence, decision.evidence)) return refuse('Owner decision stop changed');
     const writers = [];
@@ -546,7 +550,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
     if (state.handled[owner.workerId] !== evidence.stop)
       recordDisposition(state, owner.workerId, evidence.stop, 'acknowledge');
-    delete state.ownerWaits[owner.workerId];
+    if (fromChat) state.ownerWaits[owner.workerId] = { kind: 'child', children: [writer.workerId] };
+    else delete state.ownerWaits[owner.workerId];
     await commit();
     return { accepted: true };
   }
@@ -580,9 +585,14 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         return { accepted: false };
       delete state.ownerWaits[request.workerId];
     } else if (request.kind === 'user') {
-      if (state.ownerWaits[request.workerId]?.kind === 'released') return { accepted: false };
-      if (state.ownerWaits[request.workerId]?.kind === 'user') return { accepted: true };
-      state.ownerWaits[request.workerId] = { kind: 'user', id: randomUUID() };
+      const pending = state.ownerWaits[request.workerId];
+      if (request.findings !== undefined && !validReviewFindings(request.findings))
+        return { accepted: false, message: 'Provide between one and ten bounded, nonempty findings' };
+      if (pending?.kind === 'released') return { accepted: false };
+      if (pending?.kind === 'user') return request.findings === undefined || isDeepStrictEqual(pending.findings, request.findings) ?
+        { accepted: true } : { accepted: false, message: 'The original decision question is still pending' };
+      state.ownerWaits[request.workerId] = { kind: 'user', id: randomUUID(),
+        ...(request.findings && { findings: request.findings }) };
     } else if (request.kind === 'child' && Array.isArray(request.children) && request.children.length &&
         request.children.every(id => uuid(id) && state.workers[id]?.recipient?.id === recipient.id &&
           state.workers[id]?.recipient?.sessionId === recipient.sessionId)) {

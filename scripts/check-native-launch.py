@@ -52,8 +52,10 @@ class Model(BaseHTTPRequestHandler):
             except (ValueError, KeyError, TypeError):
                 self.send_error(400, 'Unexpected fixture spawn result')
                 return
-            tool = ('continuation_owner_wait', dict(kind='user') if self.server.owner_decision else
-                    dict(kind='child', children=[worker]))
+            wait = dict(kind='user') if self.server.owner_decision else dict(kind='child', children=[worker])
+            if self.server.owner_chat:
+                wait['findings'] = ['Correct the synthetic index.', 'Correct the synthetic label.']
+            tool = ('continuation_owner_wait', wait)
         # Keep the writer working while the owner settles; keep the existing
         # pre-response assertion of the exact owner startup receipt as well.
         gate = (self.server.allow_recovery if (self.server.owner_decision and attention) or
@@ -129,9 +131,10 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
-        owner_decision, owner_decision_negative):
+        owner_decision, owner_decision_negative, owner_chat, pi_version):
     model.reviewer_recovery = reviewer_recovery
-    model.owner_decision = owner_decision or owner_decision_negative
+    model.owner_chat = owner_chat
+    model.owner_decision = owner_decision or owner_decision_negative or owner_chat
     herdr = shutil.which('herdr')
     pi = shutil.which('pi')
     if not herdr or not pi:
@@ -152,7 +155,7 @@ def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, p
             raise RuntimeError(f'{args}: {proc.stdout} {proc.stderr}')
         return json.loads(proc.stdout)['result'] if proc.stdout.strip().startswith('{') else None
 
-    for binary, expected in ((herdr, '0.9.5'), (pi, '1.5.2')):
+    for binary, expected in ((herdr, '0.9.5'), (pi, pi_version)):
         version = subprocess.check_output([binary, '--version'], cwd=work, env=env, text=True).strip()
         if version.split()[-1] != expected:
             raise RuntimeError(f'Expected {expected} for {binary}; got {version}')
@@ -433,6 +436,18 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('exact writer idle', lambda: cli('agent', 'get', writer)['agent']['agent_status'] in ('idle', 'done'))
                 writer_state = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
                 assert writer_state['paused'] == owner_decision_negative, writer_state
+                if owner_chat:
+                    cli('agent', 'prompt', owner['paneId'], 'fix the first only')
+                    receipt_path = state_dir/f"receipt-{wait['id']}.json"
+                    until('chat selection receipt', lambda: receipt_path.exists() and
+                          json.loads(receipt_path.read_text())['status'] == 'sent')
+                    session_file = Path(writer_binding['sessionFile'])
+                    until('writer received the first finding', lambda: 'Correct the synthetic index.' in session_file.read_text())
+                    assert 'Correct the synthetic label.' not in session_file.read_text()
+                    until('owner waits for the existing writer', lambda: json.loads(state_path.read_text())['ownerWaits'].get(owner['workerId']) ==
+                          {'kind': 'child', 'children': [writer_attempt['workerId']]})
+                    print('Native owner chat passed: clarification kept the wait; one ordinary reply sent only finding 1', flush=True)
+                    return
                 cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
                 until('exact native owner decision prompt', lambda: 'Submit decision to the existing writer' in visible(owner['paneId']))
                 decision = 'Fix synthetic F1 only; leave F2 unchanged.'
@@ -637,6 +652,8 @@ if __name__ == '__main__':
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
+    parser.add_argument('--owner-chat', action='store_true', help='clarify, then select one finding via ordinary owner chat')
+    parser.add_argument('--pi-version', default='1.5.2', help='exact expected Pi version on PATH')
     args = parser.parse_args()
     if args.evidence:
         args.evidence.mkdir(parents=True, exist_ok=True)
@@ -650,6 +667,7 @@ if __name__ == '__main__':
             run(Path(temp), model, args.package.resolve(), args.baseline, args.evidence,
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
-                args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative)
+                args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
+                args.owner_chat, args.pi_version)
         finally:
             model.shutdown()

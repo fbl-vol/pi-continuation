@@ -1,5 +1,22 @@
 # Validation evidence and limits
 
+## Ordinary owner-chat selection from a package artifact
+
+On Linux with Pi 1.6.0 and Herdr 0.9.5:
+
+```sh
+artifact_dir=$(mktemp -d)
+npm pack --pack-destination "$artifact_dir"
+tar -xzf "$artifact_dir"/*.tgz -C "$artifact_dir"
+python3 scripts/check-native-launch.py --pi-version 1.6.0 --owner-chat --package "$artifact_dir/package"
+```
+
+This starts ordinary Pi sessions under a disposable profile and Herdr server with a
+scripted local model. It checks that a clarification leaves the wait in place and
+that one ordinary reply delivers only finding 1 to the existing writer. It does
+not check independent semantic review, a real model's conversational choices,
+release installation in a user profile, or automatic assignment rollover.
+
 [extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
 Tests/reviews verify it; they do not create requirements. Owner completion is not
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,

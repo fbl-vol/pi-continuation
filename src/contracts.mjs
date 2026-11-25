@@ -51,6 +51,21 @@ function format(record, supervisor = false) {
   return record.schemaVersion;
 }
 
+export function validReviewFindings(findings) {
+  return Array.isArray(findings) && findings.length > 0 && findings.length <= 10 &&
+    findings.every(finding => typeof finding === 'string' && finding.trim() &&
+      Buffer.byteLength(JSON.stringify(finding)) <= 3000);
+}
+
+export function selectedReviewFinding(text, findings) {
+  if (typeof text !== 'string' || !validReviewFindings(findings)) return undefined;
+  const words = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+  const match = /^fix (?:only )?(?:the )?(?:(?:finding |f)(10|[1-9])|([a-z]+)(?: finding)?)(?: only)?[.!]?$/i.exec(text.trim());
+  if (!match) return undefined;
+  const number = match[1] ? Number(match[1]) : words.indexOf(match[2].toLowerCase()) + 1;
+  if (findings[number - 1]) return `Fix finding ${number} only:\n${findings[number - 1]}`;
+}
+
 /** Normalize known legacy records without mutating the caller's retained snapshot. */
 export function decodeSupervisor(record) {
   const version = format(record, true);
@@ -99,6 +114,7 @@ export function decodeSupervisor(record) {
         (wait.kind === 'released' ? !(wait.stop === null || typeof wait.stop === 'string') :
           wait.stop !== undefined) ||
         (wait.id !== undefined && (wait.kind !== 'user' || !isId(wait.id))) ||
+        (wait.findings !== undefined && (wait.kind !== 'user' || !wait.id || !validReviewFindings(wait.findings))) ||
         (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId)))) invalid();
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.

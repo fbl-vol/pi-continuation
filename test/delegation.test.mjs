@@ -1770,20 +1770,61 @@ test('P1 an existing ordinary worker cannot silently upgrade into a coordinating
 });
 
 const answerOwnerDecision = owner => owner.command('continuation-owner', 'decide');
-async function decisionFixture(t) {
+async function decisionFixture(t, findings) {
   const f = await fixture(t);
   await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
   const owner = f.children[0].native;
   const ownerId = (await f.attempt()).workerId;
   const writerId = (await owner.spawn(task)).details.workerId;
   const writer = f.children[1].native;
-  await owner.wait({ kind: 'user' });
+  await owner.wait({ kind: 'user', findings });
   for (const [native, reply] of [[owner, 'Choose F1 or F2.'], [writer, 'Review preparation complete.']]) {
     native.assistant(reply);
     await native.emit('agent_settled');
   }
   return { f, owner, ownerId, writer, writerId };
 }
+
+test('owner chat keeps the pending question on clarification or synthetic input and relays one exact finding', async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.', 'Correct the label.']);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const reply = async (source, text) => {
+    await owner.emit('input', { source, text });
+    await owner.emit('before_agent_start', { messageType: 'user', prompt: text });
+    await owner.emit('agent_start');
+    owner.assistant('Reply received.');
+    await owner.emit('agent_settled', { aborted: false });
+  };
+  for (const [source, text] of [['interactive', 'What would fixing the first change?'],
+    ['extension', 'fix the first only'], ['rpc', 'fix the first only']]) {
+    await reply(source, text);
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+    assert.equal(writer.messages.length, 0);
+  }
+  await assert.rejects(owner.wait({ kind: 'user', findings: ['Different finding.'] }), /original decision question/);
+  await reply('interactive', 'fix the first only');
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [writerId] });
+  assert.equal(writer.messages.length, 1);
+  assert.match(writer.messages[0][0].content, /Fix finding 1 only:\nCorrect the index\.$/);
+  assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
+  await reply('interactive', 'fix the first only');
+  assert.equal(writer.messages.length, 1);
+});
+
+for (const aborted of [true, false]) test(`owner chat retains wait after ${aborted ? 'aborted turn' : 'independent writer pause'}`, async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.']);
+  if (!aborted) await f.supervisorCommand(`pause worker ${writerId}`);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const text = 'fix the first only';
+  await owner.emit('input', { source: 'interactive', text });
+  await owner.emit('before_agent_start', { messageType: 'user', prompt: text });
+  await owner.emit('agent_start');
+  if (!aborted) owner.assistant('Reply received.');
+  await owner.emit('agent_settled', { aborted });
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+  assert.equal(writer.messages.length, 0);
+  await assert.rejects(readJson(join(f.root, `receipt-${wait.id}.json`)), { code: 'ENOENT' });
+});
 
 test('P3/P4/P7 native owner decision input relays the exact answer once to the same writer', async t => {
   const { f, owner, ownerId, writer } = await decisionFixture(t);
