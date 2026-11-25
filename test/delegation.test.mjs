@@ -1069,7 +1069,7 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
-for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer decision', 'unnamed', 'legacy mismatch', 'legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer decision', 'older supervisor with reviewer decision', 'unnamed', 'legacy mismatch', 'legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
   test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
   const closedPanes = [];
   let interrupt = outcome.startsWith('interrupted');
@@ -1099,7 +1099,7 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   });
   const reviewerDecision = { action: 'decision', stop: outcome === 'current reviewer decision' ?
     reviewed.workerId : 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
-  if (['past reviewer decision', 'current reviewer decision', 'sending notice'].includes(outcome))
+  if (outcome.endsWith('reviewer decision') || outcome === 'sending notice')
     state.dispositions[reviewed.workerId] = reviewerDecision;
   for (const binding of [owner, state.workers[oldWriter], reviewed]) {
     binding.paused = true;
@@ -1226,12 +1226,13 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   }
   let oldEndpoint;
   let oldWorkerStarts = 0;
-  if (outcome === 'legacy mismatch') {
+  if (outcome === 'legacy mismatch' || outcome === 'older supervisor with reviewer decision') {
     const token = (await f.state()).ownerToken;
     await f.supervisor.emit('session_shutdown');
     oldEndpoint = net.createServer(socket => socket.once('data', data => {
       const line = data.toString().trim();
-      if (line === token) return socket.end(token + '\n');
+      if (line === token || (outcome === 'older supervisor with reviewer decision' &&
+          line === `${token}:launch-abandon-assignment`)) return socket.end(line + '\n');
       try { JSON.parse(line); oldWorkerStarts++; } catch { /* Older ownerServer rejects non-JSON before dispatch. */ }
       socket.end('invalid\n');
     }));
@@ -1254,6 +1255,7 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
       `--options {"closeAssignment":"${oldGrant}"} -- ${nextScope}`);
   const legacyRefusal = {
     'legacy mismatch': /does not support assignment abandonment/,
+    'older supervisor with reviewer decision': /does not support assignment abandonment/,
     'legacy held post-request': /Prior owner launch has no proved pre-effect refusal|Unresolved checkout launch|Unresolved owner launch fence/,
     'legacy receipt': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
     'legacy unknown failure': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
@@ -1263,7 +1265,13 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   if (legacyRefusal) {
     await assert.rejects(startB(), legacyRefusal);
     assert.equal(choices, 0);
-    if (outcome === 'legacy mismatch') assert.equal(oldWorkerStarts, 0);
+    if (oldEndpoint) {
+      assert.equal(oldWorkerStarts, 0);
+      const attempts = await Promise.all((await f.attempts()).map(path => readJson(join(f.root, path))));
+      const refused = attempts.find(attempt => attempt.task.endsWith(nextScope));
+      assert.equal(refused.status, 'preflight-refused');
+      assert.notEqual(refused.closeRequested, true);
+    }
     assert.equal(f.children.length, 3);
     assert.deepEqual((await f.state()).notices, notices);
     assert.equal((await readJson(oldGrantPath)).revoked, false);

@@ -1287,17 +1287,22 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     } else if (retry && !retryAbandonAssignment && !confirmedRetry) await save('prepared');
     const oldId = retryAbandonAssignment ?? authority.grant.closeAssignment;
     if (ownerLaunch && oldId) {
+      let candidate;
       if (retryAbandonAssignment || authority.grant.abandonAssignment) {
+        let historicalReviewerDecision = false;
+        if (!resumingClose) {
+          const old = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
+          candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
+            await readLive(), readPane, readLive, id);
+          historicalReviewerDecision = candidate.bindings.some(w => old.dispositions[w.workerId]?.action === 'decision');
+        }
         let supported = false;
-        try { supported = await supportsAssignmentAbandonment(root, authority.grant.ownerToken); }
+        try { supported = await supportsAssignmentAbandonment(root, authority.grant.ownerToken, historicalReviewerDecision); }
         catch { /* An unknown endpoint is not evidence of support. */ }
-        if (!supported) refuse('Running supervisor does not support assignment abandonment; reload or restart the supervisor session before confirming. Reload this planning session if it still uses older code.');
+        if (!supported) refuse('Running supervisor does not support assignment abandonment for this set; reload or restart the supervisor session before confirming. Reload this planning session if it still uses older code.');
       }
       let confirmedSelection;
-      if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
-        const old = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
-        const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
-          await readLive(), readPane, readLive, id);
+      if (candidate) {
         confirmedSelection = abandonmentSelection(candidate);
         if (confirmedRetry) {
           if (!matchesAbandonmentSelection(authority.grant.confirmedRetryAbandonment, candidate))
