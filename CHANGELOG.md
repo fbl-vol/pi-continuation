@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.6] - 2026-11-25
+
+- Persist **Ask First** or **Automatic** for review fixes alongside the other
+  delivery preferences. Ask First remains the default, and old ineffective
+  `Automatically Fix` values do not turn on automation during upgrade.
+- Expose the saved choice to compatible owner guidance. The extension does not
+  dispatch fixes by itself; mandatory human selection and existing waits still
+  apply. Older releases cannot read newly saved `Automatic` values on rollback.
+
 ## [0.7.5] - 2026-11-24
 
 - Use **Submit owner decision** in the exact waiting owner pane to enter a
