@@ -11,6 +11,7 @@ import { isId, newSupervisor, readObservation, readSupervisor } from './contract
 import { deliveryFields, reviewFixPreferenceGuidance, readAssignmentDeliveryPreferences,
   readDeliveryPreferences } from './preferences.mjs';
 import { currentSession } from './session.mjs';
+import { unresolvedDecisionAtStop } from './policy.mjs';
 import { agreedLaunchScope } from './checkpoint.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
 import { listenJson, ownerAlive, sendAction, supportsAssignmentAbandonment } from './ipc.mjs';
@@ -823,15 +824,16 @@ async function abandonmentCandidate(root, checkout, oldId, state, live, readPane
     try { tree = await checkoutRoot(binding.cwd); }
     catch { refuse(`Worker ${binding.workerId} checkout cannot be verified`); }
     if (tree !== checkout) continue;
-    if (!binding.paused || state.inflight[binding.workerId] || state.ownerWaits[binding.workerId] ||
-        state.dispositions[binding.workerId]?.action === 'decision')
+    if (!binding.paused || state.inflight[binding.workerId] || state.ownerWaits[binding.workerId])
       refuse(`Worker ${binding.workerId} has active authority or an unresolved effect`);
     if (binding.role === 'owner' && binding.coordinatorId !== oldId)
       refuse(`Worker ${binding.workerId} belongs to another owner grant`);
+    let reviewer = false;
     if (binding.delegationId) {
       const child = await readJson(spawnPath(root, binding.delegationId));
       if (child.grantId !== oldId || child.workerId !== binding.workerId || child.status !== 'dispatched')
         refuse(`Worker ${binding.workerId} has independent or unfinished delegation authority`);
+      reviewer = child.role === 'read-only' && binding.recipient?.id === oldId;
     }
     const saved = await readJson(join(root, `worker-${binding.workerId}.json`));
     const observed = await readObservation(root, binding.workerId);
@@ -839,6 +841,12 @@ async function abandonmentCandidate(root, checkout, oldId, state, live, readPane
         !sameSession(observed.session, binding) || observed.bootstrapPending ||
         !await absentSession(binding, live, readPane, readSnapshot))
       refuse(`Worker ${binding.workerId} identity, startup or absence is unverified`);
+    // Retiring an absent reviewer with a different settled stop does not answer
+    // the previous decision. Keep the disposition and all delivery history.
+    const disposition = state.dispositions[binding.workerId];
+    if (disposition?.action === 'decision' && (!reviewer || observed.outcome !== 'completed' ||
+        observed.hold || unresolvedDecisionAtStop(disposition, observed.stop)))
+      refuse(`Worker ${binding.workerId} has active authority or an unresolved effect`);
     bindings.push(binding);
   }
   if (!bindings.some(w => w.workerId === owner.workerId) ||
@@ -1279,17 +1287,22 @@ export async function spawnDelegated({ root, socketPath, paneId, ctx, reference,
     } else if (retry && !retryAbandonAssignment && !confirmedRetry) await save('prepared');
     const oldId = retryAbandonAssignment ?? authority.grant.closeAssignment;
     if (ownerLaunch && oldId) {
+      let candidate;
       if (retryAbandonAssignment || authority.grant.abandonAssignment) {
+        let historicalReviewerDecision = false;
+        if (!resumingClose) {
+          const old = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
+          candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
+            await readLive(), readPane, readLive, id);
+          historicalReviewerDecision = candidate.bindings.some(w => old.dispositions[w.workerId]?.action === 'decision');
+        }
         let supported = false;
-        try { supported = await supportsAssignmentAbandonment(root, authority.grant.ownerToken); }
+        try { supported = await supportsAssignmentAbandonment(root, authority.grant.ownerToken, historicalReviewerDecision); }
         catch { /* An unknown endpoint is not evidence of support. */ }
-        if (!supported) refuse('Running supervisor does not support assignment abandonment; reload or restart the supervisor session before confirming. Reload this planning session if it still uses older code.');
+        if (!supported) refuse('Running supervisor does not support assignment abandonment for this set; reload or restart the supervisor session before confirming. Reload this planning session if it still uses older code.');
       }
       let confirmedSelection;
-      if ((retryAbandonAssignment || authority.grant.abandonAssignment) && !resumingClose) {
-        const old = (await delegationAuthority(root, reference, parent, commandEvidence)).state;
-        const candidate = await abandonmentCandidate(root, authority.grant.checkout, oldId, old,
-          await readLive(), readPane, readLive, id);
+      if (candidate) {
         confirmedSelection = abandonmentSelection(candidate);
         if (confirmedRetry) {
           if (!matchesAbandonmentSelection(authority.grant.confirmedRetryAbandonment, candidate))

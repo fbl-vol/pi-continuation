@@ -1069,7 +1069,7 @@ async function settledAssignment(t, options) {
   return { f, oldGrant, oldWriter, writer };
 }
 
-for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
+for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer decision', 'older supervisor with reviewer decision', 'unnamed', 'legacy mismatch', 'legacy refusal retry', 'legacy held post-request', 'legacy confirmed restart', 'legacy changed set', 'legacy competing fence', 'legacy receipt', 'legacy unknown failure', 'cancel', 'reappear', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant', 'interrupted', 'interrupted-state', 'interrupted-grant', 'interrupted-competing', 'interrupted-restart']) {
   test(`P1/P3/P6/P7 exact-set abandonment ${outcome}`, async t => {
   const closedPanes = [];
   let interrupt = outcome.startsWith('interrupted');
@@ -1097,6 +1097,10 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
     session: { id: reviewed.sessionId, file: reviewed.sessionFile }, stop: reviewed.workerId,
     outcome: 'completed', finalReply: 'Reviewed fixture.', hold: false,
   });
+  const reviewerDecision = { action: 'decision', stop: outcome === 'current reviewer decision' ?
+    reviewed.workerId : 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+  if (outcome.endsWith('reviewer decision') || outcome === 'sending notice')
+    state.dispositions[reviewed.workerId] = reviewerDecision;
   for (const binding of [owner, state.workers[oldWriter], reviewed]) {
     binding.paused = true;
     closedPanes.push(binding.paneId);
@@ -1128,11 +1132,14 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
   // per-tree claim; the old grant is the witness tying it to this checkout.
   const treeClaim = join(f.root, `delegation-writer-${createHash('sha256').update(f.root).digest('hex')}.json`);
   const legacy = join(f.root, '.git');
-  const legacyClaim = join(f.root, `delegation-writer-${createHash('sha256').update(legacy).digest('hex')}.json`);
-  await atomicJson(legacyClaim, await readJson(treeClaim));
-  await rm(treeClaim);
+  const modernClaim = outcome.endsWith('reviewer decision');
+  const legacyClaim = modernClaim ? treeClaim : join(f.root, `delegation-writer-${createHash('sha256').update(legacy).digest('hex')}.json`);
   const oldGrantPath = join(f.root, `delegation-${oldGrant}.json`);
-  await atomicJson(oldGrantPath, { ...(await readJson(oldGrantPath)), checkout: legacy });
+  if (!modernClaim) {
+    await atomicJson(legacyClaim, await readJson(treeClaim));
+    await rm(treeClaim);
+    await atomicJson(oldGrantPath, { ...(await readJson(oldGrantPath)), checkout: legacy });
+  }
   if (outcome === 'foreign grant') {
     const other = state.workers['44444444-4444-4444-8444-444444444441'];
     other.role = 'owner';
@@ -1219,12 +1226,13 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
   }
   let oldEndpoint;
   let oldWorkerStarts = 0;
-  if (outcome === 'legacy mismatch') {
+  if (outcome === 'legacy mismatch' || outcome === 'older supervisor with reviewer decision') {
     const token = (await f.state()).ownerToken;
     await f.supervisor.emit('session_shutdown');
     oldEndpoint = net.createServer(socket => socket.once('data', data => {
       const line = data.toString().trim();
-      if (line === token) return socket.end(token + '\n');
+      if (line === token || (outcome === 'older supervisor with reviewer decision' &&
+          line === `${token}:launch-abandon-assignment`)) return socket.end(line + '\n');
       try { JSON.parse(line); oldWorkerStarts++; } catch { /* Older ownerServer rejects non-JSON before dispatch. */ }
       socket.end('invalid\n');
     }));
@@ -1247,6 +1255,7 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
       `--options {"closeAssignment":"${oldGrant}"} -- ${nextScope}`);
   const legacyRefusal = {
     'legacy mismatch': /does not support assignment abandonment/,
+    'older supervisor with reviewer decision': /does not support assignment abandonment/,
     'legacy held post-request': /Prior owner launch has no proved pre-effect refusal|Unresolved checkout launch|Unresolved owner launch fence/,
     'legacy receipt': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
     'legacy unknown failure': /Unresolved checkout launch 77777777-7777-4777-8777-777777777771/,
@@ -1256,15 +1265,21 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
   if (legacyRefusal) {
     await assert.rejects(startB(), legacyRefusal);
     assert.equal(choices, 0);
-    if (outcome === 'legacy mismatch') assert.equal(oldWorkerStarts, 0);
+    if (oldEndpoint) {
+      assert.equal(oldWorkerStarts, 0);
+      const attempts = await Promise.all((await f.attempts()).map(path => readJson(join(f.root, path))));
+      const refused = attempts.find(attempt => attempt.task.endsWith(nextScope));
+      assert.equal(refused.status, 'preflight-refused');
+      assert.notEqual(refused.closeRequested, true);
+    }
     assert.equal(f.children.length, 3);
     assert.deepEqual((await f.state()).notices, notices);
     assert.equal((await readJson(oldGrantPath)).revoked, false);
     return;
   }
-  if (!(['confirm', 'unnamed', 'legacy refusal retry', 'legacy confirmed restart'].includes(outcome) || outcome.startsWith('interrupted'))) {
+  if (!(['confirm', 'past reviewer decision', 'unnamed', 'legacy refusal retry', 'legacy confirmed restart'].includes(outcome) || outcome.startsWith('interrupted'))) {
     await assert.rejects(startB(), /abandonment cancelled|absence is unverified|Another writer claim|active authority|unresolved delivery effect|startup|another owner grant/);
-    assert.equal(choices, ['competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant'].includes(outcome) ? 0 : 1);
+    assert.equal(choices, ['current reviewer decision', 'competing claim', 'inflight', 'sending notice', 'startup effect', 'foreign grant'].includes(outcome) ? 0 : 1);
     assert.equal(f.children.length, 3);
     assert.deepEqual((await f.state()).notices, notices);
     assert.equal(Object.keys((await f.state()).retiredWorkers).length, 0);
@@ -1302,6 +1317,10 @@ for (const outcome of ['confirm', 'unnamed', 'legacy mismatch', 'legacy refusal 
   assert.equal(f.children.length, 4);
   const final = await f.state();
   assert.deepEqual(final.notices, notices, 'unknown outcomes and receipts are never reclassified');
+  if (outcome === 'past reviewer decision') {
+    assert.deepEqual(final.dispositions[reviewed.workerId], reviewerDecision, 'retirement did not answer the decision');
+    assert.equal(final.retiredWorkers[reviewed.workerId].paused, true);
+  }
   assert.equal(Object.keys(final.retiredWorkers).length, 6);
   assert.equal(Object.keys(final.workers).length, 1);
   assert.equal(final.closedAssignments[oldGrant].abandoned, true);

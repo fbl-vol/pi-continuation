@@ -20,6 +20,9 @@ if [ -n "$status" ]; then
   exit 1
 fi
 
+# A push from a linked worktree exports GIT_DIR. The validation fixtures
+# create their own repositories and must discover those from their own cwds.
+unset GIT_DIR
 npm run check
 if [ "$(uname -s)" = Linux ]; then
   exec npm run check:native
