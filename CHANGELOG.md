@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.7.7] - 2026-11-25
+
+- Allow confirmed abandonment of an inactive assignment when its absent read-only reviewer has a decision from a different stop than its settled report. The old decision stays unanswered. A current decision, owner wait or uncertain delivery still blocks abandonment.
+
 ## [0.7.6] - 2026-11-25
 
 - Persist **Ask First** or **Automatic** for review fixes alongside the other
