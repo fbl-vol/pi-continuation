@@ -193,10 +193,16 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     let tree;
     try { tree = await checkoutRoot(binding.cwd); }
     catch { refuse('Existing worker checkout cannot be verified; inspect before creating another worktree'); }
-    if (tree === target && (binding.role !== 'owner' || binding.paused ||
-        state.ownerWaits[binding.workerId] || state.inflight[binding.workerId] ||
+    if (tree !== target) continue;
+    const wait = state.ownerWaits[binding.workerId];
+    const ownerAgent = live.agents.find(agent => agent.pane_id === binding.paneId);
+    const waitingForLiveChildren = wait?.kind === 'child' && sameOccupant(ownerAgent, binding) &&
+      isSettled(ownerAgent) && wait.children.every(id => active.some(child => child.workerId === id &&
+        child.recipient?.id === binding.coordinatorId && child.recipient.sessionId === binding.sessionId &&
+        child.recipient.sessionFile === binding.sessionFile));
+    if (binding.role !== 'owner' || binding.paused || (wait && !waitingForLiveChildren) || state.inflight[binding.workerId] ||
         state.dispositions[binding.workerId]?.action === 'decision' ||
-        Object.values(state.notices).some(n => n.recipient?.id === binding.coordinatorId && unresolvedNotice(n))))
+        Object.values(state.notices).some(n => n.recipient?.id === binding.coordinatorId && unresolvedNotice(n)))
       refuse('Other checkout registrations need inspection before creating another worktree');
   }
   // An alternate tree is not a way to retry an uncertain owner creation or

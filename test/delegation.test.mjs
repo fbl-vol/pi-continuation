@@ -2,7 +2,7 @@ import test from 'node:test';
 import net from 'node:net';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -499,6 +499,34 @@ test('P1/P7 failed supervisor activation after a worktree choice leaves no tree 
   assert.deepEqual((await readdir(f.root)).filter(name => name.startsWith('owner-worktree-')), []);
   assert.deepEqual(f.effects, []);
   assert.equal((await f.state()).paused, true);
+});
+
+test('parallel explicit worktree permits a settled exact child wait, not a user decision wait', async t => {
+  const f = await fixture(t, { onSplit: params => assert.ok([f.root, `${f.root}-parallel`].includes(params.cwd)) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  await f.worker.command('start-implementation', 'A: Existing assignment.');
+  const ownerId = (await f.attempt()).workerId;
+  const owner = f.children[0].native;
+  const { workerId } = (await owner.spawn(task)).details;
+  await owner.wait({ kind: 'child', children: [workerId] });
+  owner.assistant('Waiting for this assignment’s existing writer.');
+  await owner.emit('agent_settled');
+  const base = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const alternate = `${f.root}-parallel`;
+  const options = path => JSON.stringify({ worktree: { repository: f.root, base, branch: 'work/parallel', path } });
+  f.worker.select(() => assert.fail('Exact authorized placement must not prompt'));
+  try {
+    await f.worker.command('start-implementation', `--options ${options(alternate)} -- C: Independent assignment.`);
+    assert.equal(f.children[2].cwd, alternate);
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [workerId] });
+    await owner.wait({ kind: 'user' });
+    await assert.rejects(f.worker.command('start-implementation',
+      `--options ${options(`${alternate}-refused`)} -- D: Separate assignment.`), /Other checkout registrations/);
+    assert.equal(existsSync(`${alternate}-refused`), false);
+  } finally {
+    if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
 });
 
 test('P1/P7 an exact authorized worktree skips the selector and second confirmation', async t => {
@@ -2039,6 +2067,28 @@ test('P3 an already-dispatched child cannot delegate across its owner user wait;
   await f.worker.emit('session_start');
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released',
     'a restart cannot drop the release fence or synthesize a decision turn');
+});
+
+test('a retained coordinator endpoint cannot wake a session after its assignment binding was retired', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'A: Work in a retained owner session.');
+  const { workerId: ownerId, grantId } = await f.attempt();
+  const owner = f.children[0].native;
+  const { workerId } = (await owner.spawn(task)).details;
+  const state = await f.state();
+  const sender = state.workers[workerId];
+  const id = randomUUID();
+  const notice = { id, kind: 'blocker', status: 'sending', route: sender.route, workerId,
+    recipient: sender.recipient, ownerToken: state.ownerToken, text: 'Delayed work from assignment A' };
+  // Model a retained listener and old transport request at the exact retirement
+  // boundary. Even a still-present sender cannot authorize a retired recipient.
+  state.retiredWorkers[ownerId] = { ...state.workers[ownerId], paused: true, retiredBy: randomUUID() };
+  delete state.workers[ownerId];
+  state.notices[id] = notice;
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  assert.deepEqual(await sendAction(f.root, notice, grantId), { accepted: false, stale: true, id });
+  assert.equal(owner.messages.length, 0);
+  await assert.rejects(readJson(join(f.root, `receipt-${id}.json`)), { code: 'ENOENT' });
 });
 
 test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {

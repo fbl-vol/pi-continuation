@@ -110,7 +110,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
     let checkpoint;
     let checkpointError;
-    try { if (owner.managedCheckpoint) checkpoint = managedCheckpointText(ctx); }
+    try { if (owner.managedCheckpoint) checkpoint = managedCheckpointText(ctx, owner.assignmentBoundary); }
     catch (error) { checkpointError = error; }
     lastObserved = saved;
     pendingWrite = pendingWrite.then(async () => {
@@ -147,7 +147,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     const report = currentHeldReport({ ...recovery.report, hold: true, outcome: 'approval' },
       ctx, prior.version, session);
     if (!report) return;
-    const checkpoint = managedCheckpointText(ctx);
+    const checkpoint = managedCheckpointText(ctx, worker.assignmentBoundary);
     if (checkpointHash(checkpoint) !== recovery.hash) return;
     // This is fresh durable evidence for the unchanged native report, not a
     // replay of its turn or permission to clear an independent supervisor pause.

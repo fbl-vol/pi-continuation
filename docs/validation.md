@@ -31,6 +31,12 @@ assignment was launched from the planning session. Supply the agreed scope in
 full, for example `Put B: update the documentation after A`. The queue records the
 submitted scope as written; it does not reconstruct it from prior conversation.
 
+`--parallel-assignment` rehearses the explicit native worktree launch while the
+first writer is still working. The fixture authorizes an exact repository,
+base, branch and path under the disposable directory. It checks both writers
+are active in separate trees and the original bindings remain unchanged. It
+does not demonstrate starting the parallel assignment from ordinary chat.
+
 [extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
 Tests/reviews verify it; they do not create requirements. Owner completion is not
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,

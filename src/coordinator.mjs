@@ -136,6 +136,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const recipientWorker = Object.values(state.workers).find(w => w.role === 'owner' &&
       w.sessionId === record.sessionId && w.coordinatorId === record.id);
     const waiting = recipientWorker && state.ownerWaits?.[recipientWorker.workerId];
+    if (record.role === 'owner' && !recipientWorker) return { accepted: false, stale: true, id: notice.id };
     if ((recipientWorker && (recipientWorker.paused || recipientWorker.stopped ||
         state.routes[recipientWorker.route]?.paused ||
         (await readObservation(root, recipientWorker.workerId)).hold)) ||
@@ -157,7 +158,8 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const latestWorker = Object.values(latest.workers).find(w => w.role === 'owner' &&
       w.sessionId === record.sessionId && w.coordinatorId === record.id);
     const latestWait = latestWorker && latest.ownerWaits?.[latestWorker.workerId];
-    if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
+    if (!completionStillCurrent || (record.role === 'owner' && !latestWorker) ||
+        latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
         (notice.recipient ? latest.workers[notice.workerId]?.recipient?.id !== record.id :
           latest.routes?.[notice.route]?.coordinator?.id !== record.id) ||
         (latestWorker && (latestWorker.paused || latestWorker.stopped ||

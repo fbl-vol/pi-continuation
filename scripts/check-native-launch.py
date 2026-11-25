@@ -131,7 +131,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
-        owner_decision, owner_decision_negative, owner_chat, planner_queue, pi_version):
+        owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, pi_version):
     model.reviewer_recovery = reviewer_recovery
     model.owner_chat = owner_chat
     model.owner_decision = owner_decision or owner_decision_negative or owner_chat
@@ -164,7 +164,7 @@ def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, p
     if nested:
         target.mkdir()
         subprocess.run(['git', 'init', '-q'], cwd=target, env=env, check=True)
-    if worktree_choice:
+    if worktree_choice or parallel_assignment:
         subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                         'commit', '-q', '--allow-empty', '-m', 'Native fixture base'], cwd=target, env=env, check=True)
     model.task = TASK + (' in risk-analytics.' if nested else '')
@@ -432,6 +432,33 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert cli('agent', 'get', writer)['agent']['agent_status'] == 'working'
                 print('Native planner queue passed: two ordered ordinary-chat entries, unchanged owner and writer', flush=True)
                 return
+            if parallel_assignment:
+                alternative = root/'parallel-checkout'
+                base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=target, env=env, text=True).strip()
+                options = dict(worktree=dict(repository=str(target), base=base, branch='work/parallel',
+                                            path=str(alternative)), space='new')
+                cli('agent', 'prompt', planner,
+                    f'/start-implementation --options {json.dumps(options)} -- {model.task} Parallel assignment.')
+                def parallel_bindings():
+                    current = json.loads(state_path.read_text())['workers']
+                    bindings = [binding for binding in current.values() if binding['cwd'] == str(alternative)]
+                    return bindings if len(bindings) == 2 else None
+                second = until('parallel owner and writer enrolled', parallel_bindings, 50)
+                second_owner, = (binding for binding in second if binding.get('role') == 'owner')
+                second_writer, = (binding for binding in second if binding.get('recipient', {}).get('id') == second_owner['coordinatorId'])
+                for binding in (second_owner, second_writer):
+                    panes.append(binding['paneId'])
+                    until('parallel task received', lambda: (state_dir/f"spawn-receipt-{binding['delegationId']}.json").exists() and
+                          json.loads((state_dir/f"spawn-receipt-{binding['delegationId']}.json").read_text())['status'] == 'sent')
+                assert second_owner['workspaceId'] == second_writer['workspaceId'] != owner['workspaceId']
+                assert cli('agent', 'get', writer)['agent']['agent_status'] == 'working'
+                until('parallel writer working', lambda:
+                      cli('agent', 'get', second_writer['paneId'])['agent']['agent_status'] == 'working')
+                final = json.loads(state_path.read_text())['workers']
+                assert final[owner['workerId']] == settled_owner
+                assert final[writer_attempt['workerId']] == writer_binding
+                print('Native parallel assignment passed: one explicit worktree launch, two isolated working writers, original owner unchanged', flush=True)
+                return
             if model.owner_decision:
                 wait = json.loads(state_path.read_text())['ownerWaits'][owner['workerId']]
                 assert wait['kind'] == 'user'
@@ -668,6 +695,7 @@ if __name__ == '__main__':
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
     parser.add_argument('--owner-chat', action='store_true', help='clarify, then select one finding via ordinary owner chat')
     parser.add_argument('--planner-queue', action='store_true', help='queue two ordinary-chat backlog entries without interrupting A')
+    parser.add_argument('--parallel-assignment', action='store_true', help='launch in an explicitly authorized disposable alternate tree')
     parser.add_argument('--pi-version', default='1.5.2', help='exact expected Pi version on PATH')
     args = parser.parse_args()
     if args.evidence:
@@ -683,6 +711,6 @@ if __name__ == '__main__':
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
-                args.owner_chat, args.planner_queue, args.pi_version)
+                args.owner_chat, args.planner_queue, args.parallel_assignment, args.pi_version)
         finally:
             model.shutdown()

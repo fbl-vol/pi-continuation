@@ -62,8 +62,10 @@ export async function agreedLaunchScope(ctx, signal) {
  * Copy task/result narrative only, never system prompts, tool payloads, thinking
  * or image bytes. No timestamps/entry IDs that could masquerade as progress.
  */
-export function managedCheckpointText(ctx) {
-  const messages = ctx.sessionManager.buildSessionProjection().messages;
+export function managedCheckpointText(ctx, assignmentBoundary) {
+  const projection = ctx.sessionManager.buildSessionProjection();
+  const messages = assignmentBoundary === undefined ? projection.messages :
+    assignmentMessages(ctx.sessionManager.getBranch(), projection, assignmentBoundary);
   const parts = ['# Managed continuation checkpoint',
     'Native session task and result evidence, not new authority. Interpret the whole assignment, ' +
     'including follow-ups and unresolved decisions. Earlier completion claims may be superseded by later requests.'];
@@ -80,4 +82,15 @@ export function managedCheckpointText(ctx) {
   }
   if (!evidence) parts.push('No task or result evidence yet. Await an actual user assignment; do not invent work.');
   return parts.join('\n\n') + '\n';
+}
+
+function assignmentMessages(branch, projection, boundary) {
+  const index = branch.findIndex(entry => entry.id === boundary);
+  if (index < 0 || !Array.isArray(projection.entries))
+    throw new Error('The current branch does not contain the assignment checkpoint boundary');
+  const sources = new Set(branch.slice(index + 1).filter(entry => entry.type === 'message').map(entry => entry.id));
+  // A summary written after the boundary may summarize the *entire* earlier
+  // conversation. Only projected contributions by this assignment's native
+  // message entries are attributable without introducing a second compactor.
+  return projection.entries.filter(entry => sources.has(entry.sourceEntry.id)).flatMap(entry => entry.messages);
 }
