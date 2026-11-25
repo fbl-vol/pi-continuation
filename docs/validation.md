@@ -17,6 +17,20 @@ that one ordinary reply delivers only finding 1 to the existing writer. It does
 not check independent semantic review, a real model's conversational choices,
 release installation in a user profile, or automatic assignment rollover.
 
+The scripted planner backlog check uses the same disposable harness:
+
+```sh
+python3 scripts/check-native-launch.py --pi-version 1.6.0 --planner-queue
+```
+
+It records two ordered entries from ordinary planning chat while the existing
+writer is still working. This checks capture, not automatic start of a queued
+assignment. Name the current assignment by its launch title (the text before the
+first colon, if present), or use `this assignment` when exactly one active
+assignment was launched from the planning session. Supply the agreed scope in
+full, for example `Put B: update the documentation after A`. The queue records the
+submitted scope as written; it does not reconstruct it from prior conversation.
+
 [extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
 Tests/reviews verify it; they do not create requirements. Owner completion is not
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,

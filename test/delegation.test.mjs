@@ -1761,6 +1761,40 @@ test('P4/P5 native launch preserves pauses and never retries uncertain pane crea
   assert.deepEqual(f.effects, ['split']);
 });
 
+test('planner chat records an ordered backlog without interrupting A, and restart keeps both entries', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'A: Implement the first agreed task.');
+  const ownerLaunch = await f.attempt();
+  await f.children[0].native.spawn(task);
+  const before = await f.state();
+  const effects = [...f.effects];
+  async function reply(source, text, aborted = false) {
+    await f.worker.emit('input', { source, text });
+    f.worker.user(text);
+    await f.worker.emit('before_agent_start', { messageType: 'user', prompt: text });
+    await f.worker.emit('agent_start');
+    f.worker.assistant('Queue request noted.');
+    await f.worker.emit('agent_settled', { aborted });
+  }
+  await reply('extension', 'Put an injected task after A');
+  await reply('interactive', 'Put an aborted task after A', true);
+  await reply('interactive', 'Put unrelated work after Unknown');
+  assert.deepEqual((await f.state()).assignmentQueues, {});
+  await reply('interactive', 'Put B: update the documentation after A');
+  await reply('interactive', 'Put C: verify the example after A');
+  const saved = await f.state();
+  assert.deepEqual(saved.assignmentQueues[ownerLaunch.grantId].map(entry => entry.scope),
+    ['B: update the documentation', 'C: verify the example']);
+  assert.match(f.worker.notifications.at(-1)[0], /Queued in position 2/);
+  assert.deepEqual(saved.workers, before.workers);
+  assert.deepEqual(saved.ownerWaits, before.ownerWaits);
+  assert.deepEqual(f.effects, effects);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  assert.deepEqual((await f.state()).assignmentQueues, saved.assignmentQueues);
+  assert.deepEqual(f.effects, effects);
+});
+
 test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
   const f = await fixture(t);
   await f.workerStart();

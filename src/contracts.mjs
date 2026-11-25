@@ -117,6 +117,19 @@ export function decodeSupervisor(record) {
         (wait.findings !== undefined && (wait.kind !== 'user' || !wait.id || !validReviewFindings(wait.findings))) ||
         (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId)))) invalid();
   }
+  // A queue entry is intent only, not evidence that the preceding assignment closed.
+  if (state.assignmentQueues === undefined) state.assignmentQueues = {};
+  if (!object(state.assignmentQueues)) invalid();
+  const queuedIds = new Set();
+  for (const [grantId, entries] of Object.entries(state.assignmentQueues)) {
+    if (!isId(grantId) || !Array.isArray(entries)) invalid();
+    for (const entry of entries) {
+      if (!object(entry) || !isId(entry.id) || queuedIds.has(entry.id) ||
+          typeof entry.scope !== 'string' || !entry.scope.trim() || Buffer.byteLength(entry.scope) > 8000 ||
+          typeof entry.leaf !== 'string' || !entry.leaf || !Number.isFinite(Date.parse(entry.at))) invalid();
+      queuedIds.add(entry.id);
+    }
+  }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
   if (!object(state.blocked)) invalid();

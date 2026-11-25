@@ -12,7 +12,7 @@ import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, 
   selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
-  endedSupervisorPath, spawnPath } from './delegation.mjs';
+  endedSupervisorPath, enqueueAssignment, spawnPath } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -556,6 +556,19 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return { accepted: true };
   }
 
+  const acceptAssignmentEnqueue = request => queue(async () => {
+    if (!active() || !subscriptionLive || !state.acceptStarts)
+      return { accepted: false, message: 'Supervisor unavailable; nothing was queued' };
+    const live = await snapshot(socketPath);
+    let entry;
+    try { entry = await enqueueAssignment(root, state, request, live); }
+    catch {
+      return { accepted: false, message: 'Could not verify the planning assignment; nothing was queued' };
+    }
+    if (entry.accepted) await commit();
+    return entry;
+  });
+
   const acceptOwnerWait = request => queue(async () => {
     if (!active() || !subscriptionLive || state.paused || !state.acceptStarts) return { accepted: false };
     const worker = state.workers[request.workerId];
@@ -729,7 +742,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           closeOwner = await startOwnerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              acceptOwnerWait(request) : request?.type === 'assignment-enqueue' ? acceptAssignmentEnqueue(request) :
+              request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
               request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
               request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :
               request?.type === 'launch-close' ? acceptLaunchClose(request) :

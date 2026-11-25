@@ -113,6 +113,53 @@ const recordPath = (root, kind, id) => {
 };
 export const spawnPath = (root, id) => recordPath(root, 'spawn', id);
 const grantPath = (root, id) => recordPath(root, 'delegation', id);
+
+// An ordinary reply can express queue intent, never parallel-launch or closeout authority.
+function queueRequest(text) {
+  const match = /^put (.+) after (.+)$/i.exec(text?.trim() ?? '');
+  if (!match) return undefined;
+  const scope = match[1].trim();
+  const after = match[2].replace(/[.!]$/, '').trim();
+  if (!scope || !after || Buffer.byteLength(scope) > 8000 || Buffer.byteLength(after) > 8000)
+    return undefined;
+  return { scope, after };
+}
+
+export async function enqueueAssignment(root, state, request, live) {
+  const { planner, text, leaf } = request;
+  const queued = queueRequest(text);
+  const reject = message => ({ accepted: false, message });
+  if (!queued || typeof leaf !== 'string' || !leaf || !planner?.sessionId || !planner.sessionFile ||
+      state.supervisorSession === planner.sessionId || Object.values(state.workers).some(w =>
+        w.sessionId === planner.sessionId || w.sessionFile === planner.sessionFile))
+    return reject('Queue work from the exact planning session that started the current assignment');
+  try { requireDelegationParent(live, planner); }
+  catch { return reject('The exact planning session changed; nothing was queued'); }
+  const candidates = [];
+  const after = queued.after.toLowerCase();
+  for (const owner of Object.values(state.workers)) {
+    if (owner.role !== 'owner' || owner.stopped || !owner.delegationId || !owner.coordinatorId) continue;
+    const attempt = await readJson(spawnPath(root, owner.delegationId));
+    const grant = await readJson(grantPath(root, owner.coordinatorId));
+    if (attempt.status !== 'dispatched' || attempt.role !== 'owner' || attempt.workerId !== owner.workerId ||
+        attempt.grantId !== grant.id || grant.revoked || !grant.ownerLaunch ||
+        !isDeepStrictEqual(grant.parent, planner)) continue;
+    const title = grant.scope.split('\n', 1)[0].split(':', 1)[0].trim().toLowerCase();
+    if (after === 'this assignment' || after === 'the current assignment' || after === title)
+      candidates.push(grant.id);
+  }
+  if (candidates.length !== 1) return reject('Name one active assignment started from this planning session; nothing was queued');
+  const [grantId] = candidates;
+  const queue = state.assignmentQueues[grantId] ?? [];
+  const previous = queue.findIndex(entry => entry.leaf === leaf);
+  if (previous >= 0) {
+    if (queue[previous].scope !== queued.scope) return reject('This planning reply already recorded different work');
+    return { accepted: true, position: previous + 1, id: queue[previous].id };
+  }
+  const entry = { id: randomUUID(), scope: queued.scope, leaf, at: new Date().toISOString() };
+  state.assignmentQueues[grantId] = [...queue, entry];
+  return { accepted: true, position: queue.length + 1, id: entry.id };
+}
 export const endedSupervisorPath = (root, token) => recordPath(root, 'supervisor-ended', token);
 // Separate, immutable authority: revoking the original grant still revokes recovery.
 const reviewerRecoveryPath = (root, recovery) =>
@@ -1874,7 +1921,42 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
     },
   });
-  pi.on('input', event => { if (event.source !== 'extension') generation++; });
+  let queueInput;
+  let queueTurn;
+  pi.on('input', (event, ctx) => {
+    if (event.source !== 'extension') generation++;
+    queueInput = queueTurn = undefined;
+    if (event.source === 'interactive' && ctx.mode === 'tui' && ctx.isIdle() && socketPath && paneId &&
+        process.env.HERDR_ENV === '1' && !worker.registered && queueRequest(event.text)) queueInput = event.text;
+  });
+  pi.on('before_agent_start', event => {
+    queueTurn = event.messageType === 'user' && event.prompt === queueInput ? queueInput : undefined;
+    queueInput = undefined;
+    if (queueTurn) return { message: { customType: 'pi-continuation-queue-request', display: false,
+      content: 'Pi will try to record this exact queue request after the turn and show the result. ' +
+        'Do not launch an agent or claim the work is queued before that confirmation.' } };
+  });
+  pi.on('agent_settled', async (event, ctx) => {
+    const text = queueTurn;
+    queueInput = queueTurn = undefined;
+    if (!text || event.aborted || worker.registered || worker.promptBlocked) return;
+    const session = currentSession(ctx);
+    const version = generation;
+    const lastReply = ctx.sessionManager.getBranch().findLast(entry => entry.type === 'message' &&
+      entry.message?.role === 'assistant');
+    if (!lastReply || lastReply.message.stopReason === 'error' || !session.leaf) return;
+    try {
+      const live = await snapshot(socketPath);
+      const planner = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
+      if (generation !== version || worker.promptBlocked || !isDeepStrictEqual(session, currentSession(ctx)))
+        refuse('Planning session changed; nothing was queued');
+      const result = await sendAction(root, { type: 'assignment-enqueue', planner, text, leaf: session.leaf }, 'supervisor');
+      ctx.ui.notify(result.accepted ? `Queued in position ${result.position}. The current assignment is unchanged.` :
+        result.message, result.accepted ? 'info' : 'warning');
+    } catch {
+      ctx.ui.notify('Could not confirm the backlog entry. Check the supervisor before sending the request again.', 'warning');
+    }
+  });
   pi.on('ui_prompt_start', () => { if (!worker.confirming) generation++; });
   pi.on('session_start', async (event, ctx) => {
     generation++;
@@ -1959,6 +2041,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
   });
   pi.on('session_shutdown', async () => {
     generation++; stopInput?.(); stopInput = undefined;
+    queueInput = queueTurn = undefined;
     await closeBootstrap?.(); closeBootstrap = undefined;
   });
 }
