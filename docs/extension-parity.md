@@ -165,11 +165,13 @@ input-provenance guarantee.
 menu. Explicit Save persists per-user defaults for future assignments; Cancel
 and Escape discard drafts. Each new owner pins its defaults, while its own
 assignment may be explicitly overridden without changing the global choice.
-The owner sees effective choices in its assignment and can reread them with the
-exact-owner `continuation_delivery_preferences` tool. Saved Automatically Fix
-remains effectively Ask First until a separate human-selection amendment.
-Preferences are not publication, merge or approval authority; mandatory review,
-repo restrictions and independent holds still apply. Neither menu nor read tool
+The owner sees the assignment choices and can reread them with the exact-owner
+`continuation_delivery_preferences` tool. Current source uses Ask First (default)
+or Automatic for review fixes; previously saved Automatically Fix reads as Ask
+First. Only a compatible owner workflow may use Automatic, and required human
+selection always takes precedence. Preferences are not publication, merge or
+approval authority; mandatory review, repository and assignment restrictions,
+existing waits and independent holds and pauses still apply. Neither menu nor read tool
 performs Git, review, retirement, or live state effects.
 
 ### Chat-based owner launch (since v0.4.2)

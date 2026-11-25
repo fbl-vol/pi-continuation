@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from 'typebox';
 import { atomicJson, claim, defaultRoot, ensureRoot, readJson, release } from './store.mjs';
 import { isId, newSupervisor, readObservation, readSupervisor } from './contracts.mjs';
-import { deliveryFields, effectiveDeliveryPreferences, readAssignmentDeliveryPreferences,
+import { deliveryFields, reviewFixPreferenceGuidance, readAssignmentDeliveryPreferences,
   readDeliveryPreferences } from './preferences.mjs';
 import { currentSession } from './session.mjs';
 import { agreedLaunchScope } from './checkpoint.mjs';
@@ -1921,21 +1921,20 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
           if (!binding || binding.paused || state.routes[binding.route]?.paused ||
               !sameOccupant(fresh.agents.find(a => a.pane_id === paneId), binding)) refuse('Assignment scope/identity changed');
           if (recovery) await requireSettledRecoveryEffects(root, authority, ticket.id);
-          const preferences = ticket.role === 'owner' ? effectiveDeliveryPreferences(
-            await readAssignmentDeliveryPreferences(root, grant)) : undefined;
+          const preferences = ticket.role === 'owner' ? await readAssignmentDeliveryPreferences(root, grant) : undefined;
           const delivery = preferences ? deliveryFields.map(field =>
             `${field.label}: ${preferences[field.key]}`).join('\n') : '';
           const message = ticket.role === 'owner' ?
             `Approved assignment for this supervised coordinating owner (not the writer):\n${grant.scope}\n\n` +
-            `Effective delivery preferences for this assignment:\n${delivery}\n` +
-            'These choices do not grant Git publication or override repository rules, user finding selection or independent review. ' +
+            `Delivery preferences for this assignment:\n${delivery}\n` +
+            `${reviewFixPreferenceGuidance} These choices do not grant Git publication or override independent review. ` +
             'Ask First never skips mandatory review. PR Automatic cannot bypass Push Off without an eligible remote branch. ' +
             'Close review panes only for this assignment’s exact temporary reviewers after selected fixes are independently verified. ' +
             'Use /continuation → This assignment: delivery to inspect or explicitly change these choices. ' +
-            'Read continuation_delivery_preferences for the current effective choices before review, push, PR or reviewer closure.\n' +
+            'Read continuation_delivery_preferences for current choices before review, resolving findings, push, PR or reviewer closure.\n' +
             'Use the implementation-owner skill when available. You are the permanent user inbox, not the brainstorming session. ' +
             'Use continuation_spawn to start the sole writer and scoped read-only reviewers, retaining them for selected fixes and verification. ' +
-            'Use continuation_owner_wait for child results or a real user decision. Initiate independent review after implementation; do not apply findings without user selection here. ' +
+            'Use continuation_owner_wait for child results or a real user decision. Initiate independent review after implementation; follow the owner workflow and all applicable human-selection rules. ' +
             'Create the PR only where authorized after verification. Send no assignment notices to the brainstorming session.\n' + delegationInstructions :
             `Approved delegation scope:\n${grant.scope}\n\nRole: ${ticket.role}.\n${delegationInstructions}\n\nAssignment:\n${ticket.task}`;
           await worker.dispatchDelegated(ctx, ticket, message);

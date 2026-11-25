@@ -256,14 +256,13 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 cli('agent', 'send-keys', planner, 'down', 'enter')
                 until('fix preference choices', lambda: 'Fix review findings · Ask First' in visible(planner))
                 cli('agent', 'send-keys', planner, 'enter')
-                until('effective draft choice', lambda:
-                    'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(visible(planner).split()))
+                until('review-fix draft choice', lambda: 'Fix review findings: Automatic' in visible(planner))
                 cli('agent', 'send-keys', planner, 'down', 'down', 'down', 'down', 'down', 'enter')
                 def saved():
                     path = state_dir/'delivery-preferences.json'
                     if not path.exists(): return False
                     values = json.loads(path.read_text())['values']
-                    return values['pushBranch'] == 'Automatic' and values['fixReviewFindings'] == 'Automatically Fix'
+                    return values['pushBranch'] == 'Automatic' and values['fixReviewFindings'] == 'Automatic'
                 until('delivery preference saved', saved)
                 # Native clients supply PTY dimensions; the fixture sidebar takes 42 columns.
                 for width in (80, 40):
@@ -287,7 +286,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                         screen = until(f'saved choices at {width} columns', lambda: visible(planner) if
                             'Push branch: Automatic' in visible(planner) else None)
                         assert 'Close review panes: Off' in screen
-                        assert 'Fix review findings: Automatically Fix (effective: Ask First)' in ' '.join(screen.split())
+                        assert 'Fix review findings: Automatic' in ' '.join(screen.split())
                         if evidence: (evidence/f'delivery-saved-{width}.txt').write_text(screen)
                         if width == 40: cli('agent', 'send-keys', planner, 'esc')
                     finally:
@@ -510,7 +509,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             assert len(users) == 1 and model.task in json.dumps(users[0]), users
             grant = json.loads((state_dir/f"delegation-{attempt['grantId']}.json").read_text())
             assert grant['deliveryPreferences']['startReview'] == 'Automatic'
-            assert 'Effective delivery preferences for this assignment:' in json.dumps(users[0])
+            assert 'Delivery preferences for this assignment:' in json.dumps(users[0])
             assert 'Fix review findings: Ask First' in json.dumps(users[0])
             def displayed(pane, activity, role):
                 agent = cli('agent', 'get', pane)['agent']

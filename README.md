@@ -215,9 +215,12 @@ remain held, not retried under a different path or space.
 shows saved per-user defaults for new owner assignments, with Save or Escape/
 Cancel. An exact owner may view or explicitly override only that assignment via
 `This assignment: delivery`; `continuation_delivery_preferences` reads its
-current effective choices. Global edits never silently change an existing
-assignment. Automatic finding fixes can be saved but remain **Ask First** under
-the current human-selection contract. Preferences do not grant publication,
+current assignment choices. Global edits never silently change an existing
+assignment. Current source supports **Ask First** (default) and **Automatic** for
+review fixes; older saved `Automatically Fix` values read as Ask First. Automatic
+requires a compatible owner workflow and never overrides repository or assignment
+rules requiring human selection, or releases existing waits, holds or pauses.
+Preferences do not grant publication,
 replace independent review, override repository restrictions, or alter live
 supervision. The native 80/40-column settings view and assignment snapshot have
 only disposable Linux Pi/Herdr evidence. Owner use of the choices has bounded

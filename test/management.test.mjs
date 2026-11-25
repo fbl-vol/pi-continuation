@@ -85,25 +85,27 @@ test('delivery defaults save only the explicit draft and persist across menu ope
   await other.command('continuation', '');
 });
 
-test('delivery menu distinguishes saved automatic fixes from effective Ask First in draft and after Save', async t => {
+test('delivery menu saves Automatic review fixes and Cancel keeps the saved value', async t => {
   const f = await started(t);
   const planner = await planningSession(f);
   let step = 0;
   planner.select((title, choices) => {
-    if (step === 3) assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
-    const answer = ['Delivery preferences', 'Fix review findings: Ask First', 'Automatically Fix', 'Save'][step++];
+    if (step === 2) assert.match(title, /Human-selection rules and existing waits still apply/);
+    if (step === 3) assert.ok(choices.includes('Fix review findings: Automatic'));
+    const answer = ['Delivery preferences', 'Fix review findings: Ask First', 'Automatic', 'Save'][step++];
     assert.ok(choices.includes(answer), JSON.stringify(choices));
     return answer;
   });
   await planner.command('continuation', '');
-  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatically Fix');
+  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatic');
   step = 0;
   planner.select((_title, choices) => {
-    if (step++ === 0) return 'Delivery preferences';
-    assert.ok(choices.includes('Fix review findings: Automatically Fix (effective: Ask First)'));
-    return undefined;
+    const answer = ['Delivery preferences', 'Fix review findings: Automatic', 'Ask First', 'Cancel'][step++];
+    assert.ok(choices.includes(answer));
+    return answer;
   });
   await planner.command('continuation', '');
+  assert.equal((await readDeliveryPreferences(f.root)).fixReviewFindings, 'Automatic');
 });
 
 test('the exact held worker clears its own report from /continuation without lifting supervision', async t => {
