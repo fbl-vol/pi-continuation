@@ -210,6 +210,8 @@ export function ownerRolloverBlocker(state, coordinator) {
   for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes ?? {})) {
     if (!outcome.blocker) continue;
     const pending = Object.values(state.retainedAssignments ?? {}).find(item => item.oldClaim.grantId === grantId);
+    // Older snapshots can retain a blocker after the completed transition was removed.
+    if (!pending && state.closedAssignments?.[grantId]) continue;
     if (coordinator) {
       const owner = state.workers[outcome.workerId] ?? state.retiredWorkers[outcome.workerId];
       if (!owner || owner.sessionId !== coordinator.sessionId || owner.sessionFile !== coordinator.sessionFile ||

@@ -1374,12 +1374,14 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
 }
 
 for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch',
-  'automatic', 'automatic preflight refusal', 'automatic refusal with receipt', 'automatic lost receipt', 'automatic uncertain dispatch']) test(
+  'automatic', 'automatic preflight refusal', 'automatic refusal with receipt', 'automatic lost receipt',
+  'automatic explicit recovery', 'automatic uncertain dispatch']) test(
   `close-and-start dispatches to the identical native sessions or holds on uncertainty (${fault})`, async t => {
   let sends = 0;
   const automatic = fault.startsWith('automatic');
   const uncertain = fault.endsWith('uncertain dispatch');
-  const loseReceipt = ['lost receipt acknowledgement', 'automatic lost receipt'].includes(fault);
+  const explicitRecovery = fault === 'automatic explicit recovery';
+  const loseReceipt = explicitRecovery || ['lost receipt acknowledgement', 'automatic lost receipt'].includes(fault);
   let interrupt = fault === 'before closeout commit';
   const { f, oldGrant, oldWriter } = await settledAssignment(t, {
     async onSnapshot(fixture) {
@@ -1464,8 +1466,17 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
       await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('transport interrupted'),
         'First interrupted dispatch must record the blocker');
       assert.equal(sends, 1);
-      await f.supervisor.emit('session_shutdown');
-      await f.supervisorCommand('start');
+      if (explicitRecovery) {
+        await f.supervisorCommand('status');
+        assert.match(f.supervisor.notifications.at(-1)[0], /queuedAssignmentBlocker.*do not resend/);
+        await start();
+        await f.supervisorCommand('status');
+        assert.doesNotMatch(f.supervisor.notifications.at(-1)[0], /queuedAssignmentBlocker/);
+        assert.equal((await f.state()).assignmentOutcomes[oldGrant].blocker, undefined);
+      } else {
+        await f.supervisor.emit('session_shutdown');
+        await f.supervisorCommand('start');
+      }
       if (uncertain) {
         await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('start is unconfirmed'),
           'Restart must expose the missing receipt without retrying');

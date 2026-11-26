@@ -320,7 +320,6 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           { grantId, scope: next.scope, automatic: true }, state,
           pane => herdrRequest(socketPath, 'pane.get', { pane_id: pane }), () => snapshot(socketPath), stillCurrent, commit);
         await finishRetainedAssignment(root, state, id, stillCurrent, commit, retainedSend);
-        if (outcome.blocker) { delete outcome.blocker; await commit(); }
       } catch (error) {
         const message = error.message;
         if (stillCurrent() && (outcome.blocker !== message || pending?.blockedToken !== token)) {

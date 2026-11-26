@@ -1131,7 +1131,6 @@ export async function startRetainedAssignment(root, request, state, readPane, re
   state.workers[writerBinding.workerId] = writerBinding;
   state.closedAssignments[old.id] = { launchId: grant.id, writerId: closing.claim.id,
     ownerToken: state.ownerToken, at: new Date().toISOString() };
-  if (automatic) delete state.assignmentOutcomes[old.id].blocker;
   state.assignmentQueues[grant.id] = queue.slice(1);
   delete state.assignmentQueues[old.id];
   (state.retainedAssignments ??= {})[grant.id] = transition;
@@ -1147,12 +1146,15 @@ export async function finishRetainedAssignment(root, state, id, stillCurrent, co
   const claimPath = writerClaimPath(root, grant.checkout);
   const fence = ownerLaunchPath(root, grant.checkout);
   const heldFence = await optionalRecord(fence);
-  if (transition.completed) {
-    if (heldFence?.token === grant.id) await release(fence, grant.id);
+  const finalize = async () => {
+    if ((await optionalRecord(fence))?.token === grant.id) await release(fence, grant.id);
     delete state.retainedAssignments[id];
+    const outcome = state.assignmentOutcomes?.[oldClaim.grantId];
+    if (outcome) delete outcome.blocker;
     await commit();
     return true;
-  }
+  };
+  if (transition.completed) return finalize();
   if (heldFence?.token !== grant.id) refuse('Retained assignment checkout fence changed');
   const nextClaim = { id: writerTicket.id, grantId: grant.id };
   const currentClaim = await readJson(claimPath);
@@ -1208,10 +1210,7 @@ export async function finishRetainedAssignment(root, state, id, stillCurrent, co
   // either direction of this boundary cannot repeat an observed task.
   transition.completed = true;
   await commit();
-  await release(fence, grant.id);
-  delete state.retainedAssignments[id];
-  await commit();
-  return true;
+  return finalize();
 }
 
 export async function abandonLaunchAssignment(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
