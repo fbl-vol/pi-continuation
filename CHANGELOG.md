@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.8] - Pending release
+
+- Keep planning chat open while the coordinating owner and sole writer work.
+  Queue the next agreed assignment in chat; once the exact owner records
+  completed review and applicable delivery, queued work starts in the same
+  owner and writer sessions with fresh scope and checkpoints.
+- Request a separate assignment in chat. If the working tree already has a
+  writer, choose whether to queue behind that assignment or authorize a
+  separate worktree.
+- For Ask First reviews with numbered findings, select one in ordinary owner
+  chat. Clarification leaves the wait intact, and any selected finding goes
+  only to the existing writer. Legacy decision controls remain available.
+- Preserve queued scope through compaction. Show exact rollover blockers in
+  the owner pane and supervisor status, and reconcile confirmed task receipts
+  after restart without replaying uncertain dispatches.
+
+Disposable scripted Linux Pi/Herdr rehearsals and regression tests exercised
+these paths. They do not establish representative real-agent workflow
+acceptance or acceptance of the installed release in the intended user profile.
+
 ## [0.7.7] - 2026-11-25
 
 - Allow confirmed abandonment of an inactive assignment when its absent read-only reviewer has a decision from a different stop than its settled report. The old decision stays unanswered. A current decision, owner wait or uncertain delivery still blocks abandonment.
