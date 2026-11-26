@@ -130,13 +130,25 @@ export function decodeSupervisor(record) {
       queuedIds.add(entry.id);
     }
   }
+  if (state.assignmentOutcomes === undefined) state.assignmentOutcomes = {};
+  if (!object(state.assignmentOutcomes)) invalid();
+  for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes)) {
+    if (!isId(grantId) || !object(outcome) || !isId(outcome.workerId) || !isId(outcome.stop) ||
+        typeof outcome.leaf !== 'string' || !outcome.leaf ||
+        typeof outcome.revision !== 'string' || !/^[a-f0-9]{40,64}$/.test(outcome.revision) ||
+        typeof outcome.review !== 'string' || !outcome.review.trim() || Buffer.byteLength(outcome.review) > 1000 ||
+        typeof outcome.delivery !== 'string' || !outcome.delivery.trim() || Buffer.byteLength(outcome.delivery) > 1000 ||
+        (outcome.blocker !== undefined && typeof outcome.blocker !== 'string')) invalid();
+  }
   if (state.retainedAssignments === undefined) state.retainedAssignments = {};
   if (!object(state.retainedAssignments)) invalid();
   for (const [id, transition] of Object.entries(state.retainedAssignments)) {
     if (!object(transition) || !isId(id) || transition.grant?.id !== id ||
         typeof transition.grant.checkout !== 'string' || !isId(transition.oldClaim?.id) ||
         !isId(transition.oldClaim?.grantId) || state.closedAssignments[transition.oldClaim.grantId]?.launchId !== id ||
-        (transition.completed !== undefined && transition.completed !== true)) invalid();
+        (transition.completed !== undefined && transition.completed !== true) ||
+        (transition.automatic !== undefined && transition.automatic !== true) ||
+        (transition.blockedToken !== undefined && !isId(transition.blockedToken))) invalid();
     for (const [role, ticket] of [['owner', transition.ownerTicket], ['writer', transition.writerTicket]]) {
       if (!object(ticket) || ticket.role !== role || ticket.grantId !== id || !isId(ticket.id) ||
           !isId(ticket.workerId) || !isId(ticket.replacesWorker) ||

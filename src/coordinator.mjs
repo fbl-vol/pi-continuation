@@ -23,6 +23,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   let selectionTurn = false;
   let chatInput;
   let chatTurn;
+  let deliveryOutcome;
   const exactOwner = (state, ctx) => {
     const session = currentSession(ctx);
     return Object.values(state.workers).find(w => w.role === 'owner' &&
@@ -71,6 +72,22 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     humanPending = false;
     const chat = chatTurn;
     chatInput = chatTurn = undefined;
+    const delivered = deliveryOutcome;
+    deliveryOutcome = undefined;
+    if (delivered && !event.aborted) {
+      try {
+        const session = currentSession(ctx);
+        await decisionUI.flushObservations();
+        if (coordinator?.id !== delivered.grantId || decisionUI.hold || decisionUI.promptBlocked ||
+            !isDeepStrictEqual(currentSession(ctx), session)) throw new Error('Owner changed');
+        const result = await sendAction(root, { ...delivered, type: 'assignment-outcome', leaf: session.leaf }, 'supervisor');
+        if (!result.accepted) throw new Error('Outcome refused');
+        ctx.ui.notify('Assignment delivery recorded. Any eligible queued work can start automatically.', 'info');
+      } catch (error) {
+        report('record assignment outcome', error);
+        ctx.ui.notify('Delivery outcome was not confirmed. Check this owner’s wait, hold and final revision.', 'warning');
+      }
+    }
     if (chat && !event.aborted) {
       try { await submitChatDecision(ctx, chat); }
       catch (error) {
@@ -271,6 +288,26 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       return { content: [{ type: 'text', text: `Owner waiting for ${args.kind}; no automatic user decision is inferred.` }], details: {} };
     },
   });
+  pi.registerTool({
+    name: 'continuation_assignment_delivered', label: 'Record assignment delivery',
+    description: 'Record the exact owner assignment’s final Git revision, completed independent review and applicable delivery outcomes. ' +
+      'Only use after actual review, any selected fixes and re-verification, and all required delivery are complete. ' +
+      'Give concrete evidence, including why a delivery step was not applicable if none was owed. Never use this to grant approval, skip an obligation or clear a hold. ' +
+      'The record is written only after this owner turn settles successfully. If work is queued it can advance automatically.',
+    parameters: Type.Object({ revision: Type.String({ pattern: '^[a-f0-9]{40,64}$' }),
+      review: Type.String({ minLength: 1, maxLength: 1000 }), delivery: Type.String({ minLength: 1, maxLength: 1000 }) }),
+    async execute(_call, args, _signal, _update, ctx) {
+      const state = await readSupervisor(root);
+      const owner = exactOwner(state, ctx);
+      if (!owner || owner.paused || owner.stopped || state.paused || state.routes[owner.route]?.paused ||
+          state.ownerWaits[owner.workerId] || !/^[a-f0-9]{40,64}$/.test(args.revision) ||
+          [args.review, args.delivery].some(text => typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 1000))
+        throw new Error('Record completed delivery only in the exact unheld owner with no unanswered wait');
+      deliveryOutcome = { revision: args.revision, review: args.review, delivery: args.delivery,
+        workerId: owner.workerId, grantId: owner.coordinatorId, sessionId: owner.sessionId, sessionFile: owner.sessionFile };
+      return { content: [{ type: 'text', text: 'Outcome staged for this turn. Finish with a concise delivery report.' }], details: {} };
+    },
+  });
   const releaseDecision = async ctx => {
     if (coordinator?.role !== 'owner' || !ctx.isIdle())
       throw new Error('Release the user decision in the idle exact owner session');
@@ -323,7 +360,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   });
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
-    chatInput = chatTurn = undefined;
+    chatInput = chatTurn = deliveryOutcome = undefined;
     await close?.(); close = undefined;
   });
   return { registerOwner: (ctx, id) => register(ctx, id, true),

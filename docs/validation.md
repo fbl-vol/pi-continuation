@@ -2,13 +2,13 @@
 
 ## Ordinary owner-chat selection from a package artifact
 
-On Linux with Pi 1.6.0 and Herdr 0.9.5:
+On Linux with Pi 1.6.1 and Herdr 0.9.5:
 
 ```sh
 artifact_dir=$(mktemp -d)
 npm pack --pack-destination "$artifact_dir"
 tar -xzf "$artifact_dir"/*.tgz -C "$artifact_dir"
-python3 scripts/check-native-launch.py --pi-version 1.6.0 --owner-chat --package "$artifact_dir/package"
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --owner-chat --package "$artifact_dir/package"
 ```
 
 This starts ordinary Pi sessions under a disposable profile and Herdr server with a
@@ -31,11 +31,18 @@ assignment was launched from the planning session. Supply the agreed scope in
 full, for example `Put B: update the documentation after A`. The queue records the
 submitted scope as written; it does not reconstruct it from prior conversation.
 
-`--parallel-assignment` rehearses the explicit native worktree launch while the
-first writer is still working. The fixture authorizes an exact repository,
-base, branch and path under the disposable directory. It checks both writers
-are active in separate trees and the original bindings remain unchanged. It
-does not demonstrate starting the parallel assignment from ordinary chat.
+`--parallel-assignment` rehearses `Start <agreed scope> separately` while the
+first writer is still working. It exercises the single worktree choice and
+checks both writers are active in separate trees with the original bindings
+unchanged.
+
+`--automatic-rollover` rehearses queueing B from ordinary planner chat, obtaining
+a scripted review in a separate read-only Pi session, and pushing A's exact
+fixture revision to a disposable bare Git remote. The owner records the A
+outcome and B starts in the original owner and writer sessions, with no second
+human command. Add `--package "$artifact_dir/package"` to exercise the packed
+artifact. The reviewer and delivery coordinator are scripted, not representative
+real-agent review, user acceptance, or external Git publication.
 
 `--retained-rollover` submits the exact first queued scope through an explicit
 native close-and-start command. It verifies A's retirement, two fresh worker

@@ -828,7 +828,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       if (!await observe({ session, outcome: 'unknown', stop: null, bootstrapPending: true }, ctx))
         throw new Error('Could not persist delegated dispatch fence');
       const live = await snapshot(socketPath);
-      requireDelegationParent(live, ticket.parent);
+      if (!(ticket.automatic && ticket.role === 'owner')) requireDelegationParent(live, ticket.parent);
       const savedTicket = await readJson(spawnPath(root, ticket.id));
       const state = ticket.replacesWorker ? await readSupervisor(root) :
         (await delegationAuthority(root, ticket.authority, ticket.parent)).state;

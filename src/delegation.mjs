@@ -172,7 +172,7 @@ async function optionalRecord(path) {
 const ownerLaunchPath = (root, checkout) => join(root, `owner-launch-pending-${digest(checkout)}.json`);
 
 async function worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker, parent, allowed,
-  authorizedWorktree, explicitSpace, readyForCreate) {
+  authorizedWorktree, explicitSpace, readyForCreate, queueInstead) {
   const common = await commonDirectory(target);
   const intent = join(root, `owner-worktree-${digest(`${parent.sessionId}\n${common}\n${scope}`)}.json`);
   try {
@@ -231,11 +231,16 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     if (authorizedWorktree.repository !== target || authorizedWorktree.base !== base ||
         !isAbsolute(path) || !branch) refuse('Authorized worktree does not match the exact repository/base/path');
   } else {
-    const title = `Create a separate worktree for this assignment?\nRepository: ${target}\n` +
+    const title = `${queueInstead ? 'This working tree already has a writer. Queue the work or authorize a separate tree.' : 'Create a separate worktree for this assignment?'}\nRepository: ${target}\n` +
       `Base: ${base}\nBranch: ${branch}\nPath: ${path}`;
     const choices = explicitSpace ? ['Create this worktree', 'Cancel'] :
-      ['Create in current space', 'Create in new space', 'Cancel'];
+      ['Create in current space', 'Create in new space', ...(queueInstead ? ['Queue after the current assignment'] : []), 'Cancel'];
     const choice = await worker.selectManagement(ctx, title, choices);
+    if (queueInstead && choice === 'Queue after the current assignment' && choices.includes(choice)) {
+      if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; nothing was queued');
+      await queueInstead();
+      return undefined;
+    }
     if (!choice?.startsWith('Create') || !choices.includes(choice))
       refuse('Worktree choice cancelled; no owner launched');
     if (choice === 'Create in new space') space = 'new';
@@ -1011,11 +1016,39 @@ export async function closeLaunchAssignment(root, request, state, readPane, read
   return request.grantId;
 }
 
+export async function assignmentRevision(cwd) {
+  return (await exec('git', ['-C', cwd, 'rev-parse', '--verify', 'HEAD'],
+    { timeout: 2500, maxBuffer: 8192, windowsHide: true })).stdout.trim();
+}
+
+export async function recordAssignmentOutcome(root, state, request, live) {
+  const owner = state.workers[request.workerId];
+  const { revision, review, delivery } = request;
+  if (owner?.role !== 'owner' || owner.coordinatorId !== request.grantId || owner.paused || owner.stopped ||
+      owner.sessionId !== request.sessionId || owner.sessionFile !== request.sessionFile ||
+      state.routes[owner.route]?.paused || state.ownerWaits[owner.workerId] ||
+      !sameOccupant(live.agents.find(agent => agent.pane_id === owner.paneId), owner) ||
+      typeof revision !== 'string' || !/^[a-f0-9]{40,64}$/.test(revision) ||
+      [review, delivery].some(text => typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 1000))
+    refuse('Delivery outcome requires the exact unheld owner and completed obligations');
+  const grant = await readJson(grantPath(root, owner.coordinatorId));
+  const attempt = await readJson(spawnPath(root, owner.delegationId));
+  const observed = await readObservation(root, owner.workerId);
+  if (!grant.ownerLaunch || grant.revoked || grant.id !== attempt.grantId || attempt.status !== 'dispatched' ||
+      attempt.workerId !== owner.workerId || !sameSession(observed.session, owner) || observed.hold ||
+      observed.outcome !== 'completed' || !isId(observed.stop) || observed.session.leaf !== request.leaf ||
+      await assignmentRevision(grant.cwd) !== revision)
+    refuse('Delivery outcome does not match the current assignment, settled reply and Git revision');
+  state.assignmentOutcomes[grant.id] = { workerId: owner.workerId, stop: observed.stop, leaf: request.leaf,
+    revision, review, delivery };
+}
+
 // The original claim remains in place until the supervisor commits the new
 // assignment. The checkout fence remains held until both start receipts exist.
 export async function startRetainedAssignment(root, request, state, readPane, readLive, stillCurrent, commit) {
   const old = await readJson(grantPath(root, request.grantId));
-  if (!isDeepStrictEqual(old.parent, request.planner)) refuse('Retained launch belongs to another planning session');
+  const automatic = request.automatic === true;
+  if (!automatic && !isDeepStrictEqual(old.parent, request.planner)) refuse('Retained launch belongs to another planning session');
   const existing = Object.values(state.retainedAssignments ?? {}).find(item => item.oldClaim.grantId === old.id);
   if (existing) {
     if (existing.grant.scope !== request.scope) refuse('Another retained assignment is already pending');
@@ -1026,10 +1059,19 @@ export async function startRetainedAssignment(root, request, state, readPane, re
   if (!queued || queued.scope !== request.scope)
     refuse('Retained launch requires the exact first queued assignment and its planning session');
   const live = await readLive();
-  requireDelegationParent(live, old.parent);
+  if (!automatic) requireDelegationParent(live, old.parent);
   const closing = await closeoutCandidate(root, old.checkout, old.id, state, live, readPane, readLive);
   const owner = closing.bindings.find(w => w.role === 'owner');
   const writer = closing.bindings.find(w => w.delegationId === closing.claim.id);
+  const verifyOutcome = async () => {
+    if (!automatic) return;
+    const outcome = state.assignmentOutcomes[old.id];
+    const observed = await readObservation(root, owner.workerId);
+    if (!outcome || outcome.workerId !== owner.workerId || outcome.stop !== observed.stop ||
+        outcome.leaf !== observed.session.leaf || outcome.revision !== await assignmentRevision(old.cwd))
+      refuse('The owner delivery outcome is stale; record the completed obligations at the current revision');
+  };
+  await verifyOutcome();
   const boundary = binding => Object.fromEntries(['paneId', 'terminalId', 'workspaceId', 'tabId', 'cwd',
     'sessionId', 'sessionFile', 'sessionKind', 'sessionValue'].map(key => [key, binding[key]]));
   if (!owner || !writer || [owner, writer].some(w => w.paused || w.stopped || w.handoff || state.routes[w.route]?.paused))
@@ -1040,7 +1082,8 @@ export async function startRetainedAssignment(root, request, state, readPane, re
   grant.deliveryPreferences = await readDeliveryPreferences(root);
   const ticket = (oldBinding, role, parent, authority) => ({ id: randomUUID(), grantId: grant.id, role,
     workerId: randomUUID(), child: boundary(oldBinding), parent, authority, ownerToken: state.ownerToken,
-    replacesWorker: oldBinding.workerId, replacesGrant: old.id, status: 'prepared', task: queued.scope });
+    replacesWorker: oldBinding.workerId, replacesGrant: old.id, status: 'prepared', task: queued.scope,
+    ...(automatic && { automatic }) });
   const ownerTicket = ticket(owner, 'owner', old.parent, { grantId: grant.id });
   const writerTicket = ticket(writer, 'writer', ownerTicket.child, { grantId: grant.id, spawnId: ownerTicket.id });
   writerTicket.parentWorkerId = ownerTicket.workerId;
@@ -1053,13 +1096,14 @@ export async function startRetainedAssignment(root, request, state, readPane, re
     checkpoint: managedCheckpointPath(root, writerTicket.workerId), route: writer.route, paused: false,
     lastStartNonce: writerTicket.id,
     recipient: { ...ownerTicket.child, id: grant.id, role: 'owner' } };
-  const transition = { grant, ownerTicket, writerTicket, oldClaim: closing.claim };
+  const transition = { grant, ownerTicket, writerTicket, oldClaim: closing.claim, ...(automatic && { automatic }) };
   const fence = ownerLaunchPath(root, old.checkout);
   await claimOwnerLaunch(fence, grant.id, true);
   try {
     const latest = await readLive();
-    requireDelegationParent(latest, old.parent);
+    if (!automatic) requireDelegationParent(latest, old.parent);
     await closeoutCandidate(root, old.checkout, old.id, state, latest, readPane, readLive);
+    await verifyOutcome();
     if (!stillCurrent()) refuse('Retained closeout interrupted before commit');
   } catch (error) {
     await release(fence, grant.id);
@@ -1073,6 +1117,7 @@ export async function startRetainedAssignment(root, request, state, readPane, re
   state.workers[writerBinding.workerId] = writerBinding;
   state.closedAssignments[old.id] = { launchId: grant.id, writerId: closing.claim.id,
     ownerToken: state.ownerToken, at: new Date().toISOString() };
+  if (automatic) delete state.assignmentOutcomes[old.id].blocker;
   state.assignmentQueues[grant.id] = queue.slice(1);
   delete state.assignmentQueues[old.id];
   (state.retainedAssignments ??= {})[grant.id] = transition;
@@ -1807,7 +1852,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       sessionId: next.sessionId });
     const role = ticket.role === 'owner' ? 'Non-writing coordinating owner and user inbox. ' +
       `The existing writer (${transition.writerTicket.workerId}) already received this scope. ` +
-      'Wait for that writer; do not spawn another. Use independent review and follow current delivery preferences and required decision gates.' :
+      'Wait for that writer; do not spawn another. Use independent review and follow current delivery preferences and required decision gates. ' +
+      'Use continuation_assignment_delivered only after actual review and all applicable delivery obligations.' :
       'Implementation writer.';
     await worker.dispatchDelegated(ctx, ticket,
       `New approved assignment. Previous assignments and approvals do not carry forward.\n${role}\n\n${ticket.task}\n\n${delegationInstructions}`);
@@ -1825,7 +1871,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
   let generation = 0;
   const reference = ctx => ctx.sessionManager.getBranch().filter(e => e.type === 'custom' &&
     e.customType === 'pi-continuation-delegation' && e.data?.sessionId === currentSession(ctx).id).at(-1)?.data;
-  async function launch(argument, ctx) {
+  async function launch(argument, ctx, { parallelChat = false } = {}) {
     const input = argument.trim();
     const explicitSpace = input === '--new-space' || input.startsWith('--new-space -- ') ? 'new' : undefined;
     let scope = input === '--new-space' ? '' :
@@ -1850,6 +1896,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     try { state = await readSupervisor(root); }
     catch (error) { if (error.code !== 'ENOENT') throw error; state = newSupervisor(); }
     let ownerLive = !!state.ownerToken && await ownerAlive(root, state.ownerToken);
+    if (parallelChat && ownerLive && (state.paused || !state.acceptStarts))
+      refuse('The supervisor is paused. A chat request does not lift that pause.');
     if (!ownerLive) {
       let lock;
       try { lock = await readJson(join(root, 'supervisor.lock')); }
@@ -1931,7 +1979,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       if (closing && closing !== originOwner.coordinatorId) refuse('Only this exact owner assignment may be closed');
       closing = originOwner.coordinatorId;
     }
-    if (!closing && !options.worktree) {
+    if (!closing && !options.worktree && !parallelChat) {
       try {
         const claim = await readJson(writerClaimPath(root, target));
         await closeoutCandidate(root, target, claim.grantId, state, live,
@@ -1965,9 +2013,17 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         grant.abandonAssignment = true;
       }
     }
+    const queueInstead = parallelChat && !options.worktree ? async () => {
+      const current = currentSession(ctx);
+      const result = await sendAction(root, { type: 'assignment-enqueue', planner: grant.parent,
+        text: `Put ${options.assignment} after this assignment`, leaf: current.leaf }, 'supervisor');
+      if (!result.accepted) refuse(result.message ?? 'Queue request not confirmed');
+      ctx.ui.notify(`Queued in position ${result.position}. The current assignment is unchanged.`, 'info');
+    } : undefined;
     const placement = closing ? { cwd: target, space: options.space ?? checkout.space ?? 'current' } :
       await worktreeForLiveWriter(root, socketPath, state, live, target, scope, ctx, worker,
-        grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch);
+        grant.parent, allowed, options.worktree, options.space ?? checkout.space, activateForLaunch, queueInstead);
+    if (!placement) return;
     grant.closeAssignment = closing;
     grant.abandonAssignment = recoveredClose?.grant.abandonAssignment ?? grant.abandonAssignment;
     grant.closeExplicit = recoveredClose?.grant.closeExplicit ?? !!options.closeAssignment;
@@ -2124,18 +2180,20 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
   });
   let queueInput;
   let queueTurn;
+  const parallelScope = text => /^start ([^\r\n]+) separately[.!]?$/i.exec(text?.trim() ?? '')?.[1]?.trim();
   pi.on('input', (event, ctx) => {
     if (event.source !== 'extension') generation++;
     queueInput = queueTurn = undefined;
     if (event.source === 'interactive' && ctx.mode === 'tui' && ctx.isIdle() && socketPath && paneId &&
-        process.env.HERDR_ENV === '1' && !worker.registered && queueRequest(event.text)) queueInput = event.text;
+        process.env.HERDR_ENV === '1' && !worker.registered &&
+        (queueRequest(event.text) || parallelScope(event.text))) queueInput = event.text;
   });
   pi.on('before_agent_start', event => {
     queueTurn = event.messageType === 'user' && event.prompt === queueInput ? queueInput : undefined;
     queueInput = undefined;
-    if (queueTurn) return { message: { customType: 'pi-continuation-queue-request', display: false,
-      content: 'Pi will try to record this exact queue request after the turn and show the result. ' +
-        'Do not launch an agent or claim the work is queued before that confirmation.' } };
+    if (queueTurn) return { message: { customType: 'pi-continuation-planning-request', display: false,
+      content: 'Pi will process this exact planning request after the turn and show the result. ' +
+        'Do not launch an agent or claim the work is queued or started yourself.' } };
   });
   pi.on('agent_settled', async (event, ctx) => {
     const text = queueTurn;
@@ -2145,7 +2203,18 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     const version = generation;
     const lastReply = ctx.sessionManager.getBranch().findLast(entry => entry.type === 'message' &&
       entry.message?.role === 'assistant');
-    if (!lastReply || lastReply.message.stopReason === 'error' || !session.leaf) return;
+    if (!lastReply || lastReply.message.stopReason !== 'stop' || !session.leaf) return;
+    const separately = parallelScope(text);
+    if (separately) {
+      if (launching) return;
+      launching = true;
+      try {
+        if (separately.startsWith('--')) refuse('Write the agreed scope as ordinary text; use the launch command for options');
+        await launch(separately, ctx, { parallelChat: true });
+      } catch (error) { ctx.ui.notify(error.message, 'warning'); }
+      finally { launching = false; }
+      return;
+    }
     try {
       const live = await snapshot(socketPath);
       const planner = nativeBinding(live.agents.find(a => a.pane_id === paneId), session, ctx.cwd);
@@ -2231,7 +2300,9 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
             'Use the implementation-owner skill when available. You are the permanent user inbox, not the brainstorming session. ' +
             'Use continuation_spawn to start the sole writer and scoped read-only reviewers, retaining them for selected fixes and verification. ' +
             'Use continuation_owner_wait for child results or a real user decision. Initiate independent review after implementation; follow the owner workflow and all applicable human-selection rules. ' +
-            'Create the PR only where authorized after verification. Send no assignment notices to the brainstorming session.\n' + delegationInstructions :
+            'Create the PR only where authorized after verification. After actual independent review and all applicable delivery obligations, ' +
+            'use continuation_assignment_delivered with the final revision and concrete outcomes. Do not treat a writer report or an unverified fix as delivery. ' +
+            'Send no assignment notices to the brainstorming session.\n' + delegationInstructions :
             `Approved delegation scope:\n${grant.scope}\n\nRole: ${ticket.role}.\n${delegationInstructions}\n\nAssignment:\n${ticket.task}`;
           await worker.dispatchDelegated(ctx, ticket, message);
           return { accepted: true, id: ticket.id };

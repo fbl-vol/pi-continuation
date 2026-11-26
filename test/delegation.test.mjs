@@ -1373,9 +1373,13 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   });
 }
 
-for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch']) test(
+for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch',
+  'automatic', 'automatic lost receipt', 'automatic uncertain dispatch']) test(
   `close-and-start dispatches to the identical native sessions or holds on uncertainty (${fault})`, async t => {
   let sends = 0;
+  const automatic = fault.startsWith('automatic');
+  const uncertain = fault.endsWith('uncertain dispatch');
+  const loseReceipt = ['lost receipt acknowledgement', 'automatic lost receipt'].includes(fault);
   let interrupt = fault === 'before closeout commit';
   const { f, oldGrant, oldWriter } = await settledAssignment(t, {
     async onSnapshot(fixture) {
@@ -1388,9 +1392,9 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
     },
     async retainedSend(root, action, target, options) {
       sends++;
-      if (sends === 1 && fault === 'uncertain dispatch') throw new Error('Simulated connection loss before receipt');
+      if (sends === 1 && uncertain) throw new Error('Simulated connection loss before receipt');
       const reply = await sendAction(root, action, target, options);
-      if (sends === 1 && fault === 'lost receipt acknowledgement') {
+      if (sends === 1 && loseReceipt) {
         const receiptPath = join(root, `spawn-receipt-${action.id}.json`);
         for (let i = 0; i < 100 && (!existsSync(receiptPath) || (await readJson(receiptPath)).status !== 'sent'); i++)
           await new Promise(resolve => setTimeout(resolve, 10));
@@ -1413,7 +1417,52 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
   const writerA = before.workers[oldWriter];
   const start = () => f.worker.command('start-implementation',
     `--options {"closeAssignment":"${oldGrant}"} -- ${scope}`);
-  if (fault === 'before closeout commit') {
+  if (automatic) {
+    assert.equal(sends, 0, 'a settled assignment and queued work alone do not authorize closeout');
+    execFileSync('git', ['-C', f.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--quiet', '--allow-empty', '-m', 'Exact reviewed fixture revision']);
+    const revision = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const owner = f.children[0].native;
+    const outcome = { revision, review: 'Independent fixture review verified exact HEAD.', delivery: 'No external delivery owed in this fixture.' };
+    const settleOutcome = async (args, aborted = false) => {
+      await owner.tool('continuation_assignment_delivered', args);
+      owner.assistant('Delivery outcome recorded at final revision.');
+      await owner.emit('agent_settled', { aborted });
+    };
+    const waitForState = async (predicate, explanation) => {
+      for (let i = 0; i < 200; i++) {
+        const current = await f.state();
+        if (predicate(current)) return current;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail(explanation);
+    };
+    await settleOutcome({ ...outcome, revision: 'f'.repeat(40) });
+    assert.equal((await f.state()).assignmentOutcomes[oldGrant], undefined);
+    await f.supervisorCommand('pause global');
+    await assert.rejects(owner.tool('continuation_assignment_delivered', outcome), /exact unheld owner/);
+    assert.equal((await f.state()).paused, true);
+    assert.equal(sends, 0);
+    await f.supervisorCommand('activate global');
+    await settleOutcome(outcome);
+    if (loseReceipt || uncertain) {
+      await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('transport interrupted'),
+        'First interrupted dispatch must record the blocker');
+      assert.equal(sends, 1);
+      await f.supervisor.emit('session_shutdown');
+      await f.supervisorCommand('start');
+      if (uncertain) {
+        await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('start is unconfirmed'),
+          'Restart must expose the missing receipt without retrying');
+        assert.equal(sends, 1);
+        assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+        return;
+      }
+    }
+    await waitForState(current => current.closedAssignments[oldGrant] && !Object.keys(current.retainedAssignments).length,
+      'The supervisor must advance B without another planner or owner command');
+    assert.equal((await f.state()).assignmentOutcomes[oldGrant].revision, revision);
+  } else if (fault === 'before closeout commit') {
     await assert.rejects(start(), /active or has unresolved effects/);
     assert.equal(sends, 0);
     assert.equal((await f.state()).closedAssignments[oldGrant], undefined);

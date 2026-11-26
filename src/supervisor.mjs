@@ -12,7 +12,7 @@ import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, 
   selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
-  endedSupervisorPath, enqueueAssignment, finishRetainedAssignment, spawnPath,
+  endedSupervisorPath, enqueueAssignment, finishRetainedAssignment, recordAssignmentOutcome, spawnPath,
   startRetainedAssignment } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
@@ -305,9 +305,39 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
     }
   };
+  const advanceQueuedAssignments = async ctx => {
+    const token = state.ownerToken;
+    const stillCurrent = () => active() && subscriptionLive && state.acceptStarts && !state.paused &&
+      !promptActive && state.ownerToken === token;
+    if (!stillCurrent()) return;
+    for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes)) {
+      const pending = Object.values(state.retainedAssignments).find(transition =>
+        transition.automatic && transition.oldClaim.grantId === grantId);
+      const next = state.assignmentQueues[grantId]?.[0];
+      if (pending?.blockedToken === token || (!pending && (!next || state.closedAssignments[grantId]))) continue;
+      try {
+        const id = pending?.grant.id ?? await startRetainedAssignment(root,
+          { grantId, scope: next.scope, automatic: true }, state,
+          pane => herdrRequest(socketPath, 'pane.get', { pane_id: pane }), () => snapshot(socketPath), stillCurrent, commit);
+        await finishRetainedAssignment(root, state, id, stillCurrent, commit, retainedSend);
+        if (outcome.blocker) { delete outcome.blocker; await commit(); }
+      } catch (error) {
+        const message = error.message;
+        if (stillCurrent() && (outcome.blocker !== message || pending?.blockedToken !== token)) {
+          const transition = Object.values(state.retainedAssignments).find(item => item.oldClaim.grantId === grantId);
+          if (transition) transition.blockedToken = token;
+          if (!transition && outcome.blocker === message) continue;
+          outcome.blocker = message;
+          await commit();
+          notify(ctx, `Queued assignment could not start: ${message}`, 'warning');
+        }
+      }
+    }
+  };
   const wake = async ctx => {
     await isolateUnavailable();
     await flushNotices();
+    await advanceQueuedAssignments(ctx);
     if (!active() || !allowExperimentalActivation || !subscriptionLive || promptActive || !ctx.isIdle() || wakePending) return;
     const version = inputVersion;
     const pending = await attention();
@@ -559,6 +589,16 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return { accepted: true };
   }
 
+  const acceptAssignmentOutcome = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || !state.acceptStarts || state.paused || promptActive)
+      return { accepted: false };
+    try { await recordAssignmentOutcome(root, state, request, await snapshot(socketPath)); }
+    catch { return { accepted: false }; }
+    await commit();
+    void queue(() => wake(ctx));
+    return { accepted: true };
+  });
+
   const acceptRetainedStart = request => queue(async () => {
     const stillCurrent = () => active() && subscriptionLive && state.acceptStarts && !state.paused &&
       !promptActive && request.ownerToken === state.ownerToken;
@@ -574,7 +614,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
-  const acceptAssignmentEnqueue = request => queue(async () => {
+  const acceptAssignmentEnqueue = (request, ctx) => queue(async () => {
     if (!active() || !subscriptionLive || !state.acceptStarts)
       return { accepted: false, message: 'Supervisor unavailable; nothing was queued' };
     const live = await snapshot(socketPath);
@@ -583,7 +623,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     catch {
       return { accepted: false, message: 'Could not verify the planning assignment; nothing was queued' };
     }
-    if (entry.accepted) await commit();
+    if (entry.accepted) {
+      await commit();
+      void queue(() => wake(ctx));
+    }
     return entry;
   });
 
@@ -760,7 +803,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           closeOwner = await startOwnerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : request?.type === 'assignment-enqueue' ? acceptAssignmentEnqueue(request) :
+              acceptOwnerWait(request) : request?.type === 'assignment-enqueue' ? acceptAssignmentEnqueue(request, ctx) :
+              request?.type === 'assignment-outcome' ? acceptAssignmentOutcome(request, ctx) :
               request?.type === 'assignment-retained-start' ? acceptRetainedStart(request) :
               request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
               request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
@@ -810,6 +854,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
               void queue(() => wake(ctx));
           });
+          if (Object.keys(state.assignmentOutcomes).length) void queue(() => wake(ctx));
           notify(ctx, verb === 'start' ?
             'Supervisor started; use /continuation-worker start in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);

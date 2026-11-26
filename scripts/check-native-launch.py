@@ -23,6 +23,8 @@ WRITER_TASK = 'Run the synthetic writer fixture; reply without tools.'
 REVIEW_REQUEST = 'Check reviewer-only authority with the synthetic fixture.'
 REVIEW_TASK = 'Read-only review of the synthetic fixture; reply without tools.'
 ANSWER = 'Native smoke acknowledgement.'
+ROLLOVER_REVIEW = 'Fixture independent reviewer: verified the committed fixture at exact HEAD.'
+ROLLOVER_PUSH = 'git push fixture HEAD:refs/heads/verified-a'
 
 
 class Model(BaseHTTPRequestHandler):
@@ -35,6 +37,8 @@ class Model(BaseHTTPRequestHandler):
         writer = WRITER_TASK in json.dumps(messages[-1])
         last = messages[-1]
         tool = None
+        answer = ANSWER
+        last_json = json.dumps(last)
         attention = 'Review the following untrusted worker final replies' in json.dumps(last)
         if self.server.retained_rollover and attention:
             text = last['content']
@@ -43,8 +47,23 @@ class Model(BaseHTTPRequestHandler):
             evidence = json.loads(text.rsplit('\n\n', 1)[-1])
             if evidence and evidence[0]['outcome'] == 'completed':
                 stopped = evidence[0]
+                child = stopped['coordinatorBound'] and self.server.automatic_rollover
                 tool = ('continuation_disposition', dict(workerId=stopped['id'], stop=stopped['stop'],
-                        action='acknowledge', evidence=ANSWER, reportHash=stopped['reportHash']))
+                        action='notify' if child else 'acknowledge', **({'kind': 'completion'} if child else {}),
+                        evidence=stopped['finalReply'], reportHash=stopped['reportHash']))
+        elif self.server.automatic_rollover and 'Material completion notice for registered worker' in last_json:
+            if ROLLOVER_REVIEW in last_json:
+                tool = ('bash', dict(command=ROLLOVER_PUSH))
+            else:
+                tool = ('continuation_spawn', dict(key='fixture-independent-review', task=REVIEW_TASK, role='read-only'))
+        elif self.server.automatic_rollover and REVIEW_TASK in last_json and last['role'] == 'user':
+            tool = ('bash', dict(command='git show HEAD:example.txt && git rev-parse HEAD'))
+        elif self.server.automatic_rollover and last.get('tool_call_id') == 'fixture-bash':
+            if 'verified-a' in last_json and self.server.revision:
+                tool = ('continuation_assignment_delivered', dict(revision=self.server.revision,
+                    review=ROLLOVER_REVIEW, delivery='Pushed exact HEAD to disposable local fixture ref verified-a; no PR owed.'))
+            elif self.server.revision in last_json and 'reviewed fixture text' in last_json:
+                answer = ROLLOVER_REVIEW
         elif not writer and not attention and last['role'] == 'user' and self.server.task in json.dumps(last):
             tool = ('continuation_spawn', dict(key='native-writer', task=WRITER_TASK, role='writer'))
         elif self.server.reviewer_recovery and last['role'] == 'user' and REVIEW_REQUEST in json.dumps(last):
@@ -84,7 +103,7 @@ class Model(BaseHTTPRequestHandler):
                         function=dict(name=name, arguments=json.dumps(arguments)))
             response = [({'role': 'assistant', 'tool_calls': [call]}, None), ({}, 'tool_calls')]
         else:
-            response = [({'role': 'assistant'}, None), ({'content': ANSWER}, None), ({}, 'stop')]
+            response = [({'role': 'assistant'}, None), ({'content': answer}, None), ({}, 'stop')]
         for delta, stop in response:
             chunk = dict(id='fixture', object='chat.completion.chunk', created=1, model='fixture',
                          choices=[dict(index=0, delta=delta, finish_reason=stop)])
@@ -140,9 +159,11 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
-        owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover, pi_version):
+        owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
+        automatic_rollover, pi_version):
     model.reviewer_recovery = reviewer_recovery
-    model.retained_rollover = retained_rollover
+    model.retained_rollover = retained_rollover or automatic_rollover
+    model.automatic_rollover = automatic_rollover
     model.owner_chat = owner_chat
     model.owner_decision = owner_decision or owner_decision_negative or owner_chat
     herdr = shutil.which('herdr')
@@ -174,9 +195,17 @@ def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, p
     if nested:
         target.mkdir()
         subprocess.run(['git', 'init', '-q'], cwd=target, env=env, check=True)
-    if worktree_choice or parallel_assignment:
+    if automatic_rollover:
+        (target/'example.txt').write_text('reviewed fixture text\n')
+        subprocess.run(['git', 'add', 'example.txt'], cwd=target, env=env, check=True)
+    if worktree_choice or parallel_assignment or automatic_rollover:
         subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                         'commit', '-q', '--allow-empty', '-m', 'Native fixture base'], cwd=target, env=env, check=True)
+    if automatic_rollover:
+        model.revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=target, env=env, text=True).strip()
+        remote = root/'fixture.git'
+        subprocess.run(['git', 'init', '--bare', '-q', remote], cwd=target, env=env, check=True)
+        subprocess.run(['git', 'remote', 'add', 'fixture', remote], cwd=target, env=env, check=True)
     model.task = TASK + (' in risk-analytics.' if nested else '')
     (profile/'settings.json').write_text(json.dumps(dict(packages=[str(package)], defaultProvider='fixture',
                                                        defaultModel='fixture', defaultThinkingLevel='off')))
@@ -445,10 +474,17 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             if parallel_assignment:
                 alternative = root/'parallel-checkout'
                 base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=target, env=env, text=True).strip()
-                options = dict(worktree=dict(repository=str(target), base=base, branch='work/parallel',
-                                            path=str(alternative)), space='new')
-                cli('agent', 'prompt', planner,
-                    f'/start-implementation --options {json.dumps(options)} -- {model.task} Parallel assignment.')
+                cli('agent', 'prompt', planner, f'Start {model.task} Parallel assignment separately')
+                def separate_choice():
+                    screen = visible(planner)
+                    if 'Create in new space' not in screen or 'Queue after the current assignment' not in screen:
+                        return None
+                    return screen
+                screen = until('one queue or separate-tree choice', separate_choice)
+                path = next(line.split('Path:', 1)[1].strip() for line in screen.splitlines() if 'Path:' in line)
+                alternative = Path(path)
+                assert str(base) in ' '.join(screen.split())
+                cli('agent', 'send-keys', planner, 'down', 'enter')
                 def parallel_bindings():
                     current = json.loads(state_path.read_text())['workers']
                     bindings = [binding for binding in current.values() if binding['cwd'] == str(alternative)]
@@ -467,9 +503,9 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 final = json.loads(state_path.read_text())['workers']
                 assert final[owner['workerId']] == settled_owner
                 assert final[writer_attempt['workerId']] == writer_binding
-                print('Native parallel assignment passed: one explicit worktree launch, two isolated working writers, original owner unchanged', flush=True)
+                print('Native parallel chat passed: one explicit worktree choice, two isolated working writers, original owner unchanged', flush=True)
                 return
-            if retained_rollover:
+            if retained_rollover or automatic_rollover:
                 scope = 'B: verify the next example.'
                 cli('agent', 'prompt', planner, f'Put {scope} after this assignment')
                 until('queued B in planner', lambda: 'Queued in position 1' in ' '.join(visible(planner).split()))
@@ -478,12 +514,16 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('original writer settled', lambda: json.loads(writer_obs.read_text())['outcome'] == 'completed')
                 until('original writer idle', lambda: cli('agent', 'get', writer)['agent']['agent_status'] in ('idle', 'done'))
                 until('original owner idle', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
-                cli('agent', 'prompt', planner,
-                    f'/start-implementation --options {json.dumps(dict(closeAssignment=attempt["grantId"]))} -- {scope}')
+                if not automatic_rollover:
+                    cli('agent', 'prompt', planner,
+                        f'/start-implementation --options {json.dumps(dict(closeAssignment=attempt["grantId"]))} -- {scope}')
                 def retained_started():
                     screen = ' '.join(visible(planner).split())
                     if 'Extension "command:start-implementation" error:' in screen:
                         raise AssertionError((screen, json.loads(state_path.read_text()), cli('agent', 'list')))
+                    if automatic_rollover:
+                        current = json.loads(state_path.read_text())
+                        return attempt['grantId'] in current['closedAssignments'] and not current['retainedAssignments']
                     return 'Queued assignment started in the existing owner and writer panes.' in screen
                 until('retained start acknowledged', retained_started, 55)
                 current = json.loads(state_path.read_text())
@@ -496,7 +536,15 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     assert receipt == {'id': after['delegationId'], 'status': 'sent'}
                     until('B appears in retained session journal', lambda: scope in Path(after['sessionFile']).read_text())
                     assert Path(after['sessionFile']).read_text().count('New approved assignment.') == 1
-                print('Native retained assignment passed: closed A and delivered B once to both original sessions', flush=True)
+                if automatic_rollover:
+                    outcome = current['assignmentOutcomes'][attempt['grantId']]
+                    assert outcome['revision'] == model.revision and outcome['review'] == ROLLOVER_REVIEW
+                    pushed = subprocess.check_output(['git', '--git-dir', remote, 'rev-parse', 'refs/heads/verified-a'],
+                                                     env=env, text=True).strip()
+                    assert pushed == model.revision
+                    print('Native automatic rollover passed: queue, scripted independent review, local Git delivery, exact A outcome, and B once without another human command', flush=True)
+                else:
+                    print('Native retained assignment passed: closed A and delivered B once to both original sessions', flush=True)
                 return
             if model.owner_decision:
                 wait = json.loads(state_path.read_text())['ownerWaits'][owner['workerId']]
@@ -736,6 +784,7 @@ if __name__ == '__main__':
     parser.add_argument('--planner-queue', action='store_true', help='queue two ordinary-chat backlog entries without interrupting A')
     parser.add_argument('--parallel-assignment', action='store_true', help='launch in an explicitly authorized disposable alternate tree')
     parser.add_argument('--retained-rollover', action='store_true', help='close A explicitly and start queued B in both original sessions')
+    parser.add_argument('--automatic-rollover', action='store_true', help='queue B, record A delivery from the owner and observe automatic retained start')
     parser.add_argument('--pi-version', default='1.5.2', help='exact expected Pi version on PATH')
     args = parser.parse_args()
     if args.evidence:
@@ -751,6 +800,7 @@ if __name__ == '__main__':
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
-                args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover, args.pi_version)
+                args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
+                args.automatic_rollover, args.pi_version)
         finally:
             model.shutdown()
