@@ -12,7 +12,7 @@ import { deliveryFields, reviewFixPreferenceGuidance, readAssignmentDeliveryPref
   readDeliveryPreferences } from './preferences.mjs';
 import { currentSession } from './session.mjs';
 import { unresolvedDecisionAtStop } from './policy.mjs';
-import { agreedLaunchScope } from './checkpoint.mjs';
+import { agreedLaunchScope, managedCheckpointPath } from './checkpoint.mjs';
 import { isSettled, request, sameOccupant, snapshot } from './herdr.mjs';
 import { listenJson, ownerAlive, sendAction, supportsAssignmentAbandonment } from './ipc.mjs';
 
@@ -1011,6 +1011,150 @@ export async function closeLaunchAssignment(root, request, state, readPane, read
   return request.grantId;
 }
 
+// The original claim remains in place until the supervisor commits the new
+// assignment. The checkout fence remains held until both start receipts exist.
+export async function startRetainedAssignment(root, request, state, readPane, readLive, stillCurrent, commit) {
+  const old = await readJson(grantPath(root, request.grantId));
+  if (!isDeepStrictEqual(old.parent, request.planner)) refuse('Retained launch belongs to another planning session');
+  const existing = Object.values(state.retainedAssignments ?? {}).find(item => item.oldClaim.grantId === old.id);
+  if (existing) {
+    if (existing.grant.scope !== request.scope) refuse('Another retained assignment is already pending');
+    return existing.grant.id;
+  }
+  const queue = state.assignmentQueues[old.id];
+  const queued = queue?.[0];
+  if (!queued || queued.scope !== request.scope)
+    refuse('Retained launch requires the exact first queued assignment and its planning session');
+  const live = await readLive();
+  requireDelegationParent(live, old.parent);
+  const closing = await closeoutCandidate(root, old.checkout, old.id, state, live, readPane, readLive);
+  const owner = closing.bindings.find(w => w.role === 'owner');
+  const writer = closing.bindings.find(w => w.delegationId === closing.claim.id);
+  const boundary = binding => Object.fromEntries(['paneId', 'terminalId', 'workspaceId', 'tabId', 'cwd',
+    'sessionId', 'sessionFile', 'sessionKind', 'sessionValue'].map(key => [key, binding[key]]));
+  if (!owner || !writer || [owner, writer].some(w => w.paused || w.stopped || w.handoff || state.routes[w.route]?.paused))
+    refuse('The original owner and writer must both be live, settled and unpaused');
+  const grant = { ...old, id: queued.id, scope: queued.scope, ownerToken: state.ownerToken,
+    supervisorSession: state.supervisorSession, closeAssignment: undefined, closeExplicit: undefined };
+  delete grant.deliveryPreferences;
+  grant.deliveryPreferences = await readDeliveryPreferences(root);
+  const ticket = (oldBinding, role, parent, authority) => ({ id: randomUUID(), grantId: grant.id, role,
+    workerId: randomUUID(), child: boundary(oldBinding), parent, authority, ownerToken: state.ownerToken,
+    replacesWorker: oldBinding.workerId, replacesGrant: old.id, status: 'prepared', task: queued.scope });
+  const ownerTicket = ticket(owner, 'owner', old.parent, { grantId: grant.id });
+  const writerTicket = ticket(writer, 'writer', ownerTicket.child, { grantId: grant.id, spawnId: ownerTicket.id });
+  writerTicket.parentWorkerId = ownerTicket.workerId;
+  writerTicket.recipient = { id: grant.id };
+  const ownerBinding = { ...ownerTicket.child, workerId: ownerTicket.workerId, delegationId: ownerTicket.id,
+    checkpoint: managedCheckpointPath(root, ownerTicket.workerId), route: owner.route, paused: false,
+    lastStartNonce: ownerTicket.id,
+    role: 'owner', coordinatorId: grant.id };
+  const writerBinding = { ...writerTicket.child, workerId: writerTicket.workerId, delegationId: writerTicket.id,
+    checkpoint: managedCheckpointPath(root, writerTicket.workerId), route: writer.route, paused: false,
+    lastStartNonce: writerTicket.id,
+    recipient: { ...ownerTicket.child, id: grant.id, role: 'owner' } };
+  const transition = { grant, ownerTicket, writerTicket, oldClaim: closing.claim };
+  const fence = ownerLaunchPath(root, old.checkout);
+  await claimOwnerLaunch(fence, grant.id, true);
+  try {
+    const latest = await readLive();
+    requireDelegationParent(latest, old.parent);
+    await closeoutCandidate(root, old.checkout, old.id, state, latest, readPane, readLive);
+    if (!stillCurrent()) refuse('Retained closeout interrupted before commit');
+  } catch (error) {
+    await release(fence, grant.id);
+    throw error;
+  }
+  for (const binding of closing.bindings) {
+    state.retiredWorkers[binding.workerId] = { ...binding, paused: true, retiredBy: grant.id };
+    delete state.workers[binding.workerId];
+  }
+  state.workers[ownerBinding.workerId] = ownerBinding;
+  state.workers[writerBinding.workerId] = writerBinding;
+  state.closedAssignments[old.id] = { launchId: grant.id, writerId: closing.claim.id,
+    ownerToken: state.ownerToken, at: new Date().toISOString() };
+  state.assignmentQueues[grant.id] = queue.slice(1);
+  delete state.assignmentQueues[old.id];
+  (state.retainedAssignments ??= {})[grant.id] = transition;
+  await commit();
+  return grant.id;
+}
+
+export async function finishRetainedAssignment(root, state, id, stillCurrent, commit, send = sendAction) {
+  const transition = state.retainedAssignments?.[id];
+  if (!transition || !stillCurrent()) return false;
+  const { grant, ownerTicket, writerTicket, oldClaim } = transition;
+  const old = await readJson(grantPath(root, oldClaim.grantId));
+  const claimPath = writerClaimPath(root, grant.checkout);
+  const fence = ownerLaunchPath(root, grant.checkout);
+  const heldFence = await optionalRecord(fence);
+  if (transition.completed) {
+    if (heldFence?.token === grant.id) await release(fence, grant.id);
+    delete state.retainedAssignments[id];
+    await commit();
+    return true;
+  }
+  if (heldFence?.token !== grant.id) refuse('Retained assignment checkout fence changed');
+  const nextClaim = { id: writerTicket.id, grantId: grant.id };
+  const currentClaim = await readJson(claimPath);
+  if (!isDeepStrictEqual(currentClaim, oldClaim) && !isDeepStrictEqual(currentClaim, nextClaim))
+    refuse('Retained assignment writer claim changed');
+  const prepare = async (path, data) => {
+    if (!await optionalRecord(path)) await claim(path, data);
+  };
+  if (grant.ownerToken !== state.ownerToken) {
+    if (await ownerAlive(root, grant.ownerToken)) refuse('Retained assignment predecessor is still live');
+    const previous = state.predecessorSupervisor;
+    if (previous?.token !== grant.ownerToken || previous?.sessionId !== grant.supervisorSession)
+      refuse('Retained assignment supervisor lineage changed');
+    Object.assign(grant, { ownerToken: state.ownerToken, supervisorSession: state.supervisorSession });
+    await commit();
+  }
+  await atomicJson(grantPath(root, grant.id), grant);
+  await prepare(join(root, `spawn-key-${digest(`${grant.id}\nassignment-owner`)}.json`), { id: ownerTicket.id });
+  if (!old.revoked) await atomicJson(grantPath(root, old.id), { ...old, revoked: true });
+  if (isDeepStrictEqual(currentClaim, oldClaim)) await atomicJson(claimPath, nextClaim);
+  for (const initial of [writerTicket, ownerTicket]) {
+    const path = spawnPath(root, initial.id);
+    const saved = await optionalRecord(path);
+    const receiptPath = join(root, `spawn-receipt-${initial.id}.json`);
+    const sent = receipt => receipt?.id === initial.id && receipt.status === 'sent';
+    if (saved && !isDeepStrictEqual(saved, { ...initial, status: saved.status, ownerToken: saved.ownerToken }))
+      refuse('Retained assignment ticket changed');
+    if (sent(await optionalRecord(receiptPath))) {
+      if (saved?.status === 'dispatching') await atomicJson(path, { ...saved, status: 'dispatched' });
+      else if (saved?.status !== 'dispatched') refuse('Retained assignment receipt has no matching ticket');
+      continue;
+    }
+    if (saved || await optionalRecord(receiptPath))
+      refuse(`Retained ${initial.role} start is unconfirmed. Inspect its receipt; do not resend.`);
+    if (!stillCurrent() || state.ownerToken !== grant.ownerToken || state.workers[initial.workerId]?.paused ||
+        state.routes[state.workers[initial.workerId]?.route]?.paused) return false;
+    const ticket = { ...initial, ownerToken: state.ownerToken, status: 'dispatching' };
+    await claim(path, ticket);
+    let reply;
+    try {
+      reply = await send(root, { type: 'retained-assignment', id: ticket.id,
+        workerId: ticket.replacesWorker }, ticket.replacesWorker, { timeoutMs: 15000 });
+    } catch {
+      refuse(`Retained ${ticket.role} transport interrupted. Inspect its receipt before continuing; do not resend.`);
+    }
+    if (reply?.accepted && reply.id === ticket.id) {
+      for (let i = 0; i < 100 && !sent(await optionalRecord(receiptPath)); i++) await delay(50);
+    }
+    if (!sent(await optionalRecord(receiptPath))) refuse(`Retained ${ticket.role} run was not observed. Inspect its receipt; do not resend.`);
+    await atomicJson(path, { ...ticket, status: 'dispatched' });
+  }
+  // Keep the completed record until fence release is durable. A restart in
+  // either direction of this boundary cannot repeat an observed task.
+  transition.completed = true;
+  await commit();
+  await release(fence, grant.id);
+  delete state.retainedAssignments[id];
+  await commit();
+  return true;
+}
+
 export async function abandonLaunchAssignment(root, request, state, readPane, readSnapshot, stillCurrent, commit) {
   const attempt = await readJson(spawnPath(root, request.id));
   const { grant } = await delegationAuthority(root, attempt.authority, attempt.parent);
@@ -1639,7 +1783,43 @@ async function startSupervisor(root, socketPath, ctx, parent, scope, allowed) {
 }
 
 export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
-  paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN, registerOwner } = {}) {
+  paneId = process.env.HERDR_PANE_ID, delegationId = process.env.PI_CONTINUATION_SPAWN, registerOwner, replaceOwner } = {}) {
+  async function adoptRetainedAssignment(action, ctx, prior) {
+    if (!isId(action.id) || action.workerId !== prior.workerId) return { accepted: false };
+    const ticket = await readJson(spawnPath(root, action.id));
+    const state = await readSupervisor(root);
+    const next = state.workers[ticket.workerId];
+    const retired = state.retiredWorkers[prior.workerId];
+    const closed = state.closedAssignments[ticket.replacesGrant];
+    const transition = state.retainedAssignments[ticket.grantId];
+    const expected = ticket.role === 'owner' ? transition?.ownerTicket : transition?.writerTicket;
+    const live = await snapshot(socketPath);
+    if (!expected || !isDeepStrictEqual(ticket, { ...expected, status: 'dispatching', ownerToken: state.ownerToken }) ||
+        ticket.status !== 'dispatching' || ticket.replacesWorker !== prior.workerId ||
+        !next || !retired || retired.retiredBy !== closed?.launchId || next.delegationId !== ticket.id ||
+        next.sessionId !== prior.sessionId || next.sessionFile !== prior.sessionFile ||
+        ticket.ownerToken !== state.ownerToken || state.paused || next.paused || state.routes[next.route]?.paused ||
+        !sameOccupant(live.agents.find(a => a.pane_id === paneId), next)) return { accepted: false };
+    const version = worker.interactionVersion;
+    if (ticket.role === 'owner') await replaceOwner(ctx, prior.coordinatorId, next.coordinatorId);
+    await worker.adoptRetained(ctx, prior, next, () => version === worker.interactionVersion);
+    pi.appendEntry('pi-continuation-delegation', { grantId: ticket.grantId, spawnId: ticket.id,
+      sessionId: next.sessionId });
+    const role = ticket.role === 'owner' ? 'Non-writing coordinating owner and user inbox. ' +
+      `The existing writer (${transition.writerTicket.workerId}) already received this scope. ` +
+      'Wait for that writer; do not spawn another. Use independent review and follow current delivery preferences and required decision gates.' :
+      'Implementation writer.';
+    await worker.dispatchDelegated(ctx, ticket,
+      `New approved assignment. Previous assignments and approvals do not carry forward.\n${role}\n\n${ticket.task}\n\n${delegationInstructions}`);
+    return { accepted: true, id: ticket.id };
+  }
+  let retaining = false;
+  worker.onRetainedAssignment(async (...args) => {
+    if (retaining) return { accepted: false };
+    retaining = true;
+    try { return await adoptRetainedAssignment(...args); }
+    finally { retaining = false; }
+  });
   let closeBootstrap;
   let stopInput;
   let generation = 0;
@@ -1727,6 +1907,18 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       `${options.assignment} ${options.worktree.repository}` : options.assignment,
       (title, choices) => worker.selectManagement(ctx, title, choices), options.space);
     const target = checkout.checkout;
+    const pendingRetained = Object.values(state.retainedAssignments ?? {}).find(item =>
+      item.oldClaim.grantId === options.closeAssignment && item.grant.scope === options.assignment);
+    const nextQueued = state.assignmentQueues[options.closeAssignment]?.[0];
+    if (options.closeAssignment && !originOwner && !options.worktree && !options.space &&
+        (nextQueued?.scope === options.assignment || pendingRetained)) {
+      if (!allowed()) refuse('Planning session changed; no retained assignment started');
+      const result = await sendAction(root, { type: 'assignment-retained-start', grantId: options.closeAssignment,
+        scope: options.assignment, planner: grant.parent, ownerToken: state.ownerToken }, 'supervisor', { timeoutMs: 45000 });
+      if (!result.accepted) refuse(result.message ?? 'Retained assignment start not confirmed');
+      ctx.ui.notify('Queued assignment started in the existing owner and writer panes.', 'info');
+      return;
+    }
     const preflight = await recoverPreflight(root, target, scope, grant.parent, state);
     const confirmed = preflight && confirmedRetryAbandonment(preflight.grant, preflight.attempt) ? preflight.grant : undefined;
     const recoveredClose = await recordedCloseout(root, target, scope, grant.parent, state);

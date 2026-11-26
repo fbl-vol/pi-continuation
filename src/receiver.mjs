@@ -10,10 +10,11 @@ import { spawnPath } from './delegation.mjs';
 import { unresolvedDecisionAtStop } from './policy.mjs';
 
 // Never start this listener without an explicitly registered native worker session.
-export function receive(root, worker, pi, context, stopVersion, isHeld) {
+export function receive(root, worker, pi, context, stopVersion, isHeld, retain) {
   const report = diagnostics('worker');
   return listenJson(root, worker.workerId,
-    action => accept(root, worker, action, context, pi, stopVersion, isHeld),
+    action => action?.type === 'retained-assignment' && retain ? retain(action, context, worker) :
+      accept(root, worker, action, context, pi, stopVersion, isHeld),
     error => report('accept continuation', error, context));
 }
 

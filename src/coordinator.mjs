@@ -326,5 +326,11 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     chatInput = chatTurn = undefined;
     await close?.(); close = undefined;
   });
-  return { registerOwner: (ctx, id) => register(ctx, id, true), releaseDecision, submitDecision };
+  return { registerOwner: (ctx, id) => register(ctx, id, true),
+    async replaceOwner(ctx, before, next) {
+      if (coordinator?.id !== before || coordinator.role !== 'owner') throw new Error('Retained coordinator changed');
+      await close?.();
+      coordinator = undefined;
+      return register(ctx, next, true);
+    }, releaseDecision, submitDecision };
 }

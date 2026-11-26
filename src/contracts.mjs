@@ -130,6 +130,20 @@ export function decodeSupervisor(record) {
       queuedIds.add(entry.id);
     }
   }
+  if (state.retainedAssignments === undefined) state.retainedAssignments = {};
+  if (!object(state.retainedAssignments)) invalid();
+  for (const [id, transition] of Object.entries(state.retainedAssignments)) {
+    if (!object(transition) || !isId(id) || transition.grant?.id !== id ||
+        typeof transition.grant.checkout !== 'string' || !isId(transition.oldClaim?.id) ||
+        !isId(transition.oldClaim?.grantId) || state.closedAssignments[transition.oldClaim.grantId]?.launchId !== id ||
+        (transition.completed !== undefined && transition.completed !== true)) invalid();
+    for (const [role, ticket] of [['owner', transition.ownerTicket], ['writer', transition.writerTicket]]) {
+      if (!object(ticket) || ticket.role !== role || ticket.grantId !== id || !isId(ticket.id) ||
+          !isId(ticket.workerId) || !isId(ticket.replacesWorker) ||
+          state.workers[ticket.workerId]?.delegationId !== ticket.id ||
+          state.retiredWorkers[ticket.replacesWorker]?.retiredBy !== id) invalid();
+    }
+  }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
   if (!object(state.blocked)) invalid();

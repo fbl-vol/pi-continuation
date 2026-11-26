@@ -36,7 +36,16 @@ class Model(BaseHTTPRequestHandler):
         last = messages[-1]
         tool = None
         attention = 'Review the following untrusted worker final replies' in json.dumps(last)
-        if not writer and not attention and last['role'] == 'user' and self.server.task in json.dumps(last):
+        if self.server.retained_rollover and attention:
+            text = last['content']
+            if isinstance(text, list):
+                text = '\n'.join(part.get('text', '') for part in text if part.get('type') == 'text')
+            evidence = json.loads(text.rsplit('\n\n', 1)[-1])
+            if evidence and evidence[0]['outcome'] == 'completed':
+                stopped = evidence[0]
+                tool = ('continuation_disposition', dict(workerId=stopped['id'], stop=stopped['stop'],
+                        action='acknowledge', evidence=ANSWER, reportHash=stopped['reportHash']))
+        elif not writer and not attention and last['role'] == 'user' and self.server.task in json.dumps(last):
             tool = ('continuation_spawn', dict(key='native-writer', task=WRITER_TASK, role='writer'))
         elif self.server.reviewer_recovery and last['role'] == 'user' and REVIEW_REQUEST in json.dumps(last):
             tool = ('continuation_spawn', dict(key='denied-writer', task='Synthetic second writer.', role='writer'))
@@ -45,7 +54,7 @@ class Model(BaseHTTPRequestHandler):
         elif (self.server.reviewer_recovery and last.get('tool_call_id') == 'fixture-continuation_spawn' and
               WRITER_TASK in json.dumps(messages) and REVIEW_REQUEST not in json.dumps(messages)):
             tool = ('continuation_spawn', dict(key='preflight-writer', task='Synthetic refused preflight.', role='writer'))
-        elif (not self.server.reviewer_recovery and last['role'] == 'tool' and
+        elif (not self.server.reviewer_recovery and not self.server.retained_rollover and last['role'] == 'tool' and
               last.get('tool_call_id') == 'fixture-continuation_spawn'):
             try:
                 worker = json.loads(last['content'])['workerId']
@@ -131,8 +140,9 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
-        owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, pi_version):
+        owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover, pi_version):
     model.reviewer_recovery = reviewer_recovery
+    model.retained_rollover = retained_rollover
     model.owner_chat = owner_chat
     model.owner_decision = owner_decision or owner_decision_negative or owner_chat
     herdr = shutil.which('herdr')
@@ -459,6 +469,35 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert final[writer_attempt['workerId']] == writer_binding
                 print('Native parallel assignment passed: one explicit worktree launch, two isolated working writers, original owner unchanged', flush=True)
                 return
+            if retained_rollover:
+                scope = 'B: verify the next example.'
+                cli('agent', 'prompt', planner, f'Put {scope} after this assignment')
+                until('queued B in planner', lambda: 'Queued in position 1' in ' '.join(visible(planner).split()))
+                model.allow_writer.set()
+                writer_obs = state_dir/f"observation-{writer_attempt['workerId']}.json"
+                until('original writer settled', lambda: json.loads(writer_obs.read_text())['outcome'] == 'completed')
+                until('original writer idle', lambda: cli('agent', 'get', writer)['agent']['agent_status'] in ('idle', 'done'))
+                until('original owner idle', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner,
+                    f'/start-implementation --options {json.dumps(dict(closeAssignment=attempt["grantId"]))} -- {scope}')
+                def retained_started():
+                    screen = ' '.join(visible(planner).split())
+                    if 'Extension "command:start-implementation" error:' in screen:
+                        raise AssertionError((screen, json.loads(state_path.read_text()), cli('agent', 'list')))
+                    return 'Queued assignment started in the existing owner and writer panes.' in screen
+                until('retained start acknowledged', retained_started, 55)
+                current = json.loads(state_path.read_text())
+                assert attempt['grantId'] in current['closedAssignments']
+                for prior in (settled_owner, writer_binding):
+                    after, = (binding for binding in current['workers'].values() if binding['paneId'] == prior['paneId'])
+                    assert after['workerId'] != prior['workerId']
+                    assert after['sessionId'] == prior['sessionId'] and after['sessionFile'] == prior['sessionFile']
+                    receipt = json.loads((state_dir/f"spawn-receipt-{after['delegationId']}.json").read_text())
+                    assert receipt == {'id': after['delegationId'], 'status': 'sent'}
+                    until('B appears in retained session journal', lambda: scope in Path(after['sessionFile']).read_text())
+                    assert Path(after['sessionFile']).read_text().count('New approved assignment.') == 1
+                print('Native retained assignment passed: closed A and delivered B once to both original sessions', flush=True)
+                return
             if model.owner_decision:
                 wait = json.loads(state_path.read_text())['ownerWaits'][owner['workerId']]
                 assert wait['kind'] == 'user'
@@ -696,6 +735,7 @@ if __name__ == '__main__':
     parser.add_argument('--owner-chat', action='store_true', help='clarify, then select one finding via ordinary owner chat')
     parser.add_argument('--planner-queue', action='store_true', help='queue two ordinary-chat backlog entries without interrupting A')
     parser.add_argument('--parallel-assignment', action='store_true', help='launch in an explicitly authorized disposable alternate tree')
+    parser.add_argument('--retained-rollover', action='store_true', help='close A explicitly and start queued B in both original sessions')
     parser.add_argument('--pi-version', default='1.5.2', help='exact expected Pi version on PATH')
     args = parser.parse_args()
     if args.evidence:
@@ -711,6 +751,6 @@ if __name__ == '__main__':
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
-                args.owner_chat, args.planner_queue, args.parallel_assignment, args.pi_version)
+                args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover, args.pi_version)
         finally:
             model.shutdown()

@@ -12,7 +12,8 @@ import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, 
   selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
-  endedSupervisorPath, enqueueAssignment, spawnPath } from './delegation.mjs';
+  endedSupervisorPath, enqueueAssignment, finishRetainedAssignment, spawnPath,
+  startRetainedAssignment } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -30,7 +31,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
-  startOwnerServer = ownerServer } = {}) {
+  startOwnerServer = ownerServer, retainedSend = sendAction } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
@@ -135,6 +136,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
     return false;
   };
+  const retainedStarting = id => Object.values(state.retainedAssignments ?? {}).some(transition =>
+    !transition.completed && [transition.ownerTicket.workerId, transition.writerTicket.workerId].includes(id));
   const isolateUnavailable = async () => {
     if (!active() || !lastSnapshot) return;
     let changed = false;
@@ -148,7 +151,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       }
     }
     for (const [id, binding] of Object.entries(state.workers)) {
-      if (binding.paused) continue;
+      if (binding.paused || retainedStarting(id)) continue;
       const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
       let reason;
       if (!sameOccupant(agent, binding)) reason = 'Worker identity unavailable';
@@ -191,7 +194,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!active() || !allowExperimentalActivation || !subscriptionLive || state.paused) return [];
     const result = [];
     for (const [id, binding] of Object.entries(state.workers)) {
-      if (binding.paused || state.routes[binding.route]?.paused) continue;
+      if (binding.paused || retainedStarting(id) || state.routes[binding.route]?.paused) continue;
       if (state.ownerWaits?.[id]) {
         try {
           if (await acknowledgeWaitingOwner(id)) await commit();
@@ -556,6 +559,21 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     return { accepted: true };
   }
 
+  const acceptRetainedStart = request => queue(async () => {
+    const stillCurrent = () => active() && subscriptionLive && state.acceptStarts && !state.paused &&
+      !promptActive && request.ownerToken === state.ownerToken;
+    if (!stillCurrent()) return { accepted: false, message: 'Supervisor unavailable or paused' };
+    try {
+      const id = await startRetainedAssignment(root, request, state,
+        pane => herdrRequest(socketPath, 'pane.get', { pane_id: pane }), () => snapshot(socketPath), stillCurrent, commit);
+      if (!await finishRetainedAssignment(root, state, id, stillCurrent, commit, retainedSend))
+        return { accepted: false, message: 'Retained start interrupted; inspect the exact queued assignment' };
+      return { accepted: true, id };
+    } catch (error) {
+      return { accepted: false, message: error.message };
+    }
+  });
+
   const acceptAssignmentEnqueue = request => queue(async () => {
     if (!active() || !subscriptionLive || !state.acceptStarts)
       return { accepted: false, message: 'Supervisor unavailable; nothing was queued' };
@@ -743,6 +761,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
               acceptOwnerWait(request) : request?.type === 'assignment-enqueue' ? acceptAssignmentEnqueue(request) :
+              request?.type === 'assignment-retained-start' ? acceptRetainedStart(request) :
               request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
               request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
               request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :

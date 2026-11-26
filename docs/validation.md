@@ -37,6 +37,16 @@ base, branch and path under the disposable directory. It checks both writers
 are active in separate trees and the original bindings remain unchanged. It
 does not demonstrate starting the parallel assignment from ordinary chat.
 
+`--retained-rollover` submits the exact first queued scope through an explicit
+native close-and-start command. It verifies A's retirement, two fresh worker
+bindings, unchanged saved sessions and panes, and one B run receipt per role.
+The scripted model does not establish that real independent review or delivery
+obligations have been met; the explicit native closeout authorizes this fixture.
+The isolated test suite also exercises interruption before closeout commit,
+restart after a lost response with a sent receipt, and refusal to resend when
+the receipt is absent. Automatic closeout from review/delivery evidence is not
+covered by this rehearsal.
+
 [extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
 Tests/reviews verify it; they do not create requirements. Owner completion is not
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,

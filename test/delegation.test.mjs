@@ -43,7 +43,7 @@ for (const [scenario, options, attempts] of [
 });
 
 async function fixture(t, options = {}) {
-  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer });
+  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer, retainedSend: options.retainedSend });
   execFileSync('git', ['init', '--quiet', f.root]);
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
@@ -124,7 +124,8 @@ async function fixture(t, options = {}) {
         onTask: task => {
           const state = JSON.parse(readFileSync(join(f.root, 'supervisor.json'), 'utf8'));
           const enrolled = Object.values(state.workers).find(w => w.paneId === params.pane_id);
-          assert.equal(enrolled?.lastStartNonce, child.env.PI_CONTINUATION_SPAWN,
+          const spawn = JSON.parse(readFileSync(join(f.root, `spawn-${enrolled.delegationId}.json`), 'utf8'));
+          assert.equal(enrolled?.lastStartNonce, spawn.replacesWorker ? spawn.id : child.env.PI_CONTINUATION_SPAWN,
             'owner must durably enroll the exact worker BEFORE native task dispatch');
           assert.equal(enrolled.sessionId, child.native.id);
           assert.equal(enrolled.paused, false);
@@ -1372,28 +1373,90 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   });
 }
 
-test('legacy close-and-start commits A before dispatch but does not retain either native session', async t => {
-  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch']) test(
+  `close-and-start dispatches to the identical native sessions or holds on uncertainty (${fault})`, async t => {
+  let sends = 0;
+  let interrupt = fault === 'before closeout commit';
+  const { f, oldGrant, oldWriter } = await settledAssignment(t, {
+    async onSnapshot(fixture) {
+      if (!interrupt || !(await readdir(fixture.root)).some(file => file.startsWith('owner-launch-pending-'))) return;
+      const state = await fixture.state();
+      const owner = Object.values(state.workers).find(w => w.role === 'owner');
+      // Only interrupt the already-enrolled, settled A at B's precommit check.
+      if (!owner || !state.assignmentQueues[owner.coordinatorId]?.length) return;
+      fixture.agents.find(agent => agent.pane_id === owner.paneId).agent_status = 'working';
+    },
+    async retainedSend(root, action, target, options) {
+      sends++;
+      if (sends === 1 && fault === 'uncertain dispatch') throw new Error('Simulated connection loss before receipt');
+      const reply = await sendAction(root, action, target, options);
+      if (sends === 1 && fault === 'lost receipt acknowledgement') {
+        const receiptPath = join(root, `spawn-receipt-${action.id}.json`);
+        for (let i = 0; i < 100 && (!existsSync(receiptPath) || (await readJson(receiptPath)).status !== 'sent'); i++)
+          await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal((await readJson(receiptPath)).status, 'sent');
+        throw new Error('Simulated lost response after native run receipt');
+      }
+      return reply;
+    },
+  });
+  const scope = 'Assignment B: work on the next fixture.';
+  const text = `Put ${scope} after Assignment A`;
+  await f.worker.emit('input', { source: 'interactive', text });
+  f.worker.user(text);
+  await f.worker.emit('before_agent_start', { messageType: 'user', prompt: text });
+  f.worker.assistant('Queue requested.');
+  await f.worker.emit('agent_settled');
   const before = await f.state();
+  assert.equal(before.assignmentQueues[oldGrant]?.[0]?.scope, scope, JSON.stringify(f.worker.notifications));
   const ownerA = Object.values(before.workers).find(w => w.role === 'owner');
   const writerA = before.workers[oldWriter];
-  await f.worker.command('start-implementation',
-    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: work on the next fixture.`);
-  const ownerB = Object.values((await f.state()).workers).find(w => w.role === 'owner');
-  const { workerId: writerBId } = (await f.children[2].native.spawn(task)).details;
+  const start = () => f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- ${scope}`);
+  if (fault === 'before closeout commit') {
+    await assert.rejects(start(), /active or has unresolved effects/);
+    assert.equal(sends, 0);
+    assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+    assert.deepEqual((await f.state()).assignmentQueues, before.assignmentQueues);
+    assert.equal((await readdir(f.root)).some(file => file.startsWith('owner-launch-pending-')), false);
+    interrupt = false;
+    f.agents.find(agent => agent.pane_id === ownerA.paneId).agent_status = 'idle';
+    await start();
+  } else if (fault === 'none') await start();
+  else {
+    await assert.rejects(start(), /transport interrupted.*do not resend/);
+    assert.equal(sends, 1);
+    const held = await f.state();
+    assert.ok(held.closedAssignments[oldGrant], 'A was durably retired before attempting B');
+    const [transition] = Object.values(held.retainedAssignments);
+    assert.ok(transition);
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    if (fault === 'uncertain dispatch') {
+      await assert.rejects(start(), /start is unconfirmed.*do not resend/);
+      assert.equal(sends, 1);
+      assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+      return;
+    }
+    await start();
+  }
   const current = await f.state();
-  const writerB = current.workers[writerBId];
+  assert.equal(sends, 2);
+  assert.deepEqual(current.retainedAssignments, {});
+  const ownerB = Object.values(current.workers).find(w => w.role === 'owner');
+  const writerB = Object.values(current.workers).find(w => w.recipient?.id === ownerB.coordinatorId);
   const closed = current.closedAssignments[oldGrant];
-  assert.equal(closed.launchId, ownerB.delegationId);
+  assert.equal(closed.launchId, ownerB.coordinatorId);
   assert.equal(current.retiredWorkers[ownerA.workerId].retiredBy, closed.launchId);
   assert.equal(current.retiredWorkers[writerA.workerId].retiredBy, closed.launchId);
   for (const [oldBinding, newBinding] of [[ownerA, ownerB], [writerA, writerB]]) {
-    assert.notEqual(newBinding.paneId, oldBinding.paneId);
-    assert.notEqual(newBinding.sessionId, oldBinding.sessionId);
+    assert.equal(newBinding.paneId, oldBinding.paneId);
+    assert.equal(newBinding.sessionId, oldBinding.sessionId);
+    assert.equal(newBinding.sessionFile, oldBinding.sessionFile);
+    assert.notEqual(newBinding.workerId, oldBinding.workerId);
     assert.equal((await readJson(join(f.root, `spawn-receipt-${newBinding.delegationId}.json`))).status, 'sent');
   }
-  assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task',
-    'split', 'start', 'task', 'split', 'start', 'task']);
+  assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task', 'task', 'task']);
 });
 
 test('old delegated attempt cannot borrow a replacement assignment on the same native owner', async t => {
