@@ -126,27 +126,35 @@ function queueRequest(text) {
 }
 
 export async function enqueueAssignment(root, state, request, live) {
-  const { planner, text, leaf } = request;
-  const queued = queueRequest(text);
+  const { planner, text, leaf, conflict } = request;
+  const queued = conflict ? { scope: text } : queueRequest(text);
   const reject = message => ({ accepted: false, message });
-  if (!queued || typeof leaf !== 'string' || !leaf || !planner?.sessionId || !planner.sessionFile ||
+  if (!queued || typeof queued.scope !== 'string' || !queued.scope.trim() || Buffer.byteLength(queued.scope) > 8000 ||
+      (conflict && (!isId(conflict.grantId) || !isId(conflict.id) || typeof conflict.checkout !== 'string')) || typeof leaf !== 'string' || !leaf || !planner?.sessionId || !planner.sessionFile ||
       state.supervisorSession === planner.sessionId || Object.values(state.workers).some(w =>
         w.sessionId === planner.sessionId || w.sessionFile === planner.sessionFile))
     return reject('Queue work from the exact planning session that started the current assignment');
   try { requireDelegationParent(live, planner); }
   catch { return reject('The exact planning session changed; nothing was queued'); }
   const candidates = [];
-  const after = queued.after.toLowerCase();
+  const after = queued.after?.toLowerCase();
   for (const owner of Object.values(state.workers)) {
-    if (owner.role !== 'owner' || owner.stopped || !owner.delegationId || !owner.coordinatorId) continue;
+    if (owner.role !== 'owner' || owner.stopped || !owner.delegationId || !owner.coordinatorId ||
+        (conflict && owner.coordinatorId !== conflict.grantId)) continue;
     const attempt = await readJson(spawnPath(root, owner.delegationId));
     const grant = await readJson(grantPath(root, owner.coordinatorId));
     if (attempt.status !== 'dispatched' || attempt.role !== 'owner' || attempt.workerId !== owner.workerId ||
         attempt.grantId !== grant.id || grant.revoked || !grant.ownerLaunch ||
         !isDeepStrictEqual(grant.parent, planner)) continue;
     const title = grant.scope.split('\n', 1)[0].split(':', 1)[0].trim().toLowerCase();
-    if (after === 'this assignment' || after === 'the current assignment' || after === title)
-      candidates.push(grant.id);
+    if (conflict) {
+      const claim = await optionalRecord(writerClaimPath(root, conflict.checkout));
+      const writer = Object.values(state.workers).find(w => w.delegationId === conflict.id &&
+        w.recipient?.id === grant.id && !w.paused && !w.stopped);
+      if (grant.checkout === conflict.checkout && claim?.id === conflict.id && claim.grantId === grant.id && writer &&
+          sameOccupant(live.agents.find(agent => agent.pane_id === writer.paneId), writer) &&
+          sameOccupant(live.agents.find(agent => agent.pane_id === owner.paneId), owner)) candidates.push(grant.id);
+    } else if (after === 'this assignment' || after === 'the current assignment' || after === title) candidates.push(grant.id);
   }
   if (candidates.length !== 1) return reject('Name one active assignment started from this planning session; nothing was queued');
   const [grantId] = candidates;
@@ -213,12 +221,15 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     try { await readJson(path); refuse('Unresolved owner launch; inspect before choosing another worktree'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
+  let conflict;
   for (const path of new Set([writerClaimPath(root, target), writerClaimPath(root, common)])) {
     let claimRecord;
     try { claimRecord = await readJson(path); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-    if (!active.some(binding => binding.delegationId === claimRecord.id))
-      refuse('Writer claim is not accounted for by the live writer; inspect before choosing another worktree');
+    const holder = active.find(binding => binding.delegationId === claimRecord.id);
+    if (!holder) refuse('Writer claim is not accounted for by the live writer; inspect before choosing another worktree');
+    if (path === writerClaimPath(root, target) && holder.recipient?.id === claimRecord.grantId && isId(claimRecord.grantId))
+      conflict = { ...claimRecord, checkout: target };
   }
   const base = (await exec('git', ['-C', target, 'rev-parse', '--verify', 'HEAD'],
     { timeout: 2500, maxBuffer: 8192, windowsHide: true })).stdout.trim();
@@ -231,14 +242,15 @@ async function worktreeForLiveWriter(root, socketPath, state, live, target, scop
     if (authorizedWorktree.repository !== target || authorizedWorktree.base !== base ||
         !isAbsolute(path) || !branch) refuse('Authorized worktree does not match the exact repository/base/path');
   } else {
-    const title = `${queueInstead ? 'This working tree already has a writer. Queue the work or authorize a separate tree.' : 'Create a separate worktree for this assignment?'}\nRepository: ${target}\n` +
+    const canQueue = queueInstead && conflict;
+    const title = `${canQueue ? 'This working tree already has a writer. Queue the work or authorize a separate tree.' : 'Create a separate worktree for this assignment?'}\nRepository: ${target}\n` +
       `Base: ${base}\nBranch: ${branch}\nPath: ${path}`;
     const choices = explicitSpace ? ['Create this worktree', 'Cancel'] :
-      ['Create in current space', 'Create in new space', ...(queueInstead ? ['Queue after the current assignment'] : []), 'Cancel'];
+      ['Create in current space', 'Create in new space', ...(canQueue ? ['Queue after the current assignment'] : []), 'Cancel'];
     const choice = await worker.selectManagement(ctx, title, choices);
-    if (queueInstead && choice === 'Queue after the current assignment' && choices.includes(choice)) {
+    if (canQueue && choice === 'Queue after the current assignment' && choices.includes(choice)) {
       if (!allowed() || !sameSession(currentSession(ctx), parent)) refuse('Planning session changed; nothing was queued');
-      await queueInstead();
+      await queueInstead(conflict);
       return undefined;
     }
     if (!choice?.startsWith('Create') || !choices.includes(choice))
@@ -797,7 +809,9 @@ async function closeoutCandidate(root, checkout, grantId, state, live, readPane,
   for (const file of await readdir(root)) {
     if (!/^spawn-[a-f0-9-]{36}\.json$/.test(file)) continue;
     const spawned = await readJson(join(root, file));
-    if (spawned.grantId === grantId && spawned.status !== 'dispatched')
+    if (spawned.grantId === grantId && spawned.status !== 'dispatched' &&
+        !(file === `spawn-${spawned.id}.json` && await settledWriterPreflight(root, spawned, grant,
+          { spawnId: ownerAttempt.id, workerId: owner.workerId }, owner)))
       refuse(`Unresolved assignment startup ${spawned.id}`);
   }
   for (const binding of [owner, ...children]) {
@@ -2013,10 +2027,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         grant.abandonAssignment = true;
       }
     }
-    const queueInstead = parallelChat && !options.worktree ? async () => {
+    const queueInstead = parallelChat && !options.worktree ? async conflict => {
       const current = currentSession(ctx);
       const result = await sendAction(root, { type: 'assignment-enqueue', planner: grant.parent,
-        text: `Put ${options.assignment} after this assignment`, leaf: current.leaf }, 'supervisor');
+        text: options.assignment, conflict, leaf: current.leaf }, 'supervisor');
       if (!result.accepted) refuse(result.message ?? 'Queue request not confirmed');
       ctx.ui.notify(`Queued in position ${result.position}. The current assignment is unchanged.`, 'info');
     } : undefined;

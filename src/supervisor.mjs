@@ -9,7 +9,7 @@ import { sameOccupant, snapshot, isSettled, request as herdrRequest } from './he
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
 import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid,
-  selectedReviewFinding, validReviewFindings } from './contracts.mjs';
+  ownerRolloverBlocker, selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
   endedSupervisorPath, enqueueAssignment, finishRetainedAssignment, recordAssignmentOutcome, spawnPath,
@@ -887,7 +887,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const retiredWorkers = Object.fromEntries(Object.entries(state.retiredWorkers).map(([id, old]) =>
           [id, { paneId: old.paneId, sessionId: old.sessionId, retiredBy: old.retiredBy }]));
         notify(ctx, JSON.stringify({ globalPaused: state.paused, globalReason: state.reason,
-          failure: state.failure, subscriptionLive,
+          failure: state.failure, subscriptionLive, queuedAssignmentBlocker: ownerRolloverBlocker(state),
           routes: state.routes, workers, notices: state.notices, retiredWorkers }).slice(0, 6000)); return;
       }
       if (verb === 'coordinator') {

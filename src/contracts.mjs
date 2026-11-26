@@ -206,6 +206,22 @@ export function decodeSupervisor(record) {
   return state;
 }
 
+export function ownerRolloverBlocker(state, coordinator) {
+  for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes ?? {})) {
+    if (!outcome.blocker) continue;
+    const pending = Object.values(state.retainedAssignments ?? {}).find(item => item.oldClaim.grantId === grantId);
+    if (coordinator) {
+      const owner = state.workers[outcome.workerId] ?? state.retiredWorkers[outcome.workerId];
+      if (!owner || owner.sessionId !== coordinator.sessionId || owner.sessionFile !== coordinator.sessionFile ||
+          owner.paneId !== coordinator.paneId ||
+          !(pending ? [grantId, pending.grant.id] : [grantId]).includes(coordinator.id)) continue;
+    }
+    return { grantId, queuedId: pending?.grant.id ?? state.assignmentQueues?.[grantId]?.[0]?.id,
+      reason: outcome.blocker, next: pending ? 'Inspect the exact start receipts; do not resend the task.' :
+        'Inspect the exact assignment wait, holds and delivery outcome before advancing.' };
+  }
+}
+
 // Only an unchanged settled report (or its exact native-command typing witness)
 // can identify the current owner decision stop.
 export function ownerDecisionEvidence(observed, binding) {

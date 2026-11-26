@@ -36,7 +36,7 @@ Removal does not delete retained continuation state or session history. Release 
 
 ## Everyday workflow (current source)
 
-After a separately authorized installation, use `/start-implementation` in the planning session for an agreed assignment. It reuses or starts the intended supervisor, enrolls one coordinating owner, and gives that owner bounded delegation for one writer and read-only reviewers. For an unrelated next assignment in the same tree, use `/start-implementation` again and explicitly authorize closing the exact settled previous assignment; it does not attest to missing review or delivery. In a supervised session, use `/continuation` for status, delivery preferences, Pause/Stop, Return and contextual recovery. The owner still delegates and waits using its native tools; an actual user finding selection is never inferred.
+After a separately authorized installation, use `/start-implementation` in the planning session for an agreed assignment. It reuses or starts the intended supervisor, enrolls one coordinating owner, and gives that owner bounded delegation for one writer and read-only reviewers. To queue the next agreed assignment in the same tree, use ordinary planner chat: `Put B: <scope> after A`. The exact owner records completed independent review and applicable delivery at the final revision; eligible queued work then starts in the same owner and writer sessions. Use the explicit native close-and-start control for manual closeout or supported recovery, not to attest to missing review or delivery. In a supervised session, use `/continuation` for status, delivery preferences, Pause/Stop, Return and contextual recovery. The owner still delegates and waits using its native tools; an actual user finding selection is never inferred.
 
 If the supervisor ended gracefully and its replacement is running, use `/continuation-delegate recover-reviewers` in the exact surviving coordinating owner. One confirmation restores read-only reviewer delegation to that replacement only. It cannot restore writer delegation, clear waits or pauses, or retry an earlier attempt. A shutdown without a recorded end (including one from an older build) is not eligible.
 
@@ -236,8 +236,11 @@ supervisor. `continuation_owner_wait` records a child wait for named worker IDs 
 user-decision wait. Child notices never answer a decision. In current source, use
 **Submit owner decision** in that exact owner pane and enter the chosen scope once.
 The extension relays the submitted text to the existing eligible writer and releases
-only that wait after a confirmed receipt. Ordinary chat is not a decision submission.
-An agent with terminal-input access could type the same response; Pi/Herdr do not
+only that wait after a confirmed receipt. For an Ask First review with registered
+numbered findings, ordinary owner chat such as `fix the first only` can select one
+finding; a clarification leaves the exact wait in place. Other decisions retain
+the explicit native control. An agent with terminal-input access could type the
+same response; Pi/Herdr do not
 identify who typed it. Existing holds and pauses remain in force. For older or
 unsubmitted waits, the explicit release path still requires confirmation and a
 successfully settled ordinary turn. An uncertain relay stays fenced for inspection;

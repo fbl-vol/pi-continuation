@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { watch } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
 import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 import { currentSession } from './session.mjs';
-import { ownerDecisionEvidence, readSupervisor, readObservation, selectedReviewFinding } from './contracts.mjs';
+import { ownerDecisionEvidence, ownerRolloverBlocker, readSupervisor, readObservation, selectedReviewFinding } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { snapshot, sameOccupant, isSettled } from './herdr.mjs';
 import { pinnedCheckpoint, coordinatorCandidate } from './bindings.mjs';
@@ -16,6 +17,8 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   socketPath = process.env.HERDR_SOCKET_PATH, confirmOwner, decisionUI } = {}) {
   let close;
   let coordinator;
+  let blockerWatcher;
+  let lastBlocker;
   let generation = 0;
   let humanPending = false;
   let uiPromptActive = false;
@@ -103,6 +106,28 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   });
   pi.on('ui_prompt_start', () => { uiPromptActive = true; });
   pi.on('ui_prompt_end', () => { uiPromptActive = false; });
+  function watchRollover(ctx) {
+    if (blockerWatcher || coordinator?.role !== 'owner') return;
+    const check = async () => {
+      const record = coordinator;
+      if (!record) return;
+      try {
+        const state = await readSupervisor(root);
+        if (coordinator !== record || currentSession(ctx).id !== record.sessionId ||
+            currentSession(ctx).file !== record.sessionFile) return;
+        const blocker = ownerRolloverBlocker(state, record);
+        const key = JSON.stringify(blocker);
+        if (key === lastBlocker) return;
+        lastBlocker = key;
+        if (blocker) ctx.ui.notify(`Queued assignment ${blocker.queuedId ?? ''} could not start: ${blocker.reason} ${blocker.next}`, 'warning');
+      } catch { /* Missing/transient state is not a new blocker. */ }
+    };
+    blockerWatcher = watch(root, { persistent: false }, (_event, name) => {
+      if (name?.toString() === 'supervisor.json') void check();
+    });
+    blockerWatcher.on('error', error => report('observe rollover blocker', error));
+    void check();
+  }
   pi.on('session_start', async (_event, ctx) => {
     coordinator = undefined;
     if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !paneId) return;
@@ -114,6 +139,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       if (record.sessionId !== entry.sessionId || record.sessionFile !== currentSession(ctx).file) return;
       close = await listen(record, ctx);
       coordinator = record;
+      watchRollover(ctx);
     } catch (error) { report('restore registration', error, ctx); }
   });
 
@@ -205,6 +231,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       ...(owner ? { role: 'owner' } : {}) });
     close = await listen(record, ctx);
     coordinator = record;
+    watchRollover(ctx);
     return record;
   }
 
@@ -361,6 +388,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     chatInput = chatTurn = deliveryOutcome = undefined;
+    blockerWatcher?.close(); blockerWatcher = undefined; lastBlocker = undefined;
     await close?.(); close = undefined;
   });
   return { registerOwner: (ctx, id) => register(ctx, id, true),

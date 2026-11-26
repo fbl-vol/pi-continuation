@@ -503,7 +503,16 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 final = json.loads(state_path.read_text())['workers']
                 assert final[owner['workerId']] == settled_owner
                 assert final[writer_attempt['workerId']] == writer_binding
-                print('Native parallel chat passed: one explicit worktree choice, two isolated working writers, original owner unchanged', flush=True)
+                scope = 'Queue this fixture against the original checkout'
+                cli('agent', 'prompt', planner, f'Start {scope} separately')
+                until('same-tree choice after parallel assignment', separate_choice)
+                cli('agent', 'send-keys', planner, 'down', 'down', 'enter')
+                until('queued against exact occupied checkout', lambda:
+                      'Queued in position 1' in ' '.join(visible(planner).split()))
+                queues = json.loads(state_path.read_text())['assignmentQueues']
+                assert [entry['scope'] for entry in queues[attempt['grantId']]] == [scope]
+                assert not queues.get(second_owner['coordinatorId'])
+                print('Native parallel chat passed: distinct writers and the conflict picker queued against the original grant', flush=True)
                 return
             if retained_rollover or automatic_rollover:
                 scope = 'B: verify the next example.'

@@ -88,9 +88,16 @@ function assignmentMessages(branch, projection, boundary) {
   const index = branch.findIndex(entry => entry.id === boundary);
   if (index < 0 || !Array.isArray(projection.entries))
     throw new Error('The current branch does not contain the assignment checkpoint boundary');
-  const sources = new Set(branch.slice(index + 1).filter(entry => entry.type === 'message').map(entry => entry.id));
-  // A summary written after the boundary may summarize the *entire* earlier
-  // conversation. Only projected contributions by this assignment's native
-  // message entries are attributable without introducing a second compactor.
-  return projection.entries.filter(entry => sources.has(entry.sourceEntry.id)).flatMap(entry => entry.messages);
+  const projected = new Map(projection.entries.map(entry => [entry.sourceEntry.id, entry.messages]));
+  const epoch = branch.slice(index + 1);
+  const edits = new Map(epoch.filter(entry => entry.type === 'context_edit').map(entry => [entry.targetId, entry]));
+  // Native compaction hides earlier messages from the model projection, not
+  // from the saved branch. Retain only this epoch's attributable narrative.
+  // Never substitute a summary: its ancestry may span assignments.
+  return epoch.filter(entry => entry.type === 'message').flatMap(entry => {
+    const edit = edits.get(entry.id);
+    if (edit?.replacement === null) return [];
+    if (edit?.replacement) return [{ ...entry.message, content: edit.replacement.content }];
+    return projected.get(entry.id) ?? [entry.message];
+  });
 }

@@ -1374,7 +1374,7 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
 }
 
 for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch',
-  'automatic', 'automatic lost receipt', 'automatic uncertain dispatch']) test(
+  'automatic', 'automatic preflight refusal', 'automatic refusal with receipt', 'automatic lost receipt', 'automatic uncertain dispatch']) test(
   `close-and-start dispatches to the identical native sessions or holds on uncertainty (${fault})`, async t => {
   let sends = 0;
   const automatic = fault.startsWith('automatic');
@@ -1423,6 +1423,14 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
       'commit', '--quiet', '--allow-empty', '-m', 'Exact reviewed fixture revision']);
     const revision = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const owner = f.children[0].native;
+    if (fault.includes('refusal')) {
+      await assert.rejects(owner.spawn({ ...task, key: 'refused-second-writer', task: 'Second writer must not start.' }), /writer/);
+      const attempts = await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file))));
+      const refused = attempts.find(attempt => attempt.key === 'refused-second-writer');
+      assert.equal(refused.status, 'preflight-refused');
+      if (fault === 'automatic refusal with receipt')
+        await atomicJson(join(f.root, `spawn-receipt-${refused.id}.json`), { id: refused.id, status: 'accepted' });
+    }
     const outcome = { revision, review: 'Independent fixture review verified exact HEAD.', delivery: 'No external delivery owed in this fixture.' };
     const settleOutcome = async (args, aborted = false) => {
       await owner.tool('continuation_assignment_delivered', args);
@@ -1445,6 +1453,13 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
     assert.equal(sends, 0);
     await f.supervisorCommand('activate global');
     await settleOutcome(outcome);
+    if (fault === 'automatic refusal with receipt') {
+      await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('Unresolved assignment startup'),
+        'An accepted receipt invalidates the no-effect proof');
+      assert.equal(sends, 0);
+      assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+      return;
+    }
     if (loseReceipt || uncertain) {
       await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('transport interrupted'),
         'First interrupted dispatch must record the blocker');
@@ -1455,6 +1470,13 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
         await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('start is unconfirmed'),
           'Restart must expose the missing receipt without retrying');
         assert.equal(sends, 1);
+        for (let i = 0; i < 100 && !owner.notifications.some(([text]) => text.includes('Inspect the exact start receipts')); i++)
+          await new Promise(resolve => setTimeout(resolve, 10));
+        assert.ok(owner.notifications.some(([text]) => text.includes('Inspect the exact start receipts')));
+        await f.supervisorCommand('status');
+        const [status] = f.supervisor.notifications.at(-1);
+        assert.match(status, /queuedAssignmentBlocker.*do not resend/);
+        assert.equal(owner.messages.length, 0, 'visibility must not wake the owner agent');
         assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
         return;
       }
