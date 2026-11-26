@@ -401,7 +401,10 @@ export async function delegationAuthority(root, reference, binding, commandEvide
   if (worker?.role === 'owner' && ['user', 'released'].includes(state.ownerWaits?.[worker.workerId]?.kind))
     refuse('Owner is waiting for a user decision; no delegation through this gate');
   if (grant.ownerLaunch) {
-    if (reference.spawnId && worker?.role !== 'owner') refuse('Exact supervised coordinating owner required');
+    // The same native owner session can remain live after assignment closeout.
+    // Do not let a retained A attempt borrow the authority of B's binding.
+    if (reference.spawnId && (worker?.role !== 'owner' || worker.coordinatorId !== grant.id ||
+        worker.delegationId !== launchAttempt?.id)) refuse('Exact supervised coordinating owner assignment required');
     if (!reference.spawnId && (state.supervisorSession === binding.sessionId ||
       Object.values(state.workers).some(w => (w.sessionId === binding.sessionId || w.sessionFile === binding.sessionFile) &&
         !(w.role === 'owner' && grant.closeAssignment === w.coordinatorId &&

@@ -1372,6 +1372,43 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   });
 }
 
+test('legacy close-and-start commits A before dispatch but does not retain either native session', async t => {
+  const { f, oldGrant, oldWriter } = await settledAssignment(t);
+  const before = await f.state();
+  const ownerA = Object.values(before.workers).find(w => w.role === 'owner');
+  const writerA = before.workers[oldWriter];
+  await f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- Assignment B: work on the next fixture.`);
+  const ownerB = Object.values((await f.state()).workers).find(w => w.role === 'owner');
+  const { workerId: writerBId } = (await f.children[2].native.spawn(task)).details;
+  const current = await f.state();
+  const writerB = current.workers[writerBId];
+  const closed = current.closedAssignments[oldGrant];
+  assert.equal(closed.launchId, ownerB.delegationId);
+  assert.equal(current.retiredWorkers[ownerA.workerId].retiredBy, closed.launchId);
+  assert.equal(current.retiredWorkers[writerA.workerId].retiredBy, closed.launchId);
+  for (const [oldBinding, newBinding] of [[ownerA, ownerB], [writerA, writerB]]) {
+    assert.notEqual(newBinding.paneId, oldBinding.paneId);
+    assert.notEqual(newBinding.sessionId, oldBinding.sessionId);
+    assert.equal((await readJson(join(f.root, `spawn-receipt-${newBinding.delegationId}.json`))).status, 'sent');
+  }
+  assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task',
+    'split', 'start', 'task', 'split', 'start', 'task']);
+});
+
+test('old delegated attempt cannot borrow a replacement assignment on the same native owner', async t => {
+  const { f } = await settledAssignment(t);
+  const owner = f.children[0].native;
+  const state = await f.state();
+  const binding = Object.values(state.workers).find(w => w.role === 'owner');
+  state.workers[binding.workerId] = { ...binding, coordinatorId: randomUUID(), delegationId: randomUUID() };
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  const effects = [...f.effects];
+  await assert.rejects(owner.spawn({ key: 'old-delayed-review', task: 'Review A.', role: 'read-only' }),
+    /Exact supervised coordinating owner assignment required/);
+  assert.deepEqual(f.effects, effects);
+});
+
 test('P1/P7 a settled absent temporary reviewer does not prevent normal A closeout', async t => {
   const closedPanes = [];
   const { f, oldGrant } = await settledAssignment(t, { closedPanes, historicalPanes: [] });
