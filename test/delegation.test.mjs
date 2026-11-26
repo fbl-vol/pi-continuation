@@ -2469,7 +2469,7 @@ test('P3/P4 baseline: surviving exact assignment owner loses delegation after su
   assert.equal((await f.state()).workers[(await f.attempt()).workerId]?.paused, false);
 });
 
-const recoverReviewers = owner => owner.command('continuation-delegate', 'recover-reviewers');
+const recoverReviewers = owner => owner.continuation.delegation.recoverReviewers(owner.ctx);
 const recoveredReview = { key: 'review-after-restart', task: 'Review A.', role: 'read-only' };
 
 test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting authority or history', async t => {
@@ -2497,12 +2497,21 @@ test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting 
   await assert.rejects(owner.spawn(recoveredReview), /supervisor changed/);
   owner.confirm(true);
   const confirmations = owner.confirmations.length;
-  await recoverReviewers(owner);
-  await recoverReviewers(owner);
+  owner.select((_title, choices) => {
+    assert.ok(choices.includes('Restore read-only reviewer delegation'));
+    return 'Restore read-only reviewer delegation';
+  });
+  await owner.command('continuation', '');
+  owner.select((_title, choices) => {
+    assert.ok(!choices.includes('Restore read-only reviewer delegation'));
+    return 'Close';
+  });
+  await owner.command('continuation', '');
   assert.equal(owner.confirmations.length, confirmations + 1);
   assert.match(owner.confirmations.at(-1)[0], /read-only reviewer/);
   await assert.rejects(owner.spawn({ ...task, key: 'second-writer', task: 'Second writer.' }), /cannot create writers/);
-  await assert.rejects(owner.command('continuation-delegate', 'writer Second writer.'), /only recover-reviewers/);
+  await assert.rejects(owner.command('continuation-delegate', 'writer Second writer.'), /check \/continuation for reviewer recovery/);
+  await assert.rejects(owner.command('continuation-delegate', 'recover-reviewers'), /check \/continuation for reviewer recovery/);
   const result = (await owner.spawn(recoveredReview)).details;
   await assert.rejects(owner.spawn(recoveredReview), { code: 'EEXIST' });
   const after = await f.state();
@@ -2547,7 +2556,15 @@ for (const [name, block, message] of [
   await f.supervisor.emit('session_shutdown');
   await f.supervisorCommand('start');
   await block(f, owner, original);
-  await assert.rejects(recoverReviewers(f.children[0].native), message);
+  const native = f.children[0].native;
+  if (name === 'owner pause' || name === 'decision wait') {
+    native.select((_title, choices) => {
+      assert.ok(!choices.includes('Restore read-only reviewer delegation'));
+      return 'Close';
+    });
+    await native.command('continuation', '');
+  }
+  await assert.rejects(recoverReviewers(native), message);
   assert.equal((await readdir(f.root)).some(file => file.startsWith('reviewer-recovery-')), false);
   assert.deepEqual(f.effects, ['split', 'start', 'task']);
 });

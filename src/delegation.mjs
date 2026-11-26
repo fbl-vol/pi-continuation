@@ -350,7 +350,7 @@ async function reviewerRecovery(root, grant, parent, state, preview) {
     previousToken: grant.ownerToken, previousSession: grant.supervisorSession, predecessor,
     ownerToken: state.ownerToken, supervisorSession: state.supervisorSession, role: 'read-only' };
   if (!preview && !isDeepStrictEqual(await optionalRecord(reviewerRecoveryPath(root, recovery)), recovery))
-    refuse('Intended running supervisor changed or is unavailable; in the exact owner use /continuation-delegate recover-reviewers');
+    refuse('Intended running supervisor changed or is unavailable; in the exact owner use /continuation → Restore read-only reviewer delegation');
   if (!await provedSupervisorEnd(root, grant.ownerToken, grant.supervisorSession))
     refuse('Prior supervisor has no proved graceful end for this assignment');
   if (predecessor?.token === state.ownerToken ||
@@ -2085,8 +2085,49 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
       finally { launching = false; }
     },
   });
+  async function recoverReviewers(ctx, preview = false) {
+    if (ctx.mode !== 'tui' || !socketPath || !paneId || !ctx.isIdle()) refuse('Idle Herdr Pi TUI required');
+    const ref = reference(ctx);
+    if (!ref?.spawnId) refuse('Run reviewer recovery in the exact surviving coordinating owner');
+    await worker.flushObservations();
+    const version = generation;
+    const evidence = worker.launchEvidence(ctx);
+    const session = currentSession(ctx);
+    const candidate = async () => {
+      if (generation !== version || !ctx.isIdle() || worker.promptBlocked ||
+          !isDeepStrictEqual(currentSession(ctx), session) ||
+          (worker.hold && (!evidence || !isDeepStrictEqual(worker.launchEvidence(ctx), evidence))))
+        refuse('Owner interaction or hold changed during reviewer recovery');
+      const live = await snapshot(socketPath);
+      const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
+      requireDelegationParent(live, parent, true);
+      const authority = await delegationAuthority(root, ref, parent, evidence, true);
+      await requireSettledRecoveryEffects(root, authority);
+      return authority;
+    };
+    const { grant, recovery } = await candidate();
+    const path = reviewerRecoveryPath(root, recovery);
+    const existing = await optionalRecord(path);
+    if (preview) return !existing;
+    if (existing) {
+      if (!isDeepStrictEqual(existing, recovery)) refuse('Existing reviewer recovery evidence does not match');
+      ctx.ui.notify('Reviewer-only delegation is already restored for this supervisor.', 'info');
+      return;
+    }
+    if (!await worker.confirmDelegation(ctx, 'Restore read-only reviewer delegation?',
+      `Assignment ${grant.id}: ${grant.scope}\nEnded supervisor ${recovery.previousSession}\n` +
+      `Predecessor ${recovery.predecessor.sessionId}\nReplacement ${recovery.supervisorSession}\n` +
+      'No writer authority, pause, wait or prior attempt will change.')) return;
+    const final = await candidate();
+    if (!isDeepStrictEqual(grant, final.grant) || !isDeepStrictEqual(recovery, final.recovery) ||
+        generation !== version || !ctx.isIdle() || worker.promptBlocked ||
+        !isDeepStrictEqual(currentSession(ctx), session))
+      refuse('Assignment or supervisor evidence changed during confirmation');
+    await claim(path, recovery);
+    ctx.ui.notify('Read-only reviewer delegation restored for this supervisor. Writer delegation remains unavailable.', 'info');
+  }
   pi.registerCommand('continuation-delegate', {
-    description: 'Authorize scoped delegation: <writer|read-only> <scope> | revoke | recover-reviewers',
+    description: 'Authorize scoped delegation: <writer|read-only> <scope> | revoke',
     handler: async (argument, ctx) => {
       if (ctx.mode !== 'tui' || !socketPath || !paneId || !ctx.isIdle()) refuse('Idle Herdr Pi TUI required');
       await ensureRoot(root);
@@ -2103,53 +2144,13 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
         ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
         return;
       }
-      if (argument.trim() === 'recover-reviewers') {
-        const ref = reference(ctx);
-        if (!ref?.spawnId) refuse('Run reviewer recovery in the exact surviving coordinating owner');
-        await worker.flushObservations();
-        const version = generation;
-        const evidence = worker.launchEvidence(ctx);
-        const session = currentSession(ctx);
-        const candidate = async () => {
-          if (generation !== version || !ctx.isIdle() || worker.promptBlocked ||
-              !isDeepStrictEqual(currentSession(ctx), session) ||
-              (worker.hold && (!evidence || !isDeepStrictEqual(worker.launchEvidence(ctx), evidence))))
-            refuse('Owner interaction or hold changed during reviewer recovery');
-          const live = await snapshot(socketPath);
-          const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
-          requireDelegationParent(live, parent, true);
-          const authority = await delegationAuthority(root, ref, parent, evidence, true);
-          await requireSettledRecoveryEffects(root, authority);
-          return authority;
-        };
-        const { grant, recovery } = await candidate();
-        const path = reviewerRecoveryPath(root, recovery);
-        const existing = await optionalRecord(path);
-        if (existing) {
-          if (!isDeepStrictEqual(existing, recovery)) refuse('Existing reviewer recovery evidence does not match');
-          ctx.ui.notify('Reviewer-only delegation is already restored for this supervisor.', 'info');
-          return;
-        }
-        if (!await worker.confirmDelegation(ctx, 'Restore read-only reviewer delegation?',
-          `Assignment ${grant.id}: ${grant.scope}\nEnded supervisor ${recovery.previousSession}\n` +
-          `Predecessor ${recovery.predecessor.sessionId}\nReplacement ${recovery.supervisorSession}\n` +
-          'No writer authority, pause, wait or prior attempt will change.')) return;
-        const final = await candidate();
-        if (!isDeepStrictEqual(grant, final.grant) || !isDeepStrictEqual(recovery, final.recovery) ||
-            generation !== version || !ctx.isIdle() || worker.promptBlocked ||
-            !isDeepStrictEqual(currentSession(ctx), session))
-          refuse('Assignment or supervisor evidence changed during confirmation');
-        await claim(path, recovery);
-        ctx.ui.notify('Read-only reviewer delegation restored for this supervisor. Writer delegation remains unavailable.', 'info');
-        return;
-      }
       const existing = reference(ctx);
       if (existing && !existing.spawnId && !(await readJson(grantPath(root, existing.grantId))).revoked)
         refuse('Revoke the current delegation tree before authorizing another scope in this planning session');
       if (existing?.spawnId) {
         const inherited = await readJson(grantPath(root, existing.grantId));
         if (inherited.ownerLaunch && (await readSupervisor(root)).ownerToken !== inherited.ownerToken)
-          refuse('Stale assignment authority cannot be replaced here; only recover-reviewers is available');
+          refuse('Stale assignment authority cannot be replaced here; check /continuation for reviewer recovery');
       }
       const [role, ...words] = argument.trim().split(/\s+/);
       const scope = words.join(' ');
@@ -2329,4 +2330,8 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     queueInput = queueTurn = undefined;
     await closeBootstrap?.(); closeBootstrap = undefined;
   });
+  return { recoverReviewers, async canRecoverReviewers(ctx) {
+    try { return await recoverReviewers(ctx, true); }
+    catch { return false; }
+  } };
 }

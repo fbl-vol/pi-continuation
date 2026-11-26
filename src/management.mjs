@@ -140,7 +140,7 @@ async function requestControl(root, socketPath, paneId, ctx, worker, view, row, 
   ctx.ui.notify(stop ? 'Worker stopped; history retained. Return only from that session.' : 'Only the selected worker paused.', 'info');
 }
 
-export function bindManagement(pi, worker, supervisor, coordinator, { root = defaultRoot(),
+export function bindManagement(pi, worker, supervisor, coordinator, { root = defaultRoot(), delegation,
   socketPath = process.env.HERDR_SOCKET_PATH, paneId = process.env.HERDR_PANE_ID } = {}) {
   const report = diagnostics('management');
   pi.registerTool({
@@ -215,8 +215,12 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         const previous = view.workers.filter(row => !row.binding.stopped && !row.current);
         const labels = rows.map((row, index) => `${index + 1}. ${row.name} — ${row.status.label}`);
         const previousChoice = `Previous / unavailable registrations (${previous.length})`;
+        const canRecoverReviewers = view.running && view.own?.current && view.own.binding.role === 'owner' &&
+          await delegation?.canRecoverReviewers(ctx);
+        if (!current()) refuse('Session changed while reading supervision');
         const choices = ['Delivery preferences',
           ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
+          ...(canRecoverReviewers ? ['Restore read-only reviewer delegation'] : []),
           ...(view.own ? ['This session: details'] : []),
           ...(view.own?.current && ['idle', 'done'].includes(view.own.agent?.agent_status) &&
             worker.hold && view.own.observation?.hold ? ['Clear this session hold'] : []),
@@ -248,6 +252,10 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           if (fresh.state.ownerWaits?.[view.own.binding.workerId]?.kind !== 'user')
             refuse('Owner decision changed; reopen the management menu');
           return coordinator.releaseDecision(ctx);
+        }
+        if (choice === 'Restore read-only reviewer delegation' && canRecoverReviewers) {
+          await freshView(view.own);
+          return await delegation.recoverReviewers(ctx);
         }
         if (choice === 'This assignment: delivery') {
           const path = join(root, `delegation-${view.own.binding.coordinatorId}.json`);

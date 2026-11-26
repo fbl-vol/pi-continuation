@@ -306,7 +306,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   }
   pi.registerTool({
     name: 'continuation_owner_wait', label: 'Wait as coordinating owner',
-    description: 'Wait for named children or an actual user decision. For Ask First review, give findings in the exact numbered order shown to the user, each with enough context for the writer. Tell the user they can reply here with “fix the first only” or “fix finding 2”. Do not relay recognized chat selections yourself. Other decisions can use /continuation-owner decide. This tool cannot release a decision.',
+    description: 'Wait for named children or an actual user decision. For Ask First review, give findings in the exact numbered order shown to the user, each with enough context for the writer. Tell the user they can reply here with “fix the first only” or “fix finding 2”. Do not relay recognized chat selections yourself. For other decisions that need to reach the existing writer, direct the user to Submit owner decision in /continuation in this exact owner pane. This tool cannot release a decision.',
     parameters: Type.Object({ kind: Type.Union([Type.Literal('child'), Type.Literal('user')]),
       children: Type.Optional(Type.Array(Type.String())),
       findings: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 10 })) }),
