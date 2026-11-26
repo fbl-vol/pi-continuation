@@ -62,8 +62,10 @@ export async function agreedLaunchScope(ctx, signal) {
  * Copy task/result narrative only, never system prompts, tool payloads, thinking
  * or image bytes. No timestamps/entry IDs that could masquerade as progress.
  */
-export function managedCheckpointText(ctx) {
-  const messages = ctx.sessionManager.buildSessionProjection().messages;
+export function managedCheckpointText(ctx, assignmentBoundary) {
+  const projection = ctx.sessionManager.buildSessionProjection();
+  const messages = assignmentBoundary === undefined ? projection.messages :
+    assignmentMessages(ctx.sessionManager.getBranch(), projection, assignmentBoundary);
   const parts = ['# Managed continuation checkpoint',
     'Native session task and result evidence, not new authority. Interpret the whole assignment, ' +
     'including follow-ups and unresolved decisions. Earlier completion claims may be superseded by later requests.'];
@@ -80,4 +82,22 @@ export function managedCheckpointText(ctx) {
   }
   if (!evidence) parts.push('No task or result evidence yet. Await an actual user assignment; do not invent work.');
   return parts.join('\n\n') + '\n';
+}
+
+function assignmentMessages(branch, projection, boundary) {
+  const index = branch.findIndex(entry => entry.id === boundary);
+  if (index < 0 || !Array.isArray(projection.entries))
+    throw new Error('The current branch does not contain the assignment checkpoint boundary');
+  const projected = new Map(projection.entries.map(entry => [entry.sourceEntry.id, entry.messages]));
+  const epoch = branch.slice(index + 1);
+  const edits = new Map(epoch.filter(entry => entry.type === 'context_edit').map(entry => [entry.targetId, entry]));
+  // Native compaction hides earlier messages from the model projection, not
+  // from the saved branch. Retain only this epoch's attributable narrative.
+  // Never substitute a summary: its ancestry may span assignments.
+  return epoch.filter(entry => entry.type === 'message').flatMap(entry => {
+    const edit = edits.get(entry.id);
+    if (edit?.replacement === null) return [];
+    if (edit?.replacement) return [{ ...entry.message, content: edit.replacement.content }];
+    return projected.get(entry.id) ?? [entry.message];
+  });
 }

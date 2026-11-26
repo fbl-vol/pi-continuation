@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Type } from 'typebox';
 import { join } from 'node:path';
 import { defaultRoot, readJson, claim } from './store.mjs';
-import { isId, readSupervisor, readObservation } from './contracts.mjs';
+import { isId, ownerRolloverBlocker, readSupervisor, readObservation } from './contracts.mjs';
 import { currentSession } from './session.mjs';
 import { snapshot, sameOccupant } from './herdr.mjs';
 import { ownerAlive, sendAction } from './ipc.mjs';
@@ -95,10 +95,16 @@ export async function managementSnapshot(root, socketPath, ctx) {
     own: workers.find(w => w.binding.sessionId === session.id && w.binding.sessionFile === session.file) };
 }
 
+function rolloverDetails(state, binding) {
+  const blocker = ownerRolloverBlocker(state, { ...binding, id: binding.coordinatorId });
+  return blocker ? [`Queued assignment ${blocker.queuedId ?? ''} could not start: ${blocker.reason}`, blocker.next] : [];
+}
+
 function details(view, row) {
   const { binding, observation, status } = row;
   return [row.name + ' — ' + status.label,
     `Supervisor: ${view.running ? 'running' : 'unavailable'}`,
+    ...(binding.role === 'owner' ? rolloverDetails(view.state, binding) : []),
     `Global pause: ${view.state.paused}; workspace pause: ${view.state.routes[binding.route]?.paused}; worker pause: ${binding.paused}`,
     `Hold: ${observation?.hold === true ? observation.holdReason ?? 'held' : observation ? 'none reported' : 'unknown'}`,
     ...(observation?.hold && observation.holdError ? [

@@ -2,7 +2,7 @@ import test from 'node:test';
 import net from 'node:net';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -43,7 +43,7 @@ for (const [scenario, options, attempts] of [
 });
 
 async function fixture(t, options = {}) {
-  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer });
+  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer, retainedSend: options.retainedSend });
   execFileSync('git', ['init', '--quiet', f.root]);
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
@@ -124,7 +124,8 @@ async function fixture(t, options = {}) {
         onTask: task => {
           const state = JSON.parse(readFileSync(join(f.root, 'supervisor.json'), 'utf8'));
           const enrolled = Object.values(state.workers).find(w => w.paneId === params.pane_id);
-          assert.equal(enrolled?.lastStartNonce, child.env.PI_CONTINUATION_SPAWN,
+          const spawn = JSON.parse(readFileSync(join(f.root, `spawn-${enrolled.delegationId}.json`), 'utf8'));
+          assert.equal(enrolled?.lastStartNonce, spawn.replacesWorker ? spawn.id : child.env.PI_CONTINUATION_SPAWN,
             'owner must durably enroll the exact worker BEFORE native task dispatch');
           assert.equal(enrolled.sessionId, child.native.id);
           assert.equal(enrolled.paused, false);
@@ -499,6 +500,34 @@ test('P1/P7 failed supervisor activation after a worktree choice leaves no tree 
   assert.deepEqual((await readdir(f.root)).filter(name => name.startsWith('owner-worktree-')), []);
   assert.deepEqual(f.effects, []);
   assert.equal((await f.state()).paused, true);
+});
+
+test('parallel explicit worktree permits a settled exact child wait, not a user decision wait', async t => {
+  const f = await fixture(t, { onSplit: params => assert.ok([f.root, `${f.root}-parallel`].includes(params.cwd)) });
+  execFileSync('git', ['-C', f.root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'Fixture base']);
+  await f.worker.command('start-implementation', 'A: Existing assignment.');
+  const ownerId = (await f.attempt()).workerId;
+  const owner = f.children[0].native;
+  const { workerId } = (await owner.spawn(task)).details;
+  await owner.wait({ kind: 'child', children: [workerId] });
+  owner.assistant('Waiting for this assignment’s existing writer.');
+  await owner.emit('agent_settled');
+  const base = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const alternate = `${f.root}-parallel`;
+  const options = path => JSON.stringify({ worktree: { repository: f.root, base, branch: 'work/parallel', path } });
+  f.worker.select(() => assert.fail('Exact authorized placement must not prompt'));
+  try {
+    await f.worker.command('start-implementation', `--options ${options(alternate)} -- C: Independent assignment.`);
+    assert.equal(f.children[2].cwd, alternate);
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [workerId] });
+    await owner.wait({ kind: 'user' });
+    await assert.rejects(f.worker.command('start-implementation',
+      `--options ${options(`${alternate}-refused`)} -- D: Separate assignment.`), /Other checkout registrations/);
+    assert.equal(existsSync(`${alternate}-refused`), false);
+  } finally {
+    if (existsSync(alternate)) execFileSync('git', ['-C', f.root, 'worktree', 'remove', '--force', alternate]);
+  }
 });
 
 test('P1/P7 an exact authorized worktree skips the selector and second confirmation', async t => {
@@ -1344,6 +1373,187 @@ for (const outcome of ['confirm', 'past reviewer decision', 'current reviewer de
   });
 }
 
+for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledgement', 'uncertain dispatch',
+  'automatic', 'automatic preflight refusal', 'automatic refusal with receipt', 'automatic lost receipt',
+  'automatic explicit recovery', 'automatic uncertain dispatch']) test(
+  `close-and-start dispatches to the identical native sessions or holds on uncertainty (${fault})`, async t => {
+  let sends = 0;
+  const automatic = fault.startsWith('automatic');
+  const uncertain = fault.endsWith('uncertain dispatch');
+  const explicitRecovery = fault === 'automatic explicit recovery';
+  const loseReceipt = explicitRecovery || ['lost receipt acknowledgement', 'automatic lost receipt'].includes(fault);
+  let interrupt = fault === 'before closeout commit';
+  const { f, oldGrant, oldWriter } = await settledAssignment(t, {
+    async onSnapshot(fixture) {
+      if (!interrupt || !(await readdir(fixture.root)).some(file => file.startsWith('owner-launch-pending-'))) return;
+      const state = await fixture.state();
+      const owner = Object.values(state.workers).find(w => w.role === 'owner');
+      // Only interrupt the already-enrolled, settled A at B's precommit check.
+      if (!owner || !state.assignmentQueues[owner.coordinatorId]?.length) return;
+      fixture.agents.find(agent => agent.pane_id === owner.paneId).agent_status = 'working';
+    },
+    async retainedSend(root, action, target, options) {
+      sends++;
+      if (sends === 1 && uncertain) throw new Error('Simulated connection loss before receipt');
+      const reply = await sendAction(root, action, target, options);
+      if (sends === 1 && loseReceipt) {
+        const receiptPath = join(root, `spawn-receipt-${action.id}.json`);
+        for (let i = 0; i < 100 && (!existsSync(receiptPath) || (await readJson(receiptPath)).status !== 'sent'); i++)
+          await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal((await readJson(receiptPath)).status, 'sent');
+        throw new Error('Simulated lost response after native run receipt');
+      }
+      return reply;
+    },
+  });
+  const scope = 'Assignment B: work on the next fixture.';
+  const text = `Put ${scope} after Assignment A`;
+  await f.worker.emit('input', { source: 'interactive', text });
+  f.worker.user(text);
+  await f.worker.emit('before_agent_start', { messageType: 'user', prompt: text });
+  f.worker.assistant('Queue requested.');
+  await f.worker.emit('agent_settled');
+  const before = await f.state();
+  assert.equal(before.assignmentQueues[oldGrant]?.[0]?.scope, scope, JSON.stringify(f.worker.notifications));
+  const ownerA = Object.values(before.workers).find(w => w.role === 'owner');
+  const writerA = before.workers[oldWriter];
+  const start = () => f.worker.command('start-implementation',
+    `--options {"closeAssignment":"${oldGrant}"} -- ${scope}`);
+  if (automatic) {
+    assert.equal(sends, 0, 'a settled assignment and queued work alone do not authorize closeout');
+    execFileSync('git', ['-C', f.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--quiet', '--allow-empty', '-m', 'Exact reviewed fixture revision']);
+    const revision = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const owner = f.children[0].native;
+    if (fault.includes('refusal')) {
+      await assert.rejects(owner.spawn({ ...task, key: 'refused-second-writer', task: 'Second writer must not start.' }), /writer/);
+      const attempts = await Promise.all((await f.attempts()).map(file => readJson(join(f.root, file))));
+      const refused = attempts.find(attempt => attempt.key === 'refused-second-writer');
+      assert.equal(refused.status, 'preflight-refused');
+      if (fault === 'automatic refusal with receipt')
+        await atomicJson(join(f.root, `spawn-receipt-${refused.id}.json`), { id: refused.id, status: 'accepted' });
+    }
+    const outcome = { revision, review: 'Independent fixture review verified exact HEAD.', delivery: 'No external delivery owed in this fixture.' };
+    const settleOutcome = async (args, aborted = false) => {
+      await owner.tool('continuation_assignment_delivered', args);
+      owner.assistant('Delivery outcome recorded at final revision.');
+      await owner.emit('agent_settled', { aborted });
+    };
+    const waitForState = async (predicate, explanation) => {
+      for (let i = 0; i < 200; i++) {
+        const current = await f.state();
+        if (predicate(current)) return current;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail(explanation);
+    };
+    await settleOutcome({ ...outcome, revision: 'f'.repeat(40) });
+    assert.equal((await f.state()).assignmentOutcomes[oldGrant], undefined);
+    await f.supervisorCommand('pause global');
+    await assert.rejects(owner.tool('continuation_assignment_delivered', outcome), /exact unheld owner/);
+    assert.equal((await f.state()).paused, true);
+    assert.equal(sends, 0);
+    await f.supervisorCommand('activate global');
+    await settleOutcome(outcome);
+    if (fault === 'automatic refusal with receipt') {
+      await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('Unresolved assignment startup'),
+        'An accepted receipt invalidates the no-effect proof');
+      assert.equal(sends, 0);
+      assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+      return;
+    }
+    if (loseReceipt || uncertain) {
+      await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('transport interrupted'),
+        'First interrupted dispatch must record the blocker');
+      assert.equal(sends, 1);
+      if (explicitRecovery) {
+        await f.supervisorCommand('status');
+        assert.match(f.supervisor.notifications.at(-1)[0], /queuedAssignmentBlocker.*do not resend/);
+        await start();
+        await f.supervisorCommand('status');
+        assert.doesNotMatch(f.supervisor.notifications.at(-1)[0], /queuedAssignmentBlocker/);
+        assert.equal((await f.state()).assignmentOutcomes[oldGrant].blocker, undefined);
+      } else {
+        await f.supervisor.emit('session_shutdown');
+        await f.supervisorCommand('start');
+      }
+      if (uncertain) {
+        await waitForState(current => current.assignmentOutcomes[oldGrant]?.blocker?.includes('start is unconfirmed'),
+          'Restart must expose the missing receipt without retrying');
+        assert.equal(sends, 1);
+        for (let i = 0; i < 100 && !owner.notifications.some(([text]) => text.includes('Inspect the exact start receipts')); i++)
+          await new Promise(resolve => setTimeout(resolve, 10));
+        assert.ok(owner.notifications.some(([text]) => text.includes('Inspect the exact start receipts')));
+        await f.supervisorCommand('status');
+        const [status] = f.supervisor.notifications.at(-1);
+        assert.match(status, /queuedAssignmentBlocker.*do not resend/);
+        assert.equal(owner.messages.length, 0, 'visibility must not wake the owner agent');
+        assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+        return;
+      }
+    }
+    await waitForState(current => current.closedAssignments[oldGrant] && !Object.keys(current.retainedAssignments).length,
+      'The supervisor must advance B without another planner or owner command');
+    assert.equal((await f.state()).assignmentOutcomes[oldGrant].revision, revision);
+  } else if (fault === 'before closeout commit') {
+    await assert.rejects(start(), /active or has unresolved effects/);
+    assert.equal(sends, 0);
+    assert.equal((await f.state()).closedAssignments[oldGrant], undefined);
+    assert.deepEqual((await f.state()).assignmentQueues, before.assignmentQueues);
+    assert.equal((await readdir(f.root)).some(file => file.startsWith('owner-launch-pending-')), false);
+    interrupt = false;
+    f.agents.find(agent => agent.pane_id === ownerA.paneId).agent_status = 'idle';
+    await start();
+  } else if (fault === 'none') await start();
+  else {
+    await assert.rejects(start(), /transport interrupted.*do not resend/);
+    assert.equal(sends, 1);
+    const held = await f.state();
+    assert.ok(held.closedAssignments[oldGrant], 'A was durably retired before attempting B');
+    const [transition] = Object.values(held.retainedAssignments);
+    assert.ok(transition);
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    if (fault === 'uncertain dispatch') {
+      await assert.rejects(start(), /start is unconfirmed.*do not resend/);
+      assert.equal(sends, 1);
+      assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task']);
+      return;
+    }
+    await start();
+  }
+  const current = await f.state();
+  assert.equal(sends, 2);
+  assert.deepEqual(current.retainedAssignments, {});
+  const ownerB = Object.values(current.workers).find(w => w.role === 'owner');
+  const writerB = Object.values(current.workers).find(w => w.recipient?.id === ownerB.coordinatorId);
+  const closed = current.closedAssignments[oldGrant];
+  assert.equal(closed.launchId, ownerB.coordinatorId);
+  assert.equal(current.retiredWorkers[ownerA.workerId].retiredBy, closed.launchId);
+  assert.equal(current.retiredWorkers[writerA.workerId].retiredBy, closed.launchId);
+  for (const [oldBinding, newBinding] of [[ownerA, ownerB], [writerA, writerB]]) {
+    assert.equal(newBinding.paneId, oldBinding.paneId);
+    assert.equal(newBinding.sessionId, oldBinding.sessionId);
+    assert.equal(newBinding.sessionFile, oldBinding.sessionFile);
+    assert.notEqual(newBinding.workerId, oldBinding.workerId);
+    assert.equal((await readJson(join(f.root, `spawn-receipt-${newBinding.delegationId}.json`))).status, 'sent');
+  }
+  assert.deepEqual(f.effects, ['split', 'start', 'task', 'split', 'start', 'task', 'task', 'task']);
+});
+
+test('old delegated attempt cannot borrow a replacement assignment on the same native owner', async t => {
+  const { f } = await settledAssignment(t);
+  const owner = f.children[0].native;
+  const state = await f.state();
+  const binding = Object.values(state.workers).find(w => w.role === 'owner');
+  state.workers[binding.workerId] = { ...binding, coordinatorId: randomUUID(), delegationId: randomUUID() };
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  const effects = [...f.effects];
+  await assert.rejects(owner.spawn({ key: 'old-delayed-review', task: 'Review A.', role: 'read-only' }),
+    /Exact supervised coordinating owner assignment required/);
+  assert.deepEqual(f.effects, effects);
+});
+
 test('P1/P7 a settled absent temporary reviewer does not prevent normal A closeout', async t => {
   const closedPanes = [];
   const { f, oldGrant } = await settledAssignment(t, { closedPanes, historicalPanes: [] });
@@ -1761,6 +1971,40 @@ test('P4/P5 native launch preserves pauses and never retries uncertain pane crea
   assert.deepEqual(f.effects, ['split']);
 });
 
+test('planner chat records an ordered backlog without interrupting A, and restart keeps both entries', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'A: Implement the first agreed task.');
+  const ownerLaunch = await f.attempt();
+  await f.children[0].native.spawn(task);
+  const before = await f.state();
+  const effects = [...f.effects];
+  async function reply(source, text, aborted = false) {
+    await f.worker.emit('input', { source, text });
+    f.worker.user(text);
+    await f.worker.emit('before_agent_start', { messageType: 'user', prompt: text });
+    await f.worker.emit('agent_start');
+    f.worker.assistant('Queue request noted.');
+    await f.worker.emit('agent_settled', { aborted });
+  }
+  await reply('extension', 'Put an injected task after A');
+  await reply('interactive', 'Put an aborted task after A', true);
+  await reply('interactive', 'Put unrelated work after Unknown');
+  assert.deepEqual((await f.state()).assignmentQueues, {});
+  await reply('interactive', 'Put B: update the documentation after A');
+  await reply('interactive', 'Put C: verify the example after A');
+  const saved = await f.state();
+  assert.deepEqual(saved.assignmentQueues[ownerLaunch.grantId].map(entry => entry.scope),
+    ['B: update the documentation', 'C: verify the example']);
+  assert.match(f.worker.notifications.at(-1)[0], /Queued in position 2/);
+  assert.deepEqual(saved.workers, before.workers);
+  assert.deepEqual(saved.ownerWaits, before.ownerWaits);
+  assert.deepEqual(f.effects, effects);
+  await f.supervisor.emit('session_shutdown');
+  await f.supervisorCommand('start');
+  assert.deepEqual((await f.state()).assignmentQueues, saved.assignmentQueues);
+  assert.deepEqual(f.effects, effects);
+});
+
 test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
   const f = await fixture(t);
   await f.workerStart();
@@ -1770,20 +2014,61 @@ test('P1 an existing ordinary worker cannot silently upgrade into a coordinating
 });
 
 const answerOwnerDecision = owner => owner.command('continuation-owner', 'decide');
-async function decisionFixture(t) {
+async function decisionFixture(t, findings) {
   const f = await fixture(t);
   await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
   const owner = f.children[0].native;
   const ownerId = (await f.attempt()).workerId;
   const writerId = (await owner.spawn(task)).details.workerId;
   const writer = f.children[1].native;
-  await owner.wait({ kind: 'user' });
+  await owner.wait({ kind: 'user', findings });
   for (const [native, reply] of [[owner, 'Choose F1 or F2.'], [writer, 'Review preparation complete.']]) {
     native.assistant(reply);
     await native.emit('agent_settled');
   }
   return { f, owner, ownerId, writer, writerId };
 }
+
+test('owner chat keeps the pending question on clarification or synthetic input and relays one exact finding', async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.', 'Correct the label.']);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const reply = async (source, text) => {
+    await owner.emit('input', { source, text });
+    await owner.emit('before_agent_start', { messageType: 'user', prompt: text });
+    await owner.emit('agent_start');
+    owner.assistant('Reply received.');
+    await owner.emit('agent_settled', { aborted: false });
+  };
+  for (const [source, text] of [['interactive', 'What would fixing the first change?'],
+    ['extension', 'fix the first only'], ['rpc', 'fix the first only']]) {
+    await reply(source, text);
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+    assert.equal(writer.messages.length, 0);
+  }
+  await assert.rejects(owner.wait({ kind: 'user', findings: ['Different finding.'] }), /original decision question/);
+  await reply('interactive', 'fix the first only');
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [writerId] });
+  assert.equal(writer.messages.length, 1);
+  assert.match(writer.messages[0][0].content, /Fix finding 1 only:\nCorrect the index\.$/);
+  assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
+  await reply('interactive', 'fix the first only');
+  assert.equal(writer.messages.length, 1);
+});
+
+for (const aborted of [true, false]) test(`owner chat retains wait after ${aborted ? 'aborted turn' : 'independent writer pause'}`, async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.']);
+  if (!aborted) await f.supervisorCommand(`pause worker ${writerId}`);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const text = 'fix the first only';
+  await owner.emit('input', { source: 'interactive', text });
+  await owner.emit('before_agent_start', { messageType: 'user', prompt: text });
+  await owner.emit('agent_start');
+  if (!aborted) owner.assistant('Reply received.');
+  await owner.emit('agent_settled', { aborted });
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
+  assert.equal(writer.messages.length, 0);
+  await assert.rejects(readJson(join(f.root, `receipt-${wait.id}.json`)), { code: 'ENOENT' });
+});
 
 test('P3/P4/P7 native owner decision input relays the exact answer once to the same writer', async t => {
   const { f, owner, ownerId, writer } = await decisionFixture(t);
@@ -1964,6 +2249,28 @@ test('P3 an already-dispatched child cannot delegate across its owner user wait;
   await f.worker.emit('session_start');
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released',
     'a restart cannot drop the release fence or synthesize a decision turn');
+});
+
+test('a retained coordinator endpoint cannot wake a session after its assignment binding was retired', async t => {
+  const f = await fixture(t);
+  await f.worker.command('start-implementation', 'A: Work in a retained owner session.');
+  const { workerId: ownerId, grantId } = await f.attempt();
+  const owner = f.children[0].native;
+  const { workerId } = (await owner.spawn(task)).details;
+  const state = await f.state();
+  const sender = state.workers[workerId];
+  const id = randomUUID();
+  const notice = { id, kind: 'blocker', status: 'sending', route: sender.route, workerId,
+    recipient: sender.recipient, ownerToken: state.ownerToken, text: 'Delayed work from assignment A' };
+  // Model a retained listener and old transport request at the exact retirement
+  // boundary. Even a still-present sender cannot authorize a retired recipient.
+  state.retiredWorkers[ownerId] = { ...state.workers[ownerId], paused: true, retiredBy: randomUUID() };
+  delete state.workers[ownerId];
+  state.notices[id] = notice;
+  await atomicJson(join(f.root, 'supervisor.json'), state);
+  assert.deepEqual(await sendAction(f.root, notice, grantId), { accepted: false, stale: true, id });
+  assert.equal(owner.messages.length, 0);
+  await assert.rejects(readJson(join(f.root, `receipt-${id}.json`)), { code: 'ENOENT' });
 });
 
 test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {

@@ -78,7 +78,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let promptUI;
   let pendingWrite = Promise.resolve();
   const connectReceiver = (ctx, record) => receive(root, record, pi, ctx,
-    () => stopVersion, () => hold || worker !== record || !prompts || prompts.blocked);
+    () => stopVersion, () => hold || worker !== record || !prompts || prompts.blocked,
+    (action, context, prior) => retainedAssignment?.(action, context, prior));
+  let retainedAssignment;
   const startReceiver = async ctx => {
     if (worker) closeReceiver = await connectReceiver(ctx, worker);
   };
@@ -110,7 +112,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       ...(promptScope ? { promptScope: promptScope.snapshot() } : {}) };
     let checkpoint;
     let checkpointError;
-    try { if (owner.managedCheckpoint) checkpoint = managedCheckpointText(ctx); }
+    try { if (owner.managedCheckpoint) checkpoint = managedCheckpointText(ctx, owner.assignmentBoundary); }
     catch (error) { checkpointError = error; }
     lastObserved = saved;
     pendingWrite = pendingWrite.then(async () => {
@@ -147,7 +149,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     const report = currentHeldReport({ ...recovery.report, hold: true, outcome: 'approval' },
       ctx, prior.version, session);
     if (!report) return;
-    const checkpoint = managedCheckpointText(ctx);
+    const checkpoint = managedCheckpointText(ctx, worker.assignmentBoundary);
     if (checkpointHash(checkpoint) !== recovery.hash) return;
     // This is fresh durable evidence for the unchanged native report, not a
     // replay of its turn or permission to clear an independent supervisor pause.
@@ -753,6 +755,40 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       await observe(report, ctx);
     },
     start: requestStart, clearHold,
+    onRetainedAssignment(handler) { retainedAssignment = handler; },
+    async adoptRetained(ctx, prior, next, stillCurrent) {
+      const session = currentSession(ctx);
+      const version = stopVersion;
+      const eligible = () => worker === prior && !hold && !promptsFor(ctx).blocked && ctx.isIdle() &&
+        !initialPending && stopVersion === version && currentSession(ctx).leaf === session.leaf && stillCurrent();
+      if (!eligible() || next.sessionId !== session.id || next.sessionFile !== session.file || next.paneId !== paneId)
+        throw new Error('Exact retained session changed');
+      const record = { ...prior, workerId: next.workerId, delegationId: next.delegationId,
+        coordinatorId: next.coordinatorId, checkpoint: next.checkpoint, assignmentBoundary: session.leaf,
+        start: undefined, pendingSession: undefined, requiresReady: true };
+      const receiver = await connectReceiver(ctx, record);
+      let published = false;
+      try {
+        await atomicText(record.checkpoint, managedCheckpointText(ctx, session.leaf));
+        await atomicJson(join(root, `worker-${record.workerId}.json`), record);
+        await atomicJson(join(root, `observation-${record.workerId}.json`), {
+          session, schemaVersion: SCHEMA_VERSION, outcome: 'unknown', stop: null, hold: false, version,
+        });
+        if (!eligible()) throw new Error('Retained assignment interrupted before adoption');
+        commitReady(join(root, `ready-${record.workerId}.json`), record);
+        pi.appendEntry('pi-continuation-worker', { workerId: record.workerId, sessionId: session.id, paneId });
+        const previousReceiver = closeReceiver;
+        closeReceiver = receiver;
+        worker = record;
+        lastObserved = undefined;
+        parkedReport = commandReport = commandLeaf = undefined;
+        published = true;
+        // The old listener is handling this request. Drain asynchronously.
+        void previousReceiver?.().catch(error => report('retire receiver', error, ctx));
+      } finally {
+        if (!published) await receiver();
+      }
+    },
     get confirming() { return prompts?.confirming === true; },
     get promptBlocked() { return !prompts?.intact || prompts.blocked; },
     confirmDelegation(ctx, title, message) { return promptsFor(ctx).confirm(title, message); },
@@ -792,13 +828,17 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       if (!await observe({ session, outcome: 'unknown', stop: null, bootstrapPending: true }, ctx))
         throw new Error('Could not persist delegated dispatch fence');
       const live = await snapshot(socketPath);
-      requireDelegationParent(live, ticket.parent);
+      if (!(ticket.automatic && ticket.role === 'owner')) requireDelegationParent(live, ticket.parent);
       const savedTicket = await readJson(spawnPath(root, ticket.id));
-      const { state } = await delegationAuthority(root, ticket.authority, ticket.parent);
+      const state = ticket.replacesWorker ? await readSupervisor(root) :
+        (await delegationAuthority(root, ticket.authority, ticket.parent)).state;
       const binding = state.workers[record.workerId];
       const agent = live.agents.find(a => a.pane_id === paneId);
       if (savedTicket.status !== 'dispatching' || state.ownerToken !== ticket.ownerToken ||
           !await ownerAlive(root, ticket.ownerToken) || state.paused || !binding || binding.paused ||
+          binding.delegationId !== ticket.id ||
+          (ticket.replacesWorker && state.retiredWorkers[ticket.replacesWorker]?.retiredBy !==
+            state.closedAssignments[ticket.replacesGrant]?.launchId) ||
           state.routes[binding.route]?.paused || !sameOccupant(agent, binding) || !isSettled(agent) ||
           worker !== record || stopVersion !== version || hold || promptsFor(ctx).blocked || !ctx.isIdle() ||
           currentSession(ctx).id !== session.id || currentSession(ctx).file !== session.file)

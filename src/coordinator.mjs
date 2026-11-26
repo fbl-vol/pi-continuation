@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { watch } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import { atomicJson, ensureRoot, defaultRoot, claim, readJson } from './store.mjs';
 import { listenJson, ownerAlive, sendAction } from './ipc.mjs';
 import { currentSession } from './session.mjs';
-import { ownerDecisionEvidence, readSupervisor, readObservation } from './contracts.mjs';
+import { ownerDecisionEvidence, ownerRolloverBlocker, readSupervisor, readObservation, selectedReviewFinding } from './contracts.mjs';
 import { diagnostics } from './diagnostics.mjs';
 import { snapshot, sameOccupant, isSettled } from './herdr.mjs';
 import { pinnedCheckpoint, coordinatorCandidate } from './bindings.mjs';
@@ -16,25 +17,41 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   socketPath = process.env.HERDR_SOCKET_PATH, confirmOwner, decisionUI } = {}) {
   let close;
   let coordinator;
+  let blockerWatcher;
+  let lastBlocker;
   let generation = 0;
   let humanPending = false;
   let uiPromptActive = false;
   let releaseInput = false;
   let selectionTurn = false;
+  let chatInput;
+  let chatTurn;
+  let deliveryOutcome;
+  const exactOwner = (state, ctx) => {
+    const session = currentSession(ctx);
+    return Object.values(state.workers).find(w => w.role === 'owner' &&
+      w.coordinatorId === coordinator?.id && w.sessionId === session.id &&
+      w.sessionFile === session.file && w.paneId === paneId);
+  };
   const report = diagnostics('coordinator');
   const listen = (record, ctx) => listenJson(root, record.id,
     notice => acceptNotice(record, ctx, notice), error => report('accept notice', error, ctx));
 
-  pi.on('input', async event => {
+  pi.on('input', async (event, ctx) => {
+    chatInput = chatTurn = undefined;
     if (event.source === 'interactive' || event.source === 'rpc') {
       generation++;
       humanPending = true;
       if (coordinator?.role === 'owner') {
         try {
           const state = await readSupervisor(root);
-          const owner = Object.entries(state.workers).find(([, w]) => w.role === 'owner' &&
-            w.coordinatorId === coordinator.id && w.sessionId === coordinator.sessionId);
-          releaseInput = state.ownerWaits[owner?.[0]]?.kind === 'released';
+          const owner = exactOwner(state, ctx);
+          const wait = state.ownerWaits[owner?.workerId];
+          releaseInput = wait?.kind === 'released';
+          if (event.source === 'interactive' && ctx.mode === 'tui' && ctx.isIdle() && !uiPromptActive &&
+              wait?.kind === 'user' && !wait.decisionId && selectedReviewFinding(event.text, wait.findings)) {
+            chatInput = { text: event.text, waitId: wait.id, ownerToken: state.ownerToken, workerId: owner.workerId };
+          }
         } catch (error) { releaseInput = false; report('inspect owner release', error); }
       }
     } else {
@@ -47,10 +64,40 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     // Pi skips input for extension commands. A confirmed release alone is not a user turn.
     selectionTurn = event.messageType === 'user' && releaseInput;
     releaseInput = false;
+    chatTurn = event.messageType === 'user' && event.prompt === chatInput?.text ? chatInput : undefined;
+    chatInput = undefined;
+    if (chatTurn) return { message: { customType: 'pi-continuation-review-selection', display: false,
+      content: 'The extension recognized this as a reply to the exact pending numbered review question. ' +
+        'Do not relay it yourself. After this turn settles, the extension will try once to deliver the selected finding and show the result.' } };
   });
   pi.on('agent_start', () => { generation++; });
   pi.on('agent_settled', async (event, ctx) => {
     humanPending = false;
+    const chat = chatTurn;
+    chatInput = chatTurn = undefined;
+    const delivered = deliveryOutcome;
+    deliveryOutcome = undefined;
+    if (delivered && !event.aborted) {
+      try {
+        const session = currentSession(ctx);
+        await decisionUI.flushObservations();
+        if (coordinator?.id !== delivered.grantId || decisionUI.hold || decisionUI.promptBlocked ||
+            !isDeepStrictEqual(currentSession(ctx), session)) throw new Error('Owner changed');
+        const result = await sendAction(root, { ...delivered, type: 'assignment-outcome', leaf: session.leaf }, 'supervisor');
+        if (!result.accepted) throw new Error('Outcome refused');
+        ctx.ui.notify('Assignment delivery recorded. Any eligible queued work can start automatically.', 'info');
+      } catch (error) {
+        report('record assignment outcome', error);
+        ctx.ui.notify('Delivery outcome was not confirmed. Check this owner’s wait, hold and final revision.', 'warning');
+      }
+    }
+    if (chat && !event.aborted) {
+      try { await submitChatDecision(ctx, chat); }
+      catch (error) {
+        report('deliver review selection', error);
+        ctx.ui.notify('The selection was not confirmed. Check the owner wait and writer status before sending another reply.', 'warning');
+      }
+    }
     if (selectionTurn && !event.aborted) {
       selectionTurn = false;
       try { await ownerRequest(ctx, 'settled-user'); }
@@ -59,6 +106,28 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   });
   pi.on('ui_prompt_start', () => { uiPromptActive = true; });
   pi.on('ui_prompt_end', () => { uiPromptActive = false; });
+  function watchRollover(ctx) {
+    if (blockerWatcher || coordinator?.role !== 'owner') return;
+    const check = async () => {
+      const record = coordinator;
+      if (!record) return;
+      try {
+        const state = await readSupervisor(root);
+        if (coordinator !== record || currentSession(ctx).id !== record.sessionId ||
+            currentSession(ctx).file !== record.sessionFile) return;
+        const blocker = ownerRolloverBlocker(state, record);
+        const key = JSON.stringify(blocker);
+        if (key === lastBlocker) return;
+        lastBlocker = key;
+        if (blocker) ctx.ui.notify(`Queued assignment ${blocker.queuedId ?? ''} could not start: ${blocker.reason} ${blocker.next}`, 'warning');
+      } catch { /* Missing/transient state is not a new blocker. */ }
+    };
+    blockerWatcher = watch(root, { persistent: false }, (_event, name) => {
+      if (name?.toString() === 'supervisor.json') void check();
+    });
+    blockerWatcher.on('error', error => report('observe rollover blocker', error));
+    void check();
+  }
   pi.on('session_start', async (_event, ctx) => {
     coordinator = undefined;
     if (ctx.mode !== 'tui' || process.env.HERDR_ENV !== '1' || !paneId) return;
@@ -70,6 +139,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       if (record.sessionId !== entry.sessionId || record.sessionFile !== currentSession(ctx).file) return;
       close = await listen(record, ctx);
       coordinator = record;
+      watchRollover(ctx);
     } catch (error) { report('restore registration', error, ctx); }
   });
 
@@ -109,6 +179,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const recipientWorker = Object.values(state.workers).find(w => w.role === 'owner' &&
       w.sessionId === record.sessionId && w.coordinatorId === record.id);
     const waiting = recipientWorker && state.ownerWaits?.[recipientWorker.workerId];
+    if (record.role === 'owner' && !recipientWorker) return { accepted: false, stale: true, id: notice.id };
     if ((recipientWorker && (recipientWorker.paused || recipientWorker.stopped ||
         state.routes[recipientWorker.route]?.paused ||
         (await readObservation(root, recipientWorker.workerId)).hold)) ||
@@ -130,7 +201,8 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     const latestWorker = Object.values(latest.workers).find(w => w.role === 'owner' &&
       w.sessionId === record.sessionId && w.coordinatorId === record.id);
     const latestWait = latestWorker && latest.ownerWaits?.[latestWorker.workerId];
-    if (!completionStillCurrent || latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
+    if (!completionStillCurrent || (record.role === 'owner' && !latestWorker) ||
+        latest.paused || latest.ownerToken !== owner.token || latest.routes?.[notice.route]?.paused ||
         (notice.recipient ? latest.workers[notice.workerId]?.recipient?.id !== record.id :
           latest.routes?.[notice.route]?.coordinator?.id !== record.id) ||
         (latestWorker && (latestWorker.paused || latestWorker.stopped ||
@@ -159,6 +231,7 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       ...(owner ? { role: 'owner' } : {}) });
     close = await listen(record, ctx);
     coordinator = record;
+    watchRollover(ctx);
     return record;
   }
 
@@ -195,28 +268,71 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       } catch (error) { throw report('register', error); }
     },
   });
-  const ownerRequest = async (ctx, kind, children, decision) => {
+  const ownerRequest = async (ctx, kind, children, decision, findings) => {
     if (!coordinator || coordinator.role !== 'owner')
       throw new Error('Exact registered coordinating owner required');
     const state = await readSupervisor(root);
-    const worker = Object.values(state.workers).find(w => w.role === 'owner' &&
-      w.coordinatorId === coordinator.id && w.sessionId === currentSession(ctx).id &&
-      w.sessionFile === currentSession(ctx).file && w.paneId === paneId);
+    const worker = exactOwner(state, ctx);
     if (!worker) throw new Error('Start supervision for this owner before setting its wait state');
-    const result = await sendAction(root, { type: 'owner-wait', kind, children, decision,
+    const result = await sendAction(root, { type: 'owner-wait', kind, children, decision, findings,
       workerId: worker.workerId, coordinatorId: coordinator.id,
       sessionId: worker.sessionId, sessionFile: worker.sessionFile }, 'supervisor', decision ? { timeoutMs: 15000 } : undefined);
     if (!result.accepted) throw new Error(result.message ?? 'Owner wait rejected; inspect exact supervision and decision state');
     return result;
   };
+  async function submitChatDecision(ctx, chat) {
+    const session = currentSession(ctx);
+    const version = generation;
+    await decisionUI.flushObservations();
+    const state = await readSupervisor(root);
+    const owner = exactOwner(state, ctx);
+    const wait = state.ownerWaits[owner?.workerId];
+    if (owner?.workerId !== chat.workerId || state.ownerToken !== chat.ownerToken ||
+        wait?.id !== chat.waitId || wait.kind !== 'user' || wait.decisionId)
+      throw new Error('The pending review question changed; no selection was sent');
+    const answer = selectedReviewFinding(chat.text, wait.findings);
+    const evidence = ownerDecisionEvidence(await readObservation(root, owner.workerId), owner);
+    const stillCurrent = () => generation === version && !uiPromptActive && !decisionUI.promptBlocked &&
+      !decisionUI.hold && evidence?.version === decisionUI.interactionVersion && evidence?.leaf === session.leaf &&
+      isDeepStrictEqual(currentSession(ctx), session);
+    if (!answer || !evidence || !stillCurrent()) throw new Error('The owner reply did not settle cleanly; no selection was sent');
+    const id = randomUUID();
+    await claim(join(root, `decision-input-${id}.json`), { id, workerId: owner.workerId,
+      coordinatorId: owner.coordinatorId, sessionId: owner.sessionId, sessionFile: owner.sessionFile,
+      waitId: wait.id, ownerToken: state.ownerToken, evidence, answer, chatReply: chat.text });
+    if (!stillCurrent()) throw new Error('Owner changed after capture; no selection was sent');
+    await ownerRequest(ctx, 'submit-decision', undefined, id);
+    ctx.ui.notify('Selected finding sent to the existing writer. Waiting for the fix before independent verification.', 'info');
+  }
   pi.registerTool({
     name: 'continuation_owner_wait', label: 'Wait as coordinating owner',
-    description: 'Record an owner wait for named children or a real user decision. Child notices wake only a child wait. For decisions, direct the user to /continuation-owner decide; this tool cannot release a decision.',
+    description: 'Wait for named children or an actual user decision. For Ask First review, give findings in the exact numbered order shown to the user, each with enough context for the writer. Tell the user they can reply here with “fix the first only” or “fix finding 2”. Do not relay recognized chat selections yourself. Other decisions can use /continuation-owner decide. This tool cannot release a decision.',
     parameters: Type.Object({ kind: Type.Union([Type.Literal('child'), Type.Literal('user')]),
-      children: Type.Optional(Type.Array(Type.String())) }),
+      children: Type.Optional(Type.Array(Type.String())),
+      findings: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 10 })) }),
     async execute(_call, args, _signal, _update, ctx) {
-      await ownerRequest(ctx, args.kind, args.children);
+      await ownerRequest(ctx, args.kind, args.children, undefined, args.findings);
       return { content: [{ type: 'text', text: `Owner waiting for ${args.kind}; no automatic user decision is inferred.` }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: 'continuation_assignment_delivered', label: 'Record assignment delivery',
+    description: 'Record the exact owner assignment’s final Git revision, completed independent review and applicable delivery outcomes. ' +
+      'Only use after actual review, any selected fixes and re-verification, and all required delivery are complete. ' +
+      'Give concrete evidence, including why a delivery step was not applicable if none was owed. Never use this to grant approval, skip an obligation or clear a hold. ' +
+      'The record is written only after this owner turn settles successfully. If work is queued it can advance automatically.',
+    parameters: Type.Object({ revision: Type.String({ pattern: '^[a-f0-9]{40,64}$' }),
+      review: Type.String({ minLength: 1, maxLength: 1000 }), delivery: Type.String({ minLength: 1, maxLength: 1000 }) }),
+    async execute(_call, args, _signal, _update, ctx) {
+      const state = await readSupervisor(root);
+      const owner = exactOwner(state, ctx);
+      if (!owner || owner.paused || owner.stopped || state.paused || state.routes[owner.route]?.paused ||
+          state.ownerWaits[owner.workerId] || !/^[a-f0-9]{40,64}$/.test(args.revision) ||
+          [args.review, args.delivery].some(text => typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 1000))
+        throw new Error('Record completed delivery only in the exact unheld owner with no unanswered wait');
+      deliveryOutcome = { revision: args.revision, review: args.review, delivery: args.delivery,
+        workerId: owner.workerId, grantId: owner.coordinatorId, sessionId: owner.sessionId, sessionFile: owner.sessionFile };
+      return { content: [{ type: 'text', text: 'Outcome staged for this turn. Finish with a concise delivery report.' }], details: {} };
     },
   });
   const releaseDecision = async ctx => {
@@ -271,7 +387,15 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
   });
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
+    chatInput = chatTurn = deliveryOutcome = undefined;
+    blockerWatcher?.close(); blockerWatcher = undefined; lastBlocker = undefined;
     await close?.(); close = undefined;
   });
-  return { registerOwner: (ctx, id) => register(ctx, id, true), releaseDecision, submitDecision };
+  return { registerOwner: (ctx, id) => register(ctx, id, true),
+    async replaceOwner(ctx, before, next) {
+      if (coordinator?.id !== before || coordinator.role !== 'owner') throw new Error('Retained coordinator changed');
+      await close?.();
+      coordinator = undefined;
+      return register(ctx, next, true);
+    }, releaseDecision, submitDecision };
 }

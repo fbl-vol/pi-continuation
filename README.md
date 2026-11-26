@@ -2,7 +2,7 @@
 
 An experimental **ordinary Pi extension** for explicitly registered Herdr-managed Pi TUI sessions. Load it through normal Pi package/extension startup; no SDK launcher, first-command-line-option rule or Pi fork is required. Installation alone registers and activates nothing.
 
-**Current release: `v0.7.7`, for controlled trials—not general replacement readiness.** Distributed through [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases/tag/v0.7.7); npm publication remains disabled (`private: true`). The coordinating-owner workflow has isolated test coverage, not live end-to-end acceptance. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
+**This version: `v0.7.8`, for controlled trials—not general replacement readiness.** Check [GitHub releases](https://github.com/fbl-vol/pi-continuation/releases) for published versions; npm publication remains disabled (`private: true`). The coordinating-owner workflow was exercised in isolated tests and scripted Linux Pi/Herdr rehearsals. Representative real-agent and installed-release acceptance are not established. The known same-decision reassessment limitation remains. Native Windows and macOS runtime support is not verified; macOS validation is deferred. Existing-worker migration is not included. [The bounded parity scenarios](docs/extension-parity.md) define the outcome; [the contract](docs/contract.md) and [validation](docs/validation.md) describe protections and limits.
 
 ## What it does
 
@@ -14,12 +14,12 @@ An experimental **ordinary Pi extension** for explicitly registered Herdr-manage
 - Bounds unchanged progress at two nudges and unresolved supervisor attention at one corrective wake before worker-local escalation. Material completion/blocker/decision notices go only to an exact coordinator; definite deferral stays pending, uncertainty pauses, stale completion is discarded.
 - Retains selected-worker ownership fencing and paused handoff/rollback history. Source preparation is not authorization to install an adapter or migrate live supervision.
 
-## Install v0.7.7
+## Install v0.7.8 after publication
 
-Start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
+Once the tag is available on GitHub, start with a disposable Pi profile and disposable Herdr sessions. The installed Herdr Pi integration must report saved session identity and state. Earlier advanced-workflow trials used Linux with Pi 1.5.2 and Herdr 0.9.5 (protocol 22); alpha.2's downloaded package was discovered and bound with Pi 1.5.0 and 1.5.2 without a model request.
 
 ```sh
-pi install git:github.com/fbl-vol/pi-continuation@v0.7.7
+pi install git:github.com/fbl-vol/pi-continuation@v0.7.8
 ```
 
 Installation changes that profile's Pi settings; restart or reload the intended Pi session afterward. To upgrade an existing pinned installation, run the same install command with the new tag; `pi update --extensions` alone does not advance a pinned tag. Other running sessions keep their loaded code until individually restarted or reloaded. A full restart resolved a stale menu after `/reload` in a controlled trial; restart the intended session if reloading does not pick up the update. It does **not** register workers, activate scopes or replace an existing continuation owner. Use the explicit setup below. Do not run two continuation owners over the same worker or migrate an existing worker without a separately planned pilot.
@@ -29,14 +29,14 @@ Before using the launch, recovery or owner decision workflows, restart or reload
 To remove this package from the same profile:
 
 ```sh
-pi remove git:github.com/fbl-vol/pi-continuation@v0.7.7
+pi remove git:github.com/fbl-vol/pi-continuation@v0.7.8
 ```
 
 Removal does not delete retained continuation state or session history. Release tarballs are also available as GitHub assets. See [the changelog](CHANGELOG.md).
 
 ## Everyday workflow (current source)
 
-After a separately authorized installation, use `/start-implementation` in the planning session for an agreed assignment. It reuses or starts the intended supervisor, enrolls one coordinating owner, and gives that owner bounded delegation for one writer and read-only reviewers. For an unrelated next assignment in the same tree, use `/start-implementation` again and explicitly authorize closing the exact settled previous assignment; it does not attest to missing review or delivery. In a supervised session, use `/continuation` for status, delivery preferences, Pause/Stop, Return and contextual recovery. The owner still delegates and waits using its native tools; an actual user finding selection is never inferred.
+After a separately authorized installation, use `/start-implementation` in the planning session for an agreed assignment. It reuses or starts the intended supervisor, enrolls one coordinating owner, and gives that owner bounded delegation for one writer and read-only reviewers. To queue the next agreed assignment in the same tree, use ordinary planner chat: `Put B: <scope> after A`. The exact owner records completed independent review and applicable delivery at the final revision; eligible queued work then starts in the same owner and writer sessions. Use the explicit native close-and-start control for manual closeout or supported recovery, not to attest to missing review or delivery. In a supervised session, use `/continuation` for status, delivery preferences, Pause/Stop, Return and contextual recovery. The owner still delegates and waits using its native tools; an actual user finding selection is never inferred.
 
 If the supervisor ended gracefully and its replacement is running, use `/continuation-delegate recover-reviewers` in the exact surviving coordinating owner. One confirmation restores read-only reviewer delegation to that replacement only. It cannot restore writer delegation, clear waits or pauses, or retry an earlier attempt. A shutdown without a recorded end (including one from an older build) is not eligible.
 
@@ -236,8 +236,11 @@ supervisor. `continuation_owner_wait` records a child wait for named worker IDs 
 user-decision wait. Child notices never answer a decision. In current source, use
 **Submit owner decision** in that exact owner pane and enter the chosen scope once.
 The extension relays the submitted text to the existing eligible writer and releases
-only that wait after a confirmed receipt. Ordinary chat is not a decision submission.
-An agent with terminal-input access could type the same response; Pi/Herdr do not
+only that wait after a confirmed receipt. For an Ask First review with registered
+numbered findings, ordinary owner chat such as `fix the first only` can select one
+finding; a clarification leaves the exact wait in place. Other decisions retain
+the explicit native control. An agent with terminal-input access could type the
+same response; Pi/Herdr do not
 identify who typed it. Existing holds and pauses remain in force. For older or
 unsubmitted waits, the explicit release path still requires confirmation and a
 successfully settled ordinary turn. An uncertain relay stays fenced for inspection;

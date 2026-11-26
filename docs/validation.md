@@ -1,5 +1,59 @@
 # Validation evidence and limits
 
+## Ordinary owner-chat selection from a package artifact
+
+On Linux with Pi 1.6.1 and Herdr 0.9.5:
+
+```sh
+artifact_dir=$(mktemp -d)
+npm pack --pack-destination "$artifact_dir"
+tar -xzf "$artifact_dir"/*.tgz -C "$artifact_dir"
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --owner-chat --package "$artifact_dir/package"
+```
+
+This starts ordinary Pi sessions under a disposable profile and Herdr server with a
+scripted local model. It checks that a clarification leaves the wait in place and
+that one ordinary reply delivers only finding 1 to the existing writer. It does
+not check independent semantic review, a real model's conversational choices,
+release installation in a user profile, or automatic assignment rollover.
+
+The scripted planner backlog check uses the same disposable harness:
+
+```sh
+python3 scripts/check-native-launch.py --pi-version 1.6.0 --planner-queue
+```
+
+It records two ordered entries from ordinary planning chat while the existing
+writer is still working. This checks capture, not automatic start of a queued
+assignment. Name the current assignment by its launch title (the text before the
+first colon, if present), or use `this assignment` when exactly one active
+assignment was launched from the planning session. Supply the agreed scope in
+full, for example `Put B: update the documentation after A`. The queue records the
+submitted scope as written; it does not reconstruct it from prior conversation.
+
+`--parallel-assignment` rehearses `Start <agreed scope> separately` while the
+first writer is still working. It exercises the single worktree choice and
+checks both writers are active in separate trees with the original bindings
+unchanged.
+
+`--automatic-rollover` rehearses queueing B from ordinary planner chat, obtaining
+a scripted review in a separate read-only Pi session, and pushing A's exact
+fixture revision to a disposable bare Git remote. The owner records the A
+outcome and B starts in the original owner and writer sessions, with no second
+human command. Add `--package "$artifact_dir/package"` to exercise the packed
+artifact. The reviewer and delivery coordinator are scripted, not representative
+real-agent review, user acceptance, or external Git publication.
+
+`--retained-rollover` submits the exact first queued scope through an explicit
+native close-and-start command. It verifies A's retirement, two fresh worker
+bindings, unchanged saved sessions and panes, and one B run receipt per role.
+The scripted model does not establish that real independent review or delivery
+obligations have been met; the explicit native closeout authorizes this fixture.
+The isolated test suite also exercises interruption before closeout commit,
+restart after a lost response with a sent receipt, and refusal to resend when
+the receipt is absent. Automatic closeout from review/delivery evidence is not
+covered by this rehearsal.
+
 [extension-parity.md](extension-parity.md), P1–P7, is the bounded acceptance set.
 Tests/reviews verify it; they do not create requirements. Owner completion is not
 user acceptance; whole-native-UI proof is not a hidden gate. No live installation,

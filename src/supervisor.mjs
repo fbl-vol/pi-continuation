@@ -8,10 +8,12 @@ import { ensureRoot, defaultRoot, readJson, atomicJson, claim, release } from '.
 import { sameOccupant, snapshot, isSettled, request as herdrRequest } from './herdr.mjs';
 import { observe } from './subscription.mjs';
 import { sendAction, ownerServer } from './ipc.mjs';
-import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid } from './contracts.mjs';
+import { readSupervisor, readObservation, ownerDecisionEvidence, newSupervisor, isId as uuid,
+  ownerRolloverBlocker, selectedReviewFinding, validReviewFindings } from './contracts.mjs';
 import { diagnostics, workerStartRefusal } from './diagnostics.mjs';
 import { abandonLaunchApproval, abandonLaunchAssignment, archiveLaunchNotices, closeLaunchAssignment,
-  endedSupervisorPath, spawnPath } from './delegation.mjs';
+  endedSupervisorPath, enqueueAssignment, finishRetainedAssignment, recordAssignmentOutcome, spawnPath,
+  startRetainedAssignment } from './delegation.mjs';
 import { attentionContent } from './attention.mjs';
 import { applyManagementControl, managementMessage } from './management.mjs';
 import { createAnnotations } from './annotations.mjs';
@@ -29,7 +31,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
-  startOwnerServer = ownerServer } = {}) {
+  startOwnerServer = ownerServer, retainedSend = sendAction } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
@@ -134,6 +136,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
     return false;
   };
+  const retainedStarting = id => Object.values(state.retainedAssignments ?? {}).some(transition =>
+    !transition.completed && [transition.ownerTicket.workerId, transition.writerTicket.workerId].includes(id));
   const isolateUnavailable = async () => {
     if (!active() || !lastSnapshot) return;
     let changed = false;
@@ -147,7 +151,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       }
     }
     for (const [id, binding] of Object.entries(state.workers)) {
-      if (binding.paused) continue;
+      if (binding.paused || retainedStarting(id)) continue;
       const agent = lastSnapshot.agents.find(a => a.pane_id === binding.paneId);
       let reason;
       if (!sameOccupant(agent, binding)) reason = 'Worker identity unavailable';
@@ -190,7 +194,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     if (!active() || !allowExperimentalActivation || !subscriptionLive || state.paused) return [];
     const result = [];
     for (const [id, binding] of Object.entries(state.workers)) {
-      if (binding.paused || state.routes[binding.route]?.paused) continue;
+      if (binding.paused || retainedStarting(id) || state.routes[binding.route]?.paused) continue;
       if (state.ownerWaits?.[id]) {
         try {
           if (await acknowledgeWaitingOwner(id)) await commit();
@@ -301,9 +305,38 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       await commit();
     }
   };
+  const advanceQueuedAssignments = async ctx => {
+    const token = state.ownerToken;
+    const stillCurrent = () => active() && subscriptionLive && state.acceptStarts && !state.paused &&
+      !promptActive && state.ownerToken === token;
+    if (!stillCurrent()) return;
+    for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes)) {
+      const pending = Object.values(state.retainedAssignments).find(transition =>
+        transition.automatic && transition.oldClaim.grantId === grantId);
+      const next = state.assignmentQueues[grantId]?.[0];
+      if (pending?.blockedToken === token || (!pending && (!next || state.closedAssignments[grantId]))) continue;
+      try {
+        const id = pending?.grant.id ?? await startRetainedAssignment(root,
+          { grantId, scope: next.scope, automatic: true }, state,
+          pane => herdrRequest(socketPath, 'pane.get', { pane_id: pane }), () => snapshot(socketPath), stillCurrent, commit);
+        await finishRetainedAssignment(root, state, id, stillCurrent, commit, retainedSend);
+      } catch (error) {
+        const message = error.message;
+        if (stillCurrent() && (outcome.blocker !== message || pending?.blockedToken !== token)) {
+          const transition = Object.values(state.retainedAssignments).find(item => item.oldClaim.grantId === grantId);
+          if (transition) transition.blockedToken = token;
+          if (!transition && outcome.blocker === message) continue;
+          outcome.blocker = message;
+          await commit();
+          notify(ctx, `Queued assignment could not start: ${message}`, 'warning');
+        }
+      }
+    }
+  };
   const wake = async ctx => {
     await isolateUnavailable();
     await flushNotices();
+    await advanceQueuedAssignments(ctx);
     if (!active() || !allowExperimentalActivation || !subscriptionLive || promptActive || !ctx.isIdle() || wakePending) return;
     const version = inputVersion;
     const pending = await attention();
@@ -504,6 +537,9 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         decision.ownerToken !== state.ownerToken || typeof decision.answer !== 'string' ||
         !decision.answer.trim() || Buffer.byteLength(JSON.stringify(decision.answer)) > 4000)
       return refuse('Decision wait changed or already submitted; do not replay');
+    const fromChat = decision.chatReply !== undefined;
+    if (fromChat && selectedReviewFinding(decision.chatReply, wait.findings) !== decision.answer)
+      return refuse('The chat reply does not select a finding from the exact pending question');
     const evidence = ownerDecisionEvidence(await readObservation(root, owner.workerId), owner);
     if (!evidence || !isDeepStrictEqual(evidence, decision.evidence)) return refuse('Owner decision stop changed');
     const writers = [];
@@ -546,10 +582,52 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
     if (state.handled[owner.workerId] !== evidence.stop)
       recordDisposition(state, owner.workerId, evidence.stop, 'acknowledge');
-    delete state.ownerWaits[owner.workerId];
+    if (fromChat) state.ownerWaits[owner.workerId] = { kind: 'child', children: [writer.workerId] };
+    else delete state.ownerWaits[owner.workerId];
     await commit();
     return { accepted: true };
   }
+
+  const acceptAssignmentOutcome = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || !state.acceptStarts || state.paused || promptActive)
+      return { accepted: false };
+    try { await recordAssignmentOutcome(root, state, request, await snapshot(socketPath)); }
+    catch { return { accepted: false }; }
+    await commit();
+    void queue(() => wake(ctx));
+    return { accepted: true };
+  });
+
+  const acceptRetainedStart = request => queue(async () => {
+    const stillCurrent = () => active() && subscriptionLive && state.acceptStarts && !state.paused &&
+      !promptActive && request.ownerToken === state.ownerToken;
+    if (!stillCurrent()) return { accepted: false, message: 'Supervisor unavailable or paused' };
+    try {
+      const id = await startRetainedAssignment(root, request, state,
+        pane => herdrRequest(socketPath, 'pane.get', { pane_id: pane }), () => snapshot(socketPath), stillCurrent, commit);
+      if (!await finishRetainedAssignment(root, state, id, stillCurrent, commit, retainedSend))
+        return { accepted: false, message: 'Retained start interrupted; inspect the exact queued assignment' };
+      return { accepted: true, id };
+    } catch (error) {
+      return { accepted: false, message: error.message };
+    }
+  });
+
+  const acceptAssignmentEnqueue = (request, ctx) => queue(async () => {
+    if (!active() || !subscriptionLive || !state.acceptStarts)
+      return { accepted: false, message: 'Supervisor unavailable; nothing was queued' };
+    const live = await snapshot(socketPath);
+    let entry;
+    try { entry = await enqueueAssignment(root, state, request, live); }
+    catch {
+      return { accepted: false, message: 'Could not verify the planning assignment; nothing was queued' };
+    }
+    if (entry.accepted) {
+      await commit();
+      void queue(() => wake(ctx));
+    }
+    return entry;
+  });
 
   const acceptOwnerWait = request => queue(async () => {
     if (!active() || !subscriptionLive || state.paused || !state.acceptStarts) return { accepted: false };
@@ -580,9 +658,14 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         return { accepted: false };
       delete state.ownerWaits[request.workerId];
     } else if (request.kind === 'user') {
-      if (state.ownerWaits[request.workerId]?.kind === 'released') return { accepted: false };
-      if (state.ownerWaits[request.workerId]?.kind === 'user') return { accepted: true };
-      state.ownerWaits[request.workerId] = { kind: 'user', id: randomUUID() };
+      const pending = state.ownerWaits[request.workerId];
+      if (request.findings !== undefined && !validReviewFindings(request.findings))
+        return { accepted: false, message: 'Provide between one and ten bounded, nonempty findings' };
+      if (pending?.kind === 'released') return { accepted: false };
+      if (pending?.kind === 'user') return request.findings === undefined || isDeepStrictEqual(pending.findings, request.findings) ?
+        { accepted: true } : { accepted: false, message: 'The original decision question is still pending' };
+      state.ownerWaits[request.workerId] = { kind: 'user', id: randomUUID(),
+        ...(request.findings && { findings: request.findings }) };
     } else if (request.kind === 'child' && Array.isArray(request.children) && request.children.length &&
         request.children.every(id => uuid(id) && state.workers[id]?.recipient?.id === recipient.id &&
           state.workers[id]?.recipient?.sessionId === recipient.sessionId)) {
@@ -719,7 +802,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           closeOwner = await startOwnerServer(root, token, request => request?.type === 'management-control' ?
             acceptManagement(request, ctx) : request?.type === 'launch-activate' ?
               acceptLaunchActivate(request, ctx) : request?.type === 'owner-wait' ?
-              acceptOwnerWait(request) : request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
+              acceptOwnerWait(request) : request?.type === 'assignment-enqueue' ? acceptAssignmentEnqueue(request, ctx) :
+              request?.type === 'assignment-outcome' ? acceptAssignmentOutcome(request, ctx) :
+              request?.type === 'assignment-retained-start' ? acceptRetainedStart(request) :
+              request?.type === 'launch-archive' ? acceptLaunchArchive(request) :
               request?.type === 'launch-abandon-assignment' ? acceptLaunchAbandonAssignment(request) :
               request?.type === 'launch-abandon' ? acceptLaunchAbandon(request) :
               request?.type === 'launch-close' ? acceptLaunchClose(request) :
@@ -767,6 +853,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
               void queue(() => wake(ctx));
           });
+          if (Object.keys(state.assignmentOutcomes).length) void queue(() => wake(ctx));
           notify(ctx, verb === 'start' ?
             'Supervisor started; use /continuation-worker start in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
@@ -799,7 +886,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const retiredWorkers = Object.fromEntries(Object.entries(state.retiredWorkers).map(([id, old]) =>
           [id, { paneId: old.paneId, sessionId: old.sessionId, retiredBy: old.retiredBy }]));
         notify(ctx, JSON.stringify({ globalPaused: state.paused, globalReason: state.reason,
-          failure: state.failure, subscriptionLive,
+          failure: state.failure, subscriptionLive, queuedAssignmentBlocker: ownerRolloverBlocker(state),
           routes: state.routes, workers, notices: state.notices, retiredWorkers }).slice(0, 6000)); return;
       }
       if (verb === 'coordinator') {

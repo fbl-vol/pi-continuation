@@ -51,6 +51,21 @@ function format(record, supervisor = false) {
   return record.schemaVersion;
 }
 
+export function validReviewFindings(findings) {
+  return Array.isArray(findings) && findings.length > 0 && findings.length <= 10 &&
+    findings.every(finding => typeof finding === 'string' && finding.trim() &&
+      Buffer.byteLength(JSON.stringify(finding)) <= 3000);
+}
+
+export function selectedReviewFinding(text, findings) {
+  if (typeof text !== 'string' || !validReviewFindings(findings)) return undefined;
+  const words = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+  const match = /^fix (?:only )?(?:the )?(?:(?:finding |f)(10|[1-9])|([a-z]+)(?: finding)?)(?: only)?[.!]?$/i.exec(text.trim());
+  if (!match) return undefined;
+  const number = match[1] ? Number(match[1]) : words.indexOf(match[2].toLowerCase()) + 1;
+  if (findings[number - 1]) return `Fix finding ${number} only:\n${findings[number - 1]}`;
+}
+
 /** Normalize known legacy records without mutating the caller's retained snapshot. */
 export function decodeSupervisor(record) {
   const version = format(record, true);
@@ -99,7 +114,47 @@ export function decodeSupervisor(record) {
         (wait.kind === 'released' ? !(wait.stop === null || typeof wait.stop === 'string') :
           wait.stop !== undefined) ||
         (wait.id !== undefined && (wait.kind !== 'user' || !isId(wait.id))) ||
+        (wait.findings !== undefined && (wait.kind !== 'user' || !wait.id || !validReviewFindings(wait.findings))) ||
         (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId)))) invalid();
+  }
+  // A queue entry is intent only, not evidence that the preceding assignment closed.
+  if (state.assignmentQueues === undefined) state.assignmentQueues = {};
+  if (!object(state.assignmentQueues)) invalid();
+  const queuedIds = new Set();
+  for (const [grantId, entries] of Object.entries(state.assignmentQueues)) {
+    if (!isId(grantId) || !Array.isArray(entries)) invalid();
+    for (const entry of entries) {
+      if (!object(entry) || !isId(entry.id) || queuedIds.has(entry.id) ||
+          typeof entry.scope !== 'string' || !entry.scope.trim() || Buffer.byteLength(entry.scope) > 8000 ||
+          typeof entry.leaf !== 'string' || !entry.leaf || !Number.isFinite(Date.parse(entry.at))) invalid();
+      queuedIds.add(entry.id);
+    }
+  }
+  if (state.assignmentOutcomes === undefined) state.assignmentOutcomes = {};
+  if (!object(state.assignmentOutcomes)) invalid();
+  for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes)) {
+    if (!isId(grantId) || !object(outcome) || !isId(outcome.workerId) || !isId(outcome.stop) ||
+        typeof outcome.leaf !== 'string' || !outcome.leaf ||
+        typeof outcome.revision !== 'string' || !/^[a-f0-9]{40,64}$/.test(outcome.revision) ||
+        typeof outcome.review !== 'string' || !outcome.review.trim() || Buffer.byteLength(outcome.review) > 1000 ||
+        typeof outcome.delivery !== 'string' || !outcome.delivery.trim() || Buffer.byteLength(outcome.delivery) > 1000 ||
+        (outcome.blocker !== undefined && typeof outcome.blocker !== 'string')) invalid();
+  }
+  if (state.retainedAssignments === undefined) state.retainedAssignments = {};
+  if (!object(state.retainedAssignments)) invalid();
+  for (const [id, transition] of Object.entries(state.retainedAssignments)) {
+    if (!object(transition) || !isId(id) || transition.grant?.id !== id ||
+        typeof transition.grant.checkout !== 'string' || !isId(transition.oldClaim?.id) ||
+        !isId(transition.oldClaim?.grantId) || state.closedAssignments[transition.oldClaim.grantId]?.launchId !== id ||
+        (transition.completed !== undefined && transition.completed !== true) ||
+        (transition.automatic !== undefined && transition.automatic !== true) ||
+        (transition.blockedToken !== undefined && !isId(transition.blockedToken))) invalid();
+    for (const [role, ticket] of [['owner', transition.ownerTicket], ['writer', transition.writerTicket]]) {
+      if (!object(ticket) || ticket.role !== role || ticket.grantId !== id || !isId(ticket.id) ||
+          !isId(ticket.workerId) || !isId(ticket.replacesWorker) ||
+          state.workers[ticket.workerId]?.delegationId !== ticket.id ||
+          state.retiredWorkers[ticket.replacesWorker]?.retiredBy !== id) invalid();
+    }
   }
   // Additive advisory Herdr attention, never a resumable native worker stop.
   if (state.blocked === undefined) state.blocked = {};
@@ -149,6 +204,24 @@ export function decodeSupervisor(record) {
   }
   state.schemaVersion = version || SCHEMA_VERSION;
   return state;
+}
+
+export function ownerRolloverBlocker(state, coordinator) {
+  for (const [grantId, outcome] of Object.entries(state.assignmentOutcomes ?? {})) {
+    if (!outcome.blocker) continue;
+    const pending = Object.values(state.retainedAssignments ?? {}).find(item => item.oldClaim.grantId === grantId);
+    // Older snapshots can retain a blocker after the completed transition was removed.
+    if (!pending && state.closedAssignments?.[grantId]) continue;
+    if (coordinator) {
+      const owner = state.workers[outcome.workerId] ?? state.retiredWorkers[outcome.workerId];
+      if (!owner || owner.sessionId !== coordinator.sessionId || owner.sessionFile !== coordinator.sessionFile ||
+          owner.paneId !== coordinator.paneId ||
+          !(pending ? [grantId, pending.grant.id] : [grantId]).includes(coordinator.id)) continue;
+    }
+    return { grantId, queuedId: pending?.grant.id ?? state.assignmentQueues?.[grantId]?.[0]?.id,
+      reason: outcome.blocker, next: pending ? 'Inspect the exact start receipts; do not resend the task.' :
+        'Inspect the exact assignment wait, holds and delivery outcome before advancing.' };
+  }
 }
 
 // Only an unchanged settled report (or its exact native-command typing witness)
