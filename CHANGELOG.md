@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.10] - 2026-11-27
+
+- Ordinary Pi now exposes `/start-implementation` for launching work and `/continuation` for management. Worker, supervisor, coordinator, owner decision, and delegation controls remain available in the menu.
+- An exact durable `sent` receipt settles a lost worker reply without resending, including after supervisor restart. Missing or inconclusive receipts stay held. Confirmed recovery clears only the pause imposed for that delivery.
+- Closing `/continuation` or reading Details restores the same settled report when the menu created the only provisional hold. Escape, external prompts, and independent holds remain in force.
+- A numbered review selection entered while the exact writer is busy is saved and delivered once when the same writer is eligible. No repeat answer is needed; independent pauses and approval holds still block delivery.
+
 ## [0.7.9] - 2026-11-27
 
 - Move read-only reviewer recovery into `/continuation`, replacing the `recover-reviewers` subcommand. The exact owner can confirm eligible recovery after a graceful supervisor replacement; writer authority and existing holds are unchanged.
