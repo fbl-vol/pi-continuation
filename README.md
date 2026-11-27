@@ -87,7 +87,7 @@ v0.3.0 uses the earlier flat list.
   It refuses unresolved continuation, notices or delegated startup. This is not
   permanent retirement and never terminates the Pi session.
 - **Clear this session hold** appears only for the exact held worker in its own menu. It requires confirmation after resolving the cause and reassesses the current report; it does not approve an action, lift a pause or replay an effect.
-- **Submit owner decision** opens the exact owner's decision input (`/continuation-owner decide`). Enter the actual decision and its scope once. The separate **Release this owner decision wait** control (`/continuation-owner resume`) retains the explicit recovery path for older or unsubmitted waits.
+- **Submit owner decision** opens the exact owner's decision input. Enter the actual decision and its scope once. The separate **Release this owner decision wait** control retains the explicit recovery path for older or unsubmitted waits.
 - **Return** is available only in that worker's own session, through the menu or
   `/continuation-worker start`. It requires fresh explicit confirmation after Stop,
   not an old in-flight start. A pause that predated Stop remains paused on return,

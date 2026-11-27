@@ -377,14 +377,6 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     await decisionUI.finishDecisionCommand(ctx, evidence);
     ctx.ui.notify('Decision delivered to the existing writer; exact owner wait released.', 'info');
   };
-  pi.registerCommand('continuation-owner', {
-    description: 'Submit the pending decision (decide) or explicitly release a legacy wait (resume)',
-    handler: (args, ctx) => {
-      if (args.trim() === 'decide') return submitDecision(ctx);
-      if (args.trim() !== 'resume') throw new Error('Usage: /continuation-owner decide | resume');
-      return releaseDecision(ctx);
-    },
-  });
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     chatInput = chatTurn = deliveryOutcome = undefined;

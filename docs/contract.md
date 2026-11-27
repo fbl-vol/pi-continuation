@@ -49,7 +49,7 @@ completion. A matching material notice consumes a child wait only after the
 existing receipt confirms delivery. A user wait defers all notices to that owner
 and rejects further delegation, including inherited already-dispatched children.
 Direct owner continuation is refused at the disposition and effect boundary.
-**Submit owner decision** (`/continuation-owner decide`) captures the exact entered
+`/continuation` → **Submit owner decision** captures the exact entered
 text, bound to the current owner, assignment, wait ID and settled stop. The
 supervisor checks the exact existing writer, records a one-use relay intent, and
 releases only that wait after the writer receiver confirms delivery. This uses
@@ -64,11 +64,11 @@ release the wait; an uncertain relay retains the fence and cannot be retried
 through the legacy path. Use matching extension versions in participating sessions.
 
 For legacy or unsubmitted waits, the confirmed own-session
-`/continuation-owner resume` records a durable release
+`/continuation` → **Release this owner decision wait** records a durable release
 fence after the user has supplied the decision; it does not flush pending notices.
 Only a subsequent ordinary interactive/RPC user turn that completes without a
 hold clears that fence, after which pending notices may deliver. Aborted/held
-turns, synthetic messages and reload do not clear it. Neither command grants
+turns, synthetic messages and reload do not clear it. Neither action grants
 approval, selects findings, clears a worker hold or activates scopes. Waits and
 release fences live in the retained supervisor snapshot and survive reload. There is no
 second scheduler, polling service or automatic user-selection wake. This source

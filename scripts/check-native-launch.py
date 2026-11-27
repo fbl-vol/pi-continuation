@@ -585,16 +585,25 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                           {'kind': 'child', 'children': [writer_attempt['workerId']]})
                     print('Native owner chat passed: clarification kept the wait; one ordinary reply sent only finding 1', flush=True)
                     return
-                cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
-                until('exact native owner decision prompt', lambda: 'Submit decision to the existing writer' in visible(owner['paneId']))
+                def open_owner_decision():
+                    pane = owner['paneId']
+                    action = 'Submit owner decision'
+                    cli('agent', 'prompt', pane, '/continuation')
+                    screen = until('owner decision menu', lambda: text if action in (text := visible(pane)) else None)
+                    lines = [line.strip() for line in screen.splitlines()]
+                    first = lines.index('→ Delivery preferences')
+                    target = lines.index(action)
+                    cli('agent', 'send-keys', pane, *(['down'] * (target - first)), 'enter')
+                    until('exact native owner decision prompt', lambda: 'Submit decision to the existing writer' in visible(pane))
+
+                open_owner_decision()
                 decision = 'Fix synthetic F1 only; leave F2 unchanged.'
                 cli('pane', 'send-text', owner['paneId'], decision)
                 cli('pane', 'send-keys', owner['paneId'], 'enter')
                 if owner_decision_negative:
                     until('paused writer refused', lambda: 'held, paused' in ' '.join(visible(owner['paneId']).split()))
                     until('owner idle after refusal', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
-                    cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
-                    until('decision prompt reopened', lambda: 'Submit decision to the existing writer' in visible(owner['paneId']))
+                    open_owner_decision()
                     cli('pane', 'send-keys', owner['paneId'], 'esc')
                     until('owner input interruption recorded', lambda: json.loads(observation_path.read_text()).get('holdReason') == 'interruption')
                     assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == wait
@@ -607,11 +616,13 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert receipt == {'id': wait['id'], 'status': 'sent'}
                 until('writer journal contains the decision', lambda: decision in Path(writer_binding['sessionFile']).read_text())
                 until('owner command settles', lambda: cli('agent', 'get', owner['paneId'])['agent']['agent_status'] in ('idle', 'done'))
-                cli('agent', 'prompt', owner['paneId'], '/continuation-owner decide')
-                until('duplicate command refused', lambda:
-                      'No fresh pending decision' in ' '.join(visible(owner['paneId']).split()))
+                cli('agent', 'prompt', owner['paneId'], '/continuation')
+                screen = until('owner management menu reopened', lambda: text if
+                               '→ Delivery preferences' in (text := visible(owner['paneId'])) else None)
+                assert 'Submit owner decision' not in screen and 'Release this owner decision wait' not in screen
+                cli('agent', 'send-keys', owner['paneId'], 'esc')
                 assert Path(writer_binding['sessionFile']).read_text().count(decision) == 1
-                print('Native owner decision passed: unrelated input retained wait, one prompt submission and writer receipt, duplicate refused', flush=True)
+                print('Native owner decision passed: unrelated input retained wait, one menu submission and writer receipt, no duplicate action offered', flush=True)
                 return
             if reviewer_recovery:
                 preflight, = (json.loads(p.read_text()) for p in state_dir.glob('spawn-????????-????-????-????-????????????.json')

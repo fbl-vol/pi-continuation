@@ -248,12 +248,12 @@ An owner may durably declare `continuation_owner_wait` with named exact child ID
 a user-decision wait. Child wait suppresses repetitive owner-stop attention and only
 a matching child material notice wakes the owner; receipt and native stop checks
 remain intact. A user wait suppresses automatic wake, inherited child delegation
-and direct stale owner continuation. In the legacy recovery path, human
-`/continuation-owner resume` confirmation
-after the actual decision persists a release fence rather than flushing notices;
+and direct stale owner continuation. In the legacy recovery path, confirming
+**Release this owner decision wait** in `/continuation` after the actual decision
+persists a release fence rather than flushing notices;
 only the following ordinary user-input turn's successful settlement clears it.
 Pending notices then deliver without preempting the selected instruction. Aborted
-or held turns and reload retain the fence. That command is not a decision, hold
+or held turns and reload retain the fence. That action is not a decision, hold
 clear, scope activation, review finding selection or permission to apply unselected
 fixes. No timer, synthetic completion or automatic selection inference is added.
 Only isolated fake-session tests cover this amendment; installation, live enrollment,

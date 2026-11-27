@@ -2020,7 +2020,25 @@ test('P1 an existing ordinary worker cannot silently upgrade into a coordinating
   assert.equal((await f.state()).workers[f.workerId()].role, undefined);
 });
 
-const answerOwnerDecision = owner => owner.command('continuation-owner', 'decide');
+const submitDecision = 'Submit owner decision';
+const releaseDecision = 'Release this owner decision wait';
+async function ownerDecisionMenu(owner, action, available = true) {
+  let opened = false;
+  owner.select((_title, choices) => {
+    opened = true;
+    assert.equal(choices.includes(action), available);
+    return available ? action : 'Close';
+  });
+  try {
+    await owner.command('continuation', '');
+  } finally {
+    owner.select(undefined);
+    assert.ok(opened, 'expected the native management menu');
+  }
+  assert.equal(owner.notifications.at(-1)?.[1] === 'warning', false,
+    owner.notifications.at(-1)?.[0]);
+}
+const answerOwnerDecision = owner => ownerDecisionMenu(owner, submitDecision);
 async function decisionFixture(t, findings) {
   const f = await fixture(t);
   await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
@@ -2096,7 +2114,7 @@ test('P3/P4/P7 native owner decision input relays the exact answer once to the s
   assert.equal(writer.messages.length, 1);
   assert.match(writer.messages[0][0].content, /\n\nFix F1 only; leave F2 unchanged\.$/);
   assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
-  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
+  await ownerDecisionMenu(owner, submitDecision, false);
   assert.equal(writer.messages.length, 1);
 });
 
@@ -2187,8 +2205,13 @@ test('P7 uncertain decision delivery retains the exact wait and prevents resend 
   assert.deepEqual((await f.state()).ownerWaits[ownerId], { ...wait, decisionId: wait.id });
   await f.supervisor.emit('session_shutdown');
   await f.supervisorCommand('start');
-  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
-  await assert.rejects(owner.command('continuation-owner', 'resume'), /Owner wait rejected/);
+  await ownerDecisionMenu(owner, submitDecision, false);
+  await ownerDecisionMenu(owner, releaseDecision, false);
+  const binding = (await f.state()).workers[ownerId];
+  const release = await sendAction(f.root, { type: 'owner-wait', kind: 'resume-user', workerId: ownerId,
+    coordinatorId: binding.coordinatorId, sessionId: binding.sessionId, sessionFile: binding.sessionFile }, 'supervisor');
+  assert.equal(release.accepted, false);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { ...wait, decisionId: wait.id });
   assert.equal(writer.messages.length, 1);
 });
 
@@ -2243,7 +2266,7 @@ test('P3 an already-dispatched child cannot delegate across its owner user wait;
   assert.equal((await f.state()).resumed[f.workerId()], undefined);
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'user');
 
-  await f.worker.command('continuation-owner', 'resume');
+  await ownerDecisionMenu(f.worker, releaseDecision);
   const released = await f.state();
   assert.equal(released.ownerWaits[f.workerId()].kind, 'released');
   assert.equal(released.workers[writer.workerId].recipient.id, released.workers[f.workerId()].coordinatorId);
@@ -2337,7 +2360,7 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
   assert.equal(other.messages.length, 1);
   assert.equal((await f.state()).routes.w.paused, false);
 
-  await f.worker.command('continuation-owner', 'resume');
+  await ownerDecisionMenu(f.worker, releaseDecision);
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released');
   assert.equal(f.worker.messages.length, 0, 'explicit release does not preempt selected ordinary user input');
   assert.equal((await f.observation()).hold, false, 'owner confirmation is guarded, not an external approval hold');
