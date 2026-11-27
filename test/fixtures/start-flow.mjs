@@ -9,7 +9,7 @@ import { bindContinuation } from '../../src/ordinary.mjs';
 import { endpoint } from '../../src/herdr.mjs';
 import { readJson } from '../../src/store.mjs';
 
-export async function startFixture(t, { blank = false, sessionManagerFactory, startOwnerServer, retainedSend } = {}) {
+export async function startFixture(t, { blank = false, sessionManagerFactory, startOwnerServer, retainedSend, sendWorkerAction } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'continuation-start-')));
   const socketPath = process.platform === 'win32' ? `test-${randomUUID()}` : join(root, 'herdr.sock');
   const sockets = new Set();
@@ -96,7 +96,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory, st
     return result;
   }
   let worker = native('w:p1');
-  const supervisor = native('s:p1', { startOwnerServer, retainedSend });
+  const supervisor = native('s:p1', { startOwnerServer, retainedSend, sendWorkerAction });
   agents.push({ agent: 'pi', pane_id: 'w:p1', terminal_id: 'terminal', cwd: root,
     workspace_id: 'w', tab_id: 'w:t1', agent_status: 'idle', completion_seq: 1, state_change_seq: 1,
     agent_session: { source: 'herdr:pi', agent: 'pi', kind: 'path', value: worker.file } });

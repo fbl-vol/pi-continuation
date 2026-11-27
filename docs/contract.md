@@ -61,8 +61,11 @@ can select one finding. The exact wait and a successfully settled reply are
 required; clarifications, extension or RPC input, model tool calls and notices
 cannot submit a numbered selection. Other decisions use the explicit native
 input above. Cancelled or interrupted input does not
-release the wait; an uncertain relay retains the fence and cannot be retried
-through the legacy path. Use matching extension versions in participating sessions.
+release the wait. If the IPC reply is lost, a matching durable `sent` receipt for
+that decision can finish the original wait transition without resending, including
+when the supervisor restarts before committing the result. An `accepted`, missing
+or mismatched receipt leaves the fence intact and cannot be retried through the
+legacy path. Use matching extension versions in participating sessions.
 
 For legacy or unsubmitted waits, the confirmed own-session
 `/continuation` → **Release this owner decision wait** records a durable release
@@ -142,7 +145,7 @@ Since v0.6.0, delivery preferences live in a private per-user `delivery-preferen
 
 One supervisor writes scopes, budgets, dispositions, notices and continuation intents. Each worker owns observations/receipts. Local sockets signal addressed delivery; durable records remain authority. Native Herdr `agent.prompt` lacks an expected-session/stop precondition and is not the continuation transport. Unix uses private local sockets, Windows named pipes. Framing is bounded UTF-8; listeners handle one request per connection and drain accepted handlers on shutdown.
 
-Resume intent is persisted before delivery. After persistence, the supervisor rechecks Herdr identity, idle status, state/completion sequence, subscription and its own interaction/scope state. A definite mismatch rejects the intent, pauses the worker and spends no nudge; there is no accepted-delivery ambiguity to resolve. Transport failure after dispatch remains uncertain. The receiver claims a one-use receipt and rechecks exact stop/session/leaf, generation, durable/local hold, active owner and all pauses immediately before native message injection. A crash between receipt and injection is ambiguous: suspend/inspect, never retry. Loss after acceptance cannot revoke an already accepted effect.
+Resume intent is persisted before delivery. After persistence, the supervisor rechecks Herdr identity, idle status, state/completion sequence, subscription and its own interaction/scope state. A definite mismatch rejects the intent, pauses the worker and spends no nudge; there is no accepted-delivery ambiguity to resolve. Transport failure after dispatch remains uncertain. The receiver claims a one-use receipt and rechecks exact stop/session/leaf, generation, durable/local hold, active owner and all pauses immediately before native message injection. A crash between receipt and injection is ambiguous: suspend/inspect, never retry. Loss after acceptance cannot revoke an already accepted effect. A matching durable `sent` receipt can settle the original continuation once even if the reply is lost. After restart, reconciliation also requires the exact persisted intent and its original budget; older unfinished intents without that budget remain held. Reconciliation does not lift an existing pause or resend an action.
 
 Two nudges without evidenced checkpoint progress exhaust only that worker's budget. One corrective supervisor attention turn precedes local escalation. Material blocker/decision notices dispose/pause the worker even while deferred. A busy/blocked exact coordinator stays pending on definite pre-acceptance refusal; lost coordinator identity pauses its route, lost worker/checkpoint only that worker. Uncertain delivery requires inspection. Completion requires whole-assignment interpretation, an exact checkpoint excerpt, cleared hold, eligible idle stop and full-file `reportHash`; dispatch and recipient recheck freshness. A hash is freshness, not semantic proof or independent acceptance.
 

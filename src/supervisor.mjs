@@ -31,7 +31,8 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
-  startOwnerServer = ownerServer, retainedSend = sendAction, legacySupervisorCommand = false } = {}) {
+  startOwnerServer = ownerServer, retainedSend = sendAction, sendWorkerAction = sendAction,
+  legacySupervisorCommand = false } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
@@ -526,6 +527,68 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     }
   });
 
+  async function deliveryRecord(kind, id) {
+    if (!uuid(id)) return undefined;
+    try { return await readJson(join(root, `${kind}-${id}.json`)); }
+    catch { return undefined; } // Missing or unreadable evidence must not release a fence.
+  }
+
+  async function hasSentReceipt(id) {
+    const receipt = await deliveryRecord('receipt', id);
+    return receipt?.status === 'sent' && receipt.id === id;
+  }
+
+  async function deliverWorkerAction(action) {
+    let response, transportError;
+    try { response = await sendWorkerAction(root, action); }
+    catch (error) { transportError = error; }
+    // A receiver writes `sent` only after native injection. A lost response
+    // does not make that exact durable result ambiguous or permit a resend.
+    if (!await hasSentReceipt(action.id) ||
+        (!transportError && (!response?.accepted || response.id !== action.id)))
+      throw transportError ?? new Error('Receipt not confirmed');
+  }
+
+  function finishOwnerDecision(intent, fromChat) {
+    const { sourceWorkerId, workerId, evidence } = intent;
+    if (state.handled[sourceWorkerId] !== evidence.stop)
+      recordDisposition(state, sourceWorkerId, evidence.stop, 'acknowledge');
+    if (fromChat) state.ownerWaits[sourceWorkerId] = { kind: 'child', children: [workerId] };
+    else delete state.ownerWaits[sourceWorkerId];
+  }
+
+  async function recoverSentActions() {
+    for (const [workerId, pending] of Object.entries(state.inflight)) {
+      if (!state.workers[workerId] || !await hasSentReceipt(pending.id)) continue;
+      const intent = await deliveryRecord('intent', pending.id);
+      const budget = intent?.budget;
+      if (intent?.id !== pending.id || intent?.workerId !== workerId || intent.stop !== pending.stop ||
+          intent.status !== 'sending' || intent.type !== undefined || !uuid(intent.ownerToken) ||
+          intent.ownerToken !== pending.ownerToken || ![1, 2].includes(budget?.count) ||
+          typeof budget.checkpoint !== 'string' || checkpointHash(budget.checkpoint) !== budget.hash) continue;
+      confirmResume(state, intent, budget);
+    }
+    for (const [sourceId, wait] of Object.entries(state.ownerWaits)) {
+      if (wait.kind !== 'user' || !wait.id || wait.id !== wait.decisionId || !await hasSentReceipt(wait.id)) continue;
+      const intent = await deliveryRecord('intent', wait.id);
+      if (intent?.id !== wait.id || intent.type !== 'owner-decision' || intent.status !== 'sending' ||
+          intent.sourceWorkerId !== sourceId || !uuid(intent.stop) || !uuid(intent.evidence?.stop) ||
+          !uuid(intent.ownerToken)) continue;
+      const owner = state.workers[sourceId], writer = state.workers[intent.workerId];
+      if (owner?.role !== 'owner' || !writer?.recipient || writer.recipient.id !== owner.coordinatorId ||
+          writer.recipient.sessionId !== owner.sessionId) continue;
+      const capture = await deliveryRecord('decision-input', intent.captureId);
+      if (capture?.id !== intent.captureId || capture.workerId !== sourceId || capture.waitId !== wait.id ||
+          capture.coordinatorId !== owner.coordinatorId || capture.sessionId !== owner.sessionId ||
+          capture.sessionFile !== owner.sessionFile || capture.ownerToken !== intent.ownerToken ||
+          typeof capture.answer !== 'string' || capture.answer !== intent.answer ||
+          !isDeepStrictEqual(capture.evidence, intent.evidence)) continue;
+      const fromChat = capture.chatReply !== undefined;
+      if (fromChat && selectedReviewFinding(capture.chatReply, wait.findings) !== capture.answer) continue;
+      finishOwnerDecision(intent, fromChat);
+    }
+  }
+
   async function submitOwnerDecision(owner, captureId) {
     const refuse = message => ({ accepted: false, message });
     if (!uuid(captureId)) return refuse('No exact native decision capture');
@@ -572,18 +635,12 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     await commit();
     try {
       await claim(join(root, `intent-${intent.id}.json`), intent);
-      const result = await sendAction(root, { id: intent.id, workerId: intent.workerId,
+      await deliverWorkerAction({ id: intent.id, workerId: intent.workerId,
         ownerToken: intent.ownerToken, stop: intent.stop });
-      const receipt = await readJson(join(root, `receipt-${intent.id}.json`));
-      if (!result.accepted || result.id !== intent.id || receipt.id !== intent.id || receipt.status !== 'sent')
-        throw new Error('Decision receipt unconfirmed');
     } catch {
       return refuse(`Decision delivery ${intent.id} is unconfirmed; wait retained. Inspect the receipt; do not resend.`);
     }
-    if (state.handled[owner.workerId] !== evidence.stop)
-      recordDisposition(state, owner.workerId, evidence.stop, 'acknowledge');
-    if (fromChat) state.ownerWaits[owner.workerId] = { kind: 'child', children: [writer.workerId] };
-    else delete state.ownerWaits[owner.workerId];
+    finishOwnerDecision(intent, fromChat);
     await commit();
     return { accepted: true };
   }
@@ -841,6 +898,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
               binding.failure = report.last;
             }
           }
+          await recoverSentActions();
           recoverUncertain(state);
           if (!allowExperimentalActivation) state.paused = true;
           state.ownerToken = token;
@@ -1101,9 +1159,10 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             decisionWait()) return 'Cancelled, paused or waiting for a user decision';
         const id = randomUUID();
         const intent = prepareResume(state, args.workerId, args.stop, id);
+        state.inflight[args.workerId].ownerToken = intent.ownerToken;
         await commit();
         try {
-          await atomicJson(join(root, `intent-${id}.json`), intent);
+          await atomicJson(join(root, `intent-${id}.json`), { ...intent, budget: plan.budget });
           if (_signal?.aborted) throw new Error('Cancelled before delivery');
           const delivery = await snapshot(socketPath);
           const agent = delivery.agents.find(a => a.pane_id === binding.paneId);
@@ -1120,10 +1179,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             await commit();
             return 'Worker state changed; paused before delivery; no continuation sent';
           }
-          const result = await sendAction(root, intent);
-          const receipt = await readJson(join(root, `receipt-${id}.json`));
-          if (!result.accepted || result.id !== id || receipt.status !== 'sent')
-            throw new Error('Receipt not confirmed');
+          await deliverWorkerAction(intent);
           confirmResume(state, intent, plan.budget);
           await commit();
           return 'Continuation delivered to exact native stop; not task acceptance';
