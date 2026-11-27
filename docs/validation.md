@@ -1,5 +1,19 @@
 # Validation evidence and limits
 
+## Everyday launch and management
+
+```sh
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --no-supervisor
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --reviewer-recovery
+```
+
+The first fixture starts an assignment through `/start-implementation` without a
+pre-existing supervisor. The second uses `/continuation` to restore read-only
+reviewer delegation after each of two graceful supervisor replacements; it also
+checks that Join, Pause and Stop act on the selected session without discarding
+the reviewer receipt. Both use disposable Linux Pi/Herdr sessions and a scripted
+local model.
+
 ## Ordinary owner-chat selection from a package artifact
 
 On Linux with Pi 1.6.1 and Herdr 0.9.5:

@@ -149,7 +149,7 @@ requires a running supervisor before owner launch.
 
 **Surviving-owner reviewer recovery (P1/P3/P4/P7):** After a recorded graceful
 supervisor end, the exact already-dispatched assignment owner can run
-`/continuation-delegate recover-reviewers` and confirm the named healthy
+`/continuation` → **Restore read-only reviewer delegation** and confirm the named healthy
 replacement once. The confirmation authorizes reviewer delegation only for that
 replacement; the original grant and writer claim are not rewritten. Revocation,
 pauses, holds, unresolved waits/effects and attempt/receipt history remain in

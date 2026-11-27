@@ -632,8 +632,12 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     cli('agent', 'send-keys', supervisor, 'enter')
                     until('replacement committed', lambda: json.loads(state_path.read_text())['ownerToken'] != old['ownerToken'])
                     until('replacement settled', lambda: cli('agent', 'get', supervisor)['agent']['agent_status'] in ('idle', 'done'))
-                    cli('agent', 'prompt', owner['paneId'], '/continuation-delegate recover-reviewers')
-                    until('one native reviewer recovery confirmation', lambda: 'Restore read-only reviewer delegation?' in visible(owner['paneId']))
+                    cli('agent', 'prompt', owner['paneId'], '/continuation')
+                    until('contextual reviewer recovery', lambda: 'Restore read-only reviewer delegation' in
+                          ' '.join(visible(owner['paneId']).split()))
+                    cli('agent', 'send-keys', owner['paneId'], 'down', 'down', 'enter')
+                    until('one native reviewer recovery confirmation', lambda: 'Restore read-only reviewer delegation?' in
+                          ' '.join(visible(owner['paneId']).split()))
                     cli('agent', 'send-keys', owner['paneId'], 'enter')
                     until('reviewer delegation restored', lambda: any(
                         r['ownerToken'] == json.loads(state_path.read_text())['ownerToken']
@@ -653,6 +657,32 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert all(p.read_bytes() == content for p, content in history.items())
                 print('Native reviewer recovery passed: graceful A/B/C, one confirmation per replacement, one reviewer; '
                       'second writer denied and preflight history unchanged', flush=True)
+                # Exercise deliberate controls on an idle session with no pending work.
+                cli('agent', 'prompt', planner, '/continuation')
+                def shows(text):
+                    return ''.join(text.split()) in ''.join(visible(planner).split())
+                until('join action', lambda: shows('Join this session to supervision'))
+                cli('agent', 'send-keys', planner, 'down', 'enter')
+                until('join confirmation', lambda: shows('Start worker supervision?'))
+                cli('agent', 'send-keys', planner, 'enter')
+                worker_id = until('planner joined', lambda: next((binding['workerId'] for binding in
+                    json.loads(state_path.read_text())['workers'].values() if binding['paneId'] == planner), None))
+                for action, keys, flag in [('Pause this worker', ['down', 'enter'], 'paused'),
+                                           ('Stop supervising this worker', ['down', 'down', 'enter'], 'stopped')]:
+                    cli('agent', 'prompt', planner, '/continuation')
+                    until('session management menu', lambda: shows('This session: details'))
+                    cli('agent', 'send-keys', planner, 'down', 'enter')
+                    until(action, lambda: shows(action))
+                    cli('agent', 'send-keys', planner, *keys)
+                    until(f'{action} confirmation', lambda: shows('this exact worker?'))
+                    cli('agent', 'send-keys', planner, 'enter')
+                    until(f'worker {flag}', lambda: json.loads(state_path.read_text())['workers'][worker_id].get(flag))
+                final = json.loads(state_path.read_text())
+                assert final['workers'][worker_id]['paused'] and final['workers'][worker_id]['stopped']
+                assert not final['workers'][owner['workerId']].get('stopped')
+                assert not final['workers'][review['workerId']].get('stopped')
+                assert json.loads((state_dir/f"spawn-receipt-{review['id']}.json").read_text())['status'] == 'sent'
+                print('Native Join, Pause and Stop passed: exact session only, reviewer receipt retained', flush=True)
                 return
             assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == {
                 'kind': 'child', 'children': [writer_attempt['workerId']]}, settled_owner
