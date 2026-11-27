@@ -1,6 +1,11 @@
 # Changelog
 
-## [0.7.8] - Pending release
+## [0.7.9] - 2026-11-27
+
+- Move read-only reviewer recovery into `/continuation`, replacing the `recover-reviewers` subcommand. The exact owner can confirm eligible recovery after a graceful supervisor replacement; writer authority and existing holds are unchanged.
+- When graceful-shutdown evidence is missing, the owner's Details explains why recovery is unavailable without offering Restore. This release does not recover from an ungraceful shutdown.
+
+## [0.7.8] - 2026-11-26
 
 - Keep planning chat open while the coordinating owner and sole writer work.
   Queue the next agreed assignment in chat; once the exact owner records

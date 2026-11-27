@@ -145,12 +145,16 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     await atomicJson(join(root, `observation-${workerId}.json`), { ...observation, stop: randomUUID() });
     coordinatorAgent.agent_status = 'idle';
     subscription.write(JSON.stringify({ event: 'pane.agent_status_changed', data: {} }) + '\n');
-    for (let i = 0; i < 40; i++) {
-      if (Object.values((await readJson(join(root, 'supervisor.json'))).notices).some(n => n.status === 'stale')) break;
+    const noticeStatuses = async () => Object.values((await readJson(join(root, 'supervisor.json'))).notices)
+      .map(notice => notice.status);
+    const staleDeadline = performance.now() + 3000;
+    let statuses = await noticeStatuses();
+    while (!statuses.includes('stale') && performance.now() < staleDeadline) {
       await wait(10);
+      statuses = await noticeStatuses();
     }
     assert.equal(coordinatorMessages.length, 1);
-    assert.ok(Object.values((await readJson(join(root, 'supervisor.json'))).notices).some(n => n.status === 'stale'));
+    assert.ok(statuses.includes('stale'), `Expected a persisted stale notice; last observed: ${statuses.join(', ')}`);
     // A material blocker is a disposition and holds the worker. Only explicit
     // activation and a new stop permit this later, separate batch to continue.
     await pi.command('activate worker ' + workerId, ctx);
