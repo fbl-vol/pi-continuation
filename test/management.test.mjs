@@ -49,6 +49,44 @@ async function resume(f) {
     reportHash: checkpointHash(await readFile(binding.checkpoint, 'utf8')) });
 }
 
+for (const interruption of ['none', 'earlier command', 'external prompt', 'Escape']) {
+  test(`read-only menu restores only its own provisional hold (${interruption})`, async t => {
+    const f = await started(t);
+    const before = await f.observation();
+    assert.equal(before.outcome, 'completed');
+    let editor = interruption === 'earlier command' ? '/help' : '/continuation';
+    f.worker.ctx.ui.getEditorText = () => editor;
+    f.worker.raw('/');
+    f.worker.raw('\r');
+    if (interruption === 'earlier command') {
+      editor = '/continuation';
+      f.worker.raw('/');
+      f.worker.raw('\r');
+    }
+    f.worker.select(async () => {
+      await f.worker.continuation.flushObservations();
+      assert.equal((await f.observation()).holdReason, 'typing');
+      assert.equal((await f.observation()).stop, null);
+      if (interruption === 'external prompt') await f.worker.ctx.ui.confirm('Actual user approval?');
+      if (interruption === 'Escape') f.worker.raw('\u001b');
+      return 'Close';
+    });
+    await f.worker.command('continuation', '');
+    await f.worker.continuation.flushObservations();
+    const after = await f.observation();
+    if (interruption === 'none') {
+      assert.equal(after.hold, false);
+      assert.equal(after.stop, before.stop);
+      assert.equal(after.finalReply, before.finalReply);
+    } else {
+      assert.equal(after.hold, true);
+      assert.equal(after.holdReason, interruption === 'Escape' ? 'interruption' :
+        interruption === 'earlier command' ? 'typing' : 'prompt');
+    }
+    assert.deepEqual(f.worker.messages, []);
+  });
+}
+
 test('manual supervisor menu binds the exact pinned worker paused and activates only that worker', async t => {
   const f = await startFixture(t);
   const checkpoint = join(f.root, 'existing checkpoint.md');
