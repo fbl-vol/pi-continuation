@@ -161,7 +161,7 @@ def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, p
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
         automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint, command_picker,
-        read_only_menu):
+        read_only_menu, busy_writer_decision):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -724,15 +724,23 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     until('writer pause confirmation', lambda: 'pause worker?' in visible(supervisor))
                     cli('agent', 'send-keys', supervisor, 'enter')
                     until('writer independently paused', lambda: json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]['paused'])
-                model.allow_writer.set()
                 writer_obs = state_dir/f"observation-{writer_attempt['workerId']}.json"
+                receipt_path = state_dir/f"receipt-{wait['id']}.json"
+                if busy_writer_decision:
+                    until('exact writer working', lambda: cli('agent', 'get', writer)['agent']['agent_status'] == 'working'
+                          and json.loads(writer_obs.read_text())['outcome'] == 'working')
+                    cli('agent', 'prompt', owner['paneId'], 'fix the first only')
+                    until('one selection saved while the writer is busy', lambda:
+                          json.loads(state_path.read_text())['ownerWaits'][owner['workerId']].get('queuedDecision'))
+                    assert not receipt_path.exists()
+                model.allow_writer.set()
                 until('existing writer settled', lambda: json.loads(writer_obs.read_text())['outcome'] == 'completed')
                 until('exact writer idle', lambda: cli('agent', 'get', writer)['agent']['agent_status'] in ('idle', 'done'))
                 writer_state = json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]
                 assert writer_state['paused'] == owner_decision_negative, writer_state
                 if owner_chat:
-                    cli('agent', 'prompt', owner['paneId'], 'fix the first only')
-                    receipt_path = state_dir/f"receipt-{wait['id']}.json"
+                    if not busy_writer_decision:
+                        cli('agent', 'prompt', owner['paneId'], 'fix the first only')
                     until('chat selection receipt', lambda: receipt_path.exists() and
                           json.loads(receipt_path.read_text())['status'] == 'sent')
                     session_file = Path(writer_binding['sessionFile'])
@@ -740,7 +748,9 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     assert 'Correct the synthetic label.' not in session_file.read_text()
                     until('owner waits for the existing writer', lambda: json.loads(state_path.read_text())['ownerWaits'].get(owner['workerId']) ==
                           {'kind': 'child', 'children': [writer_attempt['workerId']]})
-                    print('Native owner chat passed: clarification kept the wait; one ordinary reply sent only finding 1', flush=True)
+                    assert session_file.read_text().count('Correct the synthetic index.') == 1
+                    print('Native owner chat passed: one ordinary reply sent only finding 1' +
+                          (' after the busy writer settled' if busy_writer_decision else ''), flush=True)
                     return
                 def open_owner_decision():
                     pane = owner['paneId']
@@ -989,6 +999,7 @@ if __name__ == '__main__':
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
     parser.add_argument('--owner-chat', action='store_true', help='clarify, then select one finding via ordinary owner chat')
+    parser.add_argument('--busy-writer-decision', action='store_true', help='submit one numbered finding while the exact writer is busy')
     parser.add_argument('--planner-queue', action='store_true', help='queue two ordinary-chat backlog entries without interrupting A')
     parser.add_argument('--parallel-assignment', action='store_true', help='launch in an explicitly authorized disposable alternate tree')
     parser.add_argument('--retained-rollover', action='store_true', help='close A explicitly and start queued B in both original sessions')
@@ -1008,8 +1019,8 @@ if __name__ == '__main__':
                 args.nested, args.checkpoint_recovery, args.preflight_recovery, args.new_space,
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
-                args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
+                args.owner_chat or args.busy_writer_decision, args.planner_queue, args.parallel_assignment, args.retained_rollover,
                 args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator,
-                args.pinned_checkpoint, args.command_picker, args.read_only_menu)
+                args.pinned_checkpoint, args.command_picker, args.read_only_menu, args.busy_writer_decision)
         finally:
             model.shutdown()

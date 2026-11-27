@@ -336,6 +336,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
   };
   const wake = async ctx => {
     await isolateUnavailable();
+    await deliverQueuedDecisions(ctx);
     await flushNotices();
     await advanceQueuedAssignments(ctx);
     if (!active() || !allowExperimentalActivation || !subscriptionLive || promptActive || !ctx.isIdle() || wakePending) return;
@@ -580,31 +581,44 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       const capture = await deliveryRecord('decision-input', intent.captureId);
       if (capture?.id !== intent.captureId || capture.workerId !== sourceId || capture.waitId !== wait.id ||
           capture.coordinatorId !== owner.coordinatorId || capture.sessionId !== owner.sessionId ||
-          capture.sessionFile !== owner.sessionFile || capture.ownerToken !== intent.ownerToken ||
+          capture.sessionFile !== owner.sessionFile || capture.ownerToken !== (intent.captureOwnerToken ?? intent.ownerToken) ||
           typeof capture.answer !== 'string' || capture.answer !== intent.answer ||
-          !isDeepStrictEqual(capture.evidence, intent.evidence)) continue;
+          !isDeepStrictEqual(capture.evidence, intent.captureEvidence ?? intent.evidence)) continue;
       const fromChat = capture.chatReply !== undefined;
       if (fromChat && selectedReviewFinding(capture.chatReply, wait.findings) !== capture.answer) continue;
       finishOwnerDecision(intent, fromChat);
     }
   }
 
-  async function submitOwnerDecision(owner, captureId) {
+  async function deliverQueuedDecisions(ctx) {
+    if (!active() || !subscriptionLive || state.paused || promptActive) return;
+    for (const [id, wait] of Object.entries(state.ownerWaits)) {
+      if (!wait.queuedDecision || !state.workers[id]) continue;
+      try { await submitOwnerDecision(state.workers[id], wait.queuedDecision.captureId, wait.queuedDecision); }
+      catch (error) { report('inspect queued owner decision', error, ctx); }
+    }
+  }
+
+  async function submitOwnerDecision(owner, captureId, queued) {
     const refuse = message => ({ accepted: false, message });
     if (!uuid(captureId)) return refuse('No exact native decision capture');
     const decision = await readJson(join(root, `decision-input-${captureId}.json`));
     const wait = state.ownerWaits[owner.workerId];
-    if (!uuid(wait?.id) || wait.kind !== 'user' || wait.decisionId || decision.waitId !== wait.id ||
+    if (!uuid(wait?.id) || wait.kind !== 'user' || (queued ? queued !== wait.queuedDecision : !!wait.decisionId) ||
+        decision.waitId !== wait.id ||
         decision.id !== captureId || decision.workerId !== owner.workerId || decision.coordinatorId !== owner.coordinatorId ||
         decision.sessionId !== owner.sessionId || decision.sessionFile !== owner.sessionFile ||
-        decision.ownerToken !== state.ownerToken || typeof decision.answer !== 'string' ||
+        decision.ownerToken !== (queued?.ownerToken ?? state.ownerToken) || typeof decision.answer !== 'string' ||
         !decision.answer.trim() || Buffer.byteLength(JSON.stringify(decision.answer)) > 4000)
       return refuse('Decision wait changed or already submitted; do not replay');
     const fromChat = decision.chatReply !== undefined;
     if (fromChat && selectedReviewFinding(decision.chatReply, wait.findings) !== decision.answer)
       return refuse('The chat reply does not select a finding from the exact pending question');
-    const evidence = ownerDecisionEvidence(await readObservation(root, owner.workerId), owner);
-    if (!evidence || !isDeepStrictEqual(evidence, decision.evidence)) return refuse('Owner decision stop changed');
+    const ownerObservation = await readObservation(root, owner.workerId);
+    const evidence = ownerDecisionEvidence(ownerObservation, owner);
+    const sameQuestionStop = evidence && evidence.stop === decision.evidence?.stop && evidence.leaf === decision.evidence?.leaf;
+    if (!sameQuestionStop || (queued ? ownerObservation.hold : !isDeepStrictEqual(evidence, decision.evidence)))
+      return refuse('Owner decision stop changed or is held');
     const writers = [];
     for (const candidate of Object.values(state.workers)) {
       if (candidate.recipient?.id !== owner.coordinatorId || candidate.recipient.sessionId !== owner.sessionId ||
@@ -618,20 +632,37 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
     const [writer] = writers;
     const live = await snapshot(socketPath);
     const agent = live.agents.find(a => a.pane_id === writer?.paneId);
-    if (!sameOccupant(live.agents.find(a => a.pane_id === owner.paneId), owner) ||
-        writers.length !== 1 || !sameOccupant(agent, writer) || !isSettled(agent))
-      return refuse('One exact settled existing writer is required');
+    const ownerAgent = live.agents.find(a => a.pane_id === owner.paneId);
+    if (writers.length !== 1 || (queued && queued.writerId !== writer.workerId) ||
+        !sameOccupant(ownerAgent, owner) || !sameOccupant(agent, writer) ||
+        (queued && !isSettled(ownerAgent))) return refuse('One exact existing writer and owner are required');
     const observed = await readObservation(root, writer.workerId);
-    if (!active() || !subscriptionLive || state.paused || owner.paused || writer.paused ||
+    if (!active() || !subscriptionLive || !state.acceptStarts || state.paused || (queued && promptActive) ||
+        owner.paused || owner.stopped || writer.paused || writer.stopped ||
         state.routes[owner.route]?.paused || state.routes[writer.route]?.paused || state.inflight[writer.workerId] ||
         unresolvedDecisionAtStop(state.dispositions[writer.workerId], observed.stop) || observed.hold || observed.bootstrapPending ||
-        observed.outcome !== 'completed' || !observed.stop || observed.session.id !== writer.sessionId ||
-        observed.session.file !== writer.sessionFile) return refuse('Owner or writer is held, paused, or has unresolved work');
+        observed.session.id !== writer.sessionId || observed.session.file !== writer.sessionFile)
+      return refuse('Owner or writer is held, paused, or has unresolved work');
+    if (fromChat && (agent.agent_status === 'working' || (isSettled(agent) && observed.outcome === 'working')) &&
+        ['working', 'completed'].includes(observed.outcome)) {
+      if (!queued) {
+        // Fence both native decision inputs before recording that no send was attempted.
+        wait.decisionId = wait.id;
+        wait.queuedDecision = { captureId, writerId: writer.workerId, ownerToken: decision.ownerToken };
+        await commit();
+      }
+      return { accepted: true, queued: true };
+    }
+    if (!isSettled(agent)) return refuse('One exact settled existing writer is required');
+    if (observed.outcome !== 'completed' || !observed.stop)
+      return refuse('Owner or writer is held, paused, or has unresolved work');
     const intent = { id: wait.id, status: 'sending', type: 'owner-decision', ownerToken: state.ownerToken,
+      captureOwnerToken: decision.ownerToken, ...(queued && { captureEvidence: decision.evidence }),
       workerId: writer.workerId, stop: observed.stop, sourceWorkerId: owner.workerId, captureId, evidence, answer: decision.answer };
     // Commit the one-use fence before making any writer request. An uncertain
     // response keeps the exact wait fenced and is never retried or legacy-released.
     wait.decisionId = intent.id;
+    delete wait.queuedDecision;
     await commit();
     try {
       await claim(join(root, `intent-${intent.id}.json`), intent);
@@ -911,7 +942,8 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             if (filename && /^(observation|spawn)-[a-f0-9-]{36}\.json$/.test(filename.toString()))
               void queue(() => wake(ctx));
           });
-          if (Object.keys(state.assignmentOutcomes).length) void queue(() => wake(ctx));
+          if (Object.keys(state.assignmentOutcomes).length || Object.values(state.ownerWaits).some(wait => wait.queuedDecision))
+            void queue(() => wake(ctx));
           notify(ctx, verb === 'start' ?
             'Supervisor started; use Join this session to supervision in /continuation in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
