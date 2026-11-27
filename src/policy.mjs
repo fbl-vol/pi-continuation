@@ -54,7 +54,7 @@ export function planDisposition(state, args, checkpoint, materialEvidence = '') 
 export function recordDisposition(state, workerId, stop, action) {
   state.handled[workerId] = stop;
   state.dispositions[workerId] = { stop, action };
-  if (['pause', 'blocker', 'decision'].includes(action)) state.workers[workerId].paused = true;
+  if (['pause', 'blocker', 'decision'].includes(action)) pauseWorker(state, workerId);
   // A later notice must never clear a successful delivery's no-resend guard.
 }
 
@@ -79,7 +79,25 @@ export function prepareResume(state, workerId, stop, id) {
   return { id, workerId, stop, ownerToken: state.ownerToken, status: 'sending' };
 }
 
+export function pauseWorker(state, workerId) {
+  const pending = state.inflight[workerId];
+  if (pending) delete pending.deliveryPause;
+  state.workers[workerId].paused = true;
+}
+
+export function pauseUncertainResume(state, workerId) {
+  const worker = state.workers[workerId];
+  if (!worker.paused && state.inflight[workerId]?.ownerToken)
+    state.inflight[workerId].deliveryPause = true;
+  worker.paused = true;
+}
+
 export function confirmResume(state, intent, budget) {
+  const worker = state.workers[intent.workerId];
+  if (state.inflight[intent.workerId]?.deliveryPause === true && !worker.stopped) {
+    worker.paused = false;
+    if (worker.failure?.operation === 'deliver continuation') delete worker.failure;
+  }
   recordDisposition(state, intent.workerId, intent.stop, 'resume');
   state.resumed[intent.workerId] = intent.stop;
   delete state.inflight[intent.workerId];
@@ -110,7 +128,8 @@ export function setScopePaused(state, kind, id, paused) {
     if (paused && !target.reason && !target.failure) target.reason = 'Explicit global pause';
     if (!paused && target.reason === 'Explicit global pause') delete target.reason;
   }
-  target.paused = paused;
+  if (paused && kind === 'worker') pauseWorker(state, id);
+  else target.paused = paused;
 }
 
 /** Retained withdrawal, not permanent retirement or resolution of an effect. */
@@ -140,11 +159,11 @@ export function returnStoppedWorker(state, workerId) {
 
 export function recoverUncertain(state) {
   for (const workerId of Object.keys(state.inflight)) {
-    if (state.workers[workerId]) state.workers[workerId].paused = true;
+    if (state.workers[workerId]) pauseUncertainResume(state, workerId);
   }
   for (const notice of Object.values(state.notices)) {
     if (notice.status === 'sending') {
-      if (notice.recipient && state.workers[notice.workerId]) state.workers[notice.workerId].paused = true;
+      if (notice.recipient && state.workers[notice.workerId]) pauseWorker(state, notice.workerId);
       else state.routes[notice.route].paused = true;
       notice.status = 'uncertain';
     }
@@ -157,7 +176,7 @@ export function recordUnresolvedAttention(state, workerId, stop, noticeId) {
   else if (prior.count < 1) prior.count++;
   else {
     const worker = state.workers[workerId];
-    worker.paused = true;
+    pauseWorker(state, workerId);
     prior.failure = 'Unresolved after corrective wake';
     if (recipientFor(state, workerId) && !prior.noticeId) {
       const notice = addNotice(state, { id: noticeId, workerId, stop, kind: 'blocker',

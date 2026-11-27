@@ -22,7 +22,7 @@ import { readWorkerRegistration, pinnedCheckpoint, workerCandidate, workerStartC
   coordinatorCandidate, requireReplaceableWorker } from './bindings.mjs';
 import { checkpointHash, planDisposition, recordDisposition, addNotice, prepareResume, confirmResume,
   resolveResume, setScopePaused, returnStoppedWorker, recoverUncertain, recordUnresolvedAttention, unresolvedDecisionAtStop,
-  recipientFor } from './policy.mjs';
+  recipientFor, pauseWorker, pauseUncertainResume } from './policy.mjs';
 
 const stateFile = root => join(root, 'supervisor.json');
 const lockFile = root => join(root, 'supervisor.lock');
@@ -180,7 +180,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         }
       }
       if (!reason || binding.paused) continue;
-      binding.paused = true;
+      pauseWorker(state, id);
       binding.reason = reason;
       changed = true;
       if (recipientFor(state, id)) {
@@ -245,7 +245,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       if (owner && ['user', 'released'].includes(state.ownerWaits[owner[0]]?.kind)) continue;
       const agent = lastSnapshot.agents.find(a => a.pane_id === recipient.paneId);
       if (!sameOccupant(agent, recipient)) {
-        if (notice.recipient) { state.workers[notice.workerId].paused = true; await commit(); }
+        if (notice.recipient) { pauseWorker(state, notice.workerId); await commit(); }
         continue;
       }
       if (!isSettled(agent)) continue;
@@ -292,11 +292,11 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         }
       } catch (error) {
         if (error.code === 'OWNERSHIP_FENCE') {
-          state.workers[notice.workerId].paused = true;
+          pauseWorker(state, notice.workerId);
           state.workers[notice.workerId].reason = 'Worker ownership unavailable';
           notice.status = 'pending'; // Definite pre-delivery rejection; no notice was accepted.
         } else {
-          if (notice.recipient) state.workers[notice.workerId].paused = true;
+          if (notice.recipient) pauseWorker(state, notice.workerId);
           else route.paused = true;
           notice.status = 'uncertain';
         }
@@ -358,7 +358,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           checkpoint: reportText.slice(0, 4096) });
       } catch (error) {
         if (!state.workers[id].paused) {
-          state.workers[id].paused = true;
+          pauseWorker(state, id);
           state.workers[id].reason = 'Worker checkpoint unavailable';
         }
         report('read attention checkpoint', error, ctx);
@@ -889,7 +889,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             if (binding.checkpoint) continue;
             // Older bindings did not pin checkpoint identity; observation is safe,
             // but continuing from a newly pinned path needs explicit activation.
-            binding.paused = true;
+            pauseWorker(state, workerId);
             binding.reason = 'Checkpoint binding requires inspection and activation';
             try {
               binding.checkpoint = (await readWorkerRegistration(root, workerId)).checkpoint;
@@ -1096,7 +1096,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
             observation = currentReport.observation;
           }
         } catch (error) {
-          binding.paused = true;
+          pauseWorker(state, args.workerId);
           report('read disposition observation', error, ctx);
           binding.failure = report.last;
           await commit();
@@ -1117,7 +1117,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         try {
           checkpoint = await readFile(await checkpointPath(args.workerId), 'utf8');
         } catch (error) {
-          binding.paused = true;
+          pauseWorker(state, args.workerId);
           report('read disposition checkpoint', error, ctx);
           binding.failure = report.last;
           await commit();
@@ -1129,7 +1129,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         const dispose = action => {
           if (state.blocked[args.workerId]?.stop === args.stop) {
             state.blocked[args.workerId].handled = true;
-            binding.paused = true;
+            pauseWorker(state, args.workerId);
           } else recordDisposition(state, args.workerId, args.stop, action);
         };
         if (plan.kind === 'notify') {
@@ -1184,7 +1184,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           await commit();
           return 'Continuation delivered to exact native stop; not task acceptance';
         } catch (error) {
-          binding.paused = true;
+          pauseUncertainResume(state, args.workerId);
           if (error !== report.lastError) report('deliver continuation', error, ctx);
           binding.failure = report.last;
           await commit();

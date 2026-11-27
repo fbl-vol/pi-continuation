@@ -70,6 +70,43 @@ test('P7 a lost reply after a sent continuation is counted once without pausing 
   assert.equal(f.worker.messages.length, 1);
 });
 
+for (const independentPause of [false, true]) {
+  test(`P7 late sent receipt after the ambiguity pause preserves only independent pauses (${independentPause})`, async t => {
+    let action, receiptPath, sent, requests = 0;
+    const f = await startFixture(t, {
+      async sendWorkerAction(root, intent) {
+        action = intent;
+        requests++;
+        assert.deepEqual(await sendAction(root, intent), { accepted: true, id: intent.id });
+        receiptPath = join(root, `receipt-${intent.id}.json`);
+        sent = await readJson(receiptPath);
+        await rm(receiptPath); // Make the real receiver's result unavailable to this one read.
+        throw new Error('Synthetic lost response while the sent receipt is not readable');
+      },
+    });
+    await start(f);
+    const evidence = 'Stage one verified; stage two remains approved.';
+    await turn(f, 'Work on the approved stages.', evidence);
+    assert.match((await disposition(f, 'resume', evidence)).content[0].text, /Ambiguous delivery/);
+    const id = f.workerId();
+    const ambiguous = await f.state();
+    assert.equal(ambiguous.inflight[id].id, action.id);
+    assert.equal(ambiguous.workers[id].paused, true);
+    if (independentPause) await f.supervisorCommand(`pause worker ${id}`);
+    await atomicJson(receiptPath, sent);
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    const recovered = await f.state();
+    assert.equal(recovered.inflight[id], undefined);
+    assert.equal(recovered.resumed[id], action.stop);
+    assert.equal(recovered.budgets[id].count, 1);
+    assert.equal(recovered.workers[id].paused, independentPause);
+    await disposition(f, 'resume', evidence);
+    assert.equal(requests, 1);
+    assert.equal(f.worker.messages.length, 1);
+  });
+}
+
 for (const receipt of ['missing', 'accepted', 'mismatched sent']) {
   test(`P7 ${receipt} receipt leaves the ordinary continuation held across restart`, async t => {
     let action, requests = 0;
