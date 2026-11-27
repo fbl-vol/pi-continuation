@@ -168,6 +168,8 @@ function details(view, row, reviewerRecoveryReason) {
   return [row.name + ' — ' + status.label,
     `Supervisor: ${view.running ? 'running' : 'unavailable'}`,
     ...(binding.role === 'owner' ? rolloverDetails(view.state, binding) : []),
+    ...(view.state.ownerWaits?.[binding.workerId]?.queuedDecision ?
+      ['Review selection saved for the exact writer; delivery waits for eligibility. Do not repeat the answer.'] : []),
     ...(reviewerRecoveryReason ? [`Reviewer recovery unavailable: ${reviewerRecoveryReason}`] : []),
     `Global pause: ${view.state.paused}; workspace pause: ${view.state.routes[binding.route]?.paused}; worker pause: ${binding.paused}`,
     `Hold: ${observation?.hold === true ? observation.holdReason ?? 'held' : observation ? 'none reported' : 'unknown'}`,

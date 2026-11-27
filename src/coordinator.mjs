@@ -294,8 +294,9 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
       coordinatorId: owner.coordinatorId, sessionId: owner.sessionId, sessionFile: owner.sessionFile,
       waitId: wait.id, ownerToken: state.ownerToken, evidence, answer, chatReply: chat.text });
     if (!stillCurrent()) throw new Error('Owner changed after capture; no selection was sent');
-    await ownerRequest(ctx, 'submit-decision', undefined, id);
-    ctx.ui.notify('Selected finding sent to the existing writer. Waiting for the fix before independent verification.', 'info');
+    const result = await ownerRequest(ctx, 'submit-decision', undefined, id);
+    ctx.ui.notify(result.queued ? 'Selection saved. It will be sent to the existing writer when eligible; do not repeat it.' :
+      'Selected finding sent to the existing writer. Waiting for the fix before independent verification.', 'info');
   }
   pi.registerTool({
     name: 'continuation_owner_wait', label: 'Wait as coordinating owner',

@@ -2139,6 +2139,51 @@ test('owner chat keeps the pending question on clarification or synthetic input 
   assert.equal(writer.messages.length, 1);
 });
 
+for (const scenario of ['settles', 'restarts', 'explicit pause']) test(`P3/P7 one owner chat selection waits for the exact busy writer (${scenario})`, async t => {
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.', 'Correct the label.']);
+  const wait = (await f.state()).ownerWaits[ownerId];
+  const agent = f.children[1].agent;
+  agent.agent_status = 'working';
+  await writer.emit('agent_start');
+  const text = 'fix the first only';
+  await owner.emit('input', { source: 'interactive', text });
+  await owner.emit('before_agent_start', { messageType: 'user', prompt: text });
+  await owner.emit('agent_start');
+  owner.assistant('Selection recorded.');
+  await owner.emit('agent_settled', { aborted: false });
+  assert.equal(writer.messages.length, 0);
+  const pending = (await f.state()).ownerWaits[ownerId];
+  assert.equal(pending.id, wait.id);
+  assert.equal(pending.decisionId, wait.id);
+  assert.equal(pending.queuedDecision.writerId, writerId);
+  await assert.rejects(readJson(join(f.root, `intent-${wait.id}.json`)), { code: 'ENOENT' });
+  await managementAction(owner, submitDecision, false);
+  await managementAction(owner, releaseDecision, false);
+  if (scenario === 'restarts') {
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], pending);
+  }
+  if (scenario === 'explicit pause') await f.supervisorCommand(`pause worker ${writerId}`);
+  agent.agent_status = 'done';
+  writer.assistant('Finished the earlier task.');
+  await writer.emit('agent_settled', { aborted: false });
+  if (scenario === 'explicit pause') {
+    await f.supervisorCommand('status');
+    assert.deepEqual((await f.state()).ownerWaits[ownerId], pending);
+    assert.equal((await f.state()).workers[writerId].paused, true);
+    assert.deepEqual(writer.messages, []);
+    await f.supervisorCommand(`activate worker ${writerId}`);
+  }
+  const deadline = Date.now() + 5000;
+  while ((await f.state()).ownerWaits[ownerId]?.kind !== 'child' && Date.now() < deadline)
+    await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [writerId] });
+  assert.equal(writer.messages.length, 1);
+  assert.match(writer.messages[0][0].content, /Fix finding 1 only:\nCorrect the index\.$/);
+  assert.deepEqual(await readJson(join(f.root, `receipt-${wait.id}.json`)), { id: wait.id, status: 'sent' });
+});
+
 for (const aborted of [true, false]) test(`owner chat retains wait after ${aborted ? 'aborted turn' : 'independent writer pause'}`, async t => {
   const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.']);
   if (!aborted) await f.supervisorCommand(`pause worker ${writerId}`);

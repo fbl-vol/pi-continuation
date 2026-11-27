@@ -115,7 +115,10 @@ export function decodeSupervisor(record) {
           wait.stop !== undefined) ||
         (wait.id !== undefined && (wait.kind !== 'user' || !isId(wait.id))) ||
         (wait.findings !== undefined && (wait.kind !== 'user' || !wait.id || !validReviewFindings(wait.findings))) ||
-        (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId)))) invalid();
+        (wait.decisionId !== undefined && (!wait.id || !isId(wait.decisionId))) ||
+        (wait.queuedDecision !== undefined && (!wait.findings || wait.decisionId !== wait.id ||
+          !object(wait.queuedDecision) || !isId(wait.queuedDecision.captureId) ||
+          !isId(wait.queuedDecision.writerId) || !isId(wait.queuedDecision.ownerToken)))) invalid();
   }
   // A queue entry is intent only, not evidence that the preceding assignment closed.
   if (state.assignmentQueues === undefined) state.assignmentQueues = {};

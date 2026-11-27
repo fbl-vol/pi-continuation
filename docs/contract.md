@@ -59,8 +59,12 @@ access can type the same response. For an Ask First wait with registered numbere
 findings, a matching interactive owner-pane reply such as `fix the first only`
 can select one finding. The exact wait and a successfully settled reply are
 required; clarifications, extension or RPC input, model tool calls and notices
-cannot submit a numbered selection. Other decisions use the explicit native
-input above. Cancelled or interrupted input does not
+cannot submit a numbered selection. If the exact existing writer is only busy,
+the selection stays attached to that owner stop and pending question. The
+supervisor delivers it once when the same writer settles and both sessions are
+eligible, without asking for the answer again. A changed owner stop, replaced
+writer, approval hold or independent pause is not permission to send. Other
+decisions use the explicit native input above. Cancelled or interrupted input does not
 release the wait. If the IPC reply is lost, a matching durable `sent` receipt for
 that decision can finish the original wait transition without resending, including
 when the supervisor restarts before committing the result. An `accepted`, missing
