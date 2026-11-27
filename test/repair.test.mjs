@@ -37,7 +37,6 @@ test('one corrective wake then only the unresolved worker is suspended', async (
   const handlers = new Map();
   const messages = [];
   const pi = { on: (event, fn) => handlers.set(event, fn),
-    registerCommand: (_name, definition) => { pi.command = definition.handler; },
     registerTool: () => {}, sendMessage: (...args) => messages.push(args) };
   const ctx = { mode: 'tui', isIdle: () => true,
     sessionManager: { getSessionId: () => 'supervisor' },
@@ -63,7 +62,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
       handled: {}, inflight: { [crashedWorker]: { id: pendingAction, stop: randomUUID() } } });
     await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
     const supervisor = bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
-    await pi.command('init', ctx);
+    await supervisor.command('init', ctx);
     await waitFor(() => messages.length === 1);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[crashedWorker].paused, true);
     handlers.get('before_agent_start')({ messageType: 'user' });
@@ -87,7 +86,7 @@ test('one corrective wake then only the unresolved worker is suspended', async (
     assert.equal(supervisor.active, true, 'corrective wake exhaustion must not withdraw ownership');
     await handlers.get('session_shutdown')();
     await assert.rejects(access(join(root, 'supervisor.lock')), { code: 'ENOENT' });
-    await pi.command('init', ctx);
+    await supervisor.command('init', ctx);
     assert.notEqual((await readJson(join(root, 'supervisor.lock'))).token, state.ownerToken);
   } finally {
     await handlers.get('session_shutdown')?.();

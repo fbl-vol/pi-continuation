@@ -153,12 +153,29 @@ async function fixture(t, options = {}) {
     await options.onSnapshot?.(f, children, request, socket);
   });
   const authorize = (scope = 'Implement the approved fixture feature. Read-only subdelegation is permitted; user selects review fixes.') =>
-    f.worker.command('continuation-delegate', `writer ${scope}`);
+    authorizeDelegation(f.worker, 'writer', scope);
   const attempts = async () => (await readdir(f.root)).filter(p => /^spawn-[a-f0-9-]{36}\.json$/.test(p));
   return { ...f, effects, children, renames, authorize, attempts,
     attempt: async () => readJson(join(f.root, (await attempts())[0])) };
 }
 const task = { key: 'implementation', task: 'Implement approved stage one and validate it.', role: 'writer' };
+const authorizeDelegationAction = 'Authorize scoped delegation';
+const revokeDelegationAction = 'Revoke delegation';
+async function authorizeDelegation(native, role, scope) {
+  native.select((title, choices) => {
+    const choice = title.startsWith('Choose the maximum role') ? role : authorizeDelegationAction;
+    assert.ok(choices.includes(choice));
+    return choice;
+  });
+  native.answer(scope);
+  try {
+    await native.command('continuation', '');
+    assert.notEqual(native.notifications.at(-1)?.[1], 'warning', native.notifications.at(-1)?.[0]);
+  } finally {
+    native.select(undefined);
+    native.answer(undefined);
+  }
+}
 
 test('P1/P2/P7 unsupervised planner creates only a new identity, enrolls before task, and inherits bounded subdelegation', async t => {
   const f = await fixture(t);
@@ -231,9 +248,42 @@ for (const readiness of ['ready', 'replaced', 'blocked']) {
   });
 }
 
+async function registerManualCoordinator(native, role, available = true) {
+  native.select((title, choices) => {
+    if (!title.startsWith('Choose a manual coordinator role')) {
+      assert.ok(choices.includes('Register manual coordinator'));
+      return 'Register manual coordinator';
+    }
+    assert.equal(choices.includes(role), available);
+    return available ? role : 'Cancel';
+  });
+  try {
+    await native.command('continuation', '');
+    assert.notEqual(native.notifications.at(-1)?.[1], 'warning', native.notifications.at(-1)?.[0]);
+  } finally { native.select(undefined); }
+}
+const registerManualOwner = (native, available) => registerManualCoordinator(native, 'Non-writing coordinating owner', available);
+
+test('P1 manual notice recipient confirms separate registration and cannot join as a worker', async t => {
+  const f = await fixture(t);
+  f.worker.confirm(false);
+  await registerManualCoordinator(f.worker, 'Notice recipient');
+  assert.ok(!f.worker.entries.some(e => e.customType === 'pi-continuation-coordinator'));
+  f.worker.confirm(true);
+  await registerManualCoordinator(f.worker, 'Notice recipient');
+  const entry = f.worker.entries.find(e => e.customType === 'pi-continuation-coordinator').data;
+  const record = await readJson(join(f.root, `coordinator-${entry.id}.json`));
+  assert.equal(record.sessionId, f.worker.id);
+  assert.equal(record.role, undefined);
+  await managementAction(f.worker, 'Register manual coordinator', false);
+  await f.workerStart();
+  assert.equal(f.workerId(), undefined);
+  assert.match(f.worker.notifications.at(-1)[0], /ordinary coordinator cannot become a worker/);
+});
+
 test('P1/P6 supervised non-writing owner delegates the sole writer and pins exact child recipient', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   const ownerId = f.workerId();
   const owner = (await f.state()).workers[ownerId];
@@ -388,7 +438,7 @@ test('P7 an already-existing linked tree has independent writer ownership', asyn
     f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
       agent_session: { ...f.agents[0].agent_session, value: existing.file } });
     await existing.emit('session_start', { reason: 'startup' });
-    await existing.command('continuation-worker', 'start');
+    await existing.continuation.start(existing.ctx);
     await f.worker.command('start-implementation', `Implement W123-D04 in ${alternate}.`);
     const writer = (await f.children[0].native.spawn(task)).details;
     assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
@@ -408,7 +458,7 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
     workspace_id: 'other', tab_id: 'other:t1',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   const original = Object.values((await f.state()).workers).find(w => w.sessionId === existing.id);
   const scope = 'Implement W123-D04 here.';
   f.worker.select(() => undefined);
@@ -449,7 +499,7 @@ test('P1/P7 one occupied-checkout choice creates the alternate tree in a new spa
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   let selections = 0;
   f.worker.select((title, choices) => {
     selections++;
@@ -480,7 +530,7 @@ test('P1/P7 failed supervisor activation after a worktree choice leaves no tree 
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   await f.supervisorCommand('pause global');
   assert.ok(subscription, 'Supervisor subscription must be observed before testing its loss');
 
@@ -650,7 +700,7 @@ test('P1/P4 one start resumes an ordinarily paused supervisor without a second c
     workspace_id: 'other', tab_id: 'other:t1', cwd: other, foreground_cwd: other,
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   const workerId = existing.entries.find(e => e.customType === 'pi-continuation-worker').data.workerId;
   await f.supervisorCommand(`pause worker ${workerId}`);
   await f.supervisorCommand('pause route other');
@@ -2015,12 +2065,28 @@ test('planner chat records an ordered backlog without interrupting A, and restar
 test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
   const f = await fixture(t);
   await f.workerStart();
-  await assert.rejects(f.worker.command('continuation-coordinator', 'owner'),
-    /register owner before worker enrollment/);
+  await registerManualOwner(f.worker, false);
   assert.equal((await f.state()).workers[f.workerId()].role, undefined);
 });
 
-const answerOwnerDecision = owner => owner.command('continuation-owner', 'decide');
+const submitDecision = 'Submit owner decision';
+const releaseDecision = 'Release this owner decision wait';
+async function managementAction(native, action, available = true) {
+  let opened = false;
+  native.select((_title, choices) => {
+    opened = true;
+    assert.equal(choices.includes(action), available);
+    return available ? action : 'Close';
+  });
+  try {
+    await native.command('continuation', '');
+  } finally {
+    native.select(undefined);
+    assert.ok(opened, 'expected the native management menu');
+  }
+  assert.notEqual(native.notifications.at(-1)?.[1], 'warning', native.notifications.at(-1)?.[0]);
+}
+const answerOwnerDecision = owner => managementAction(owner, submitDecision);
 async function decisionFixture(t, findings) {
   const f = await fixture(t);
   await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
@@ -2096,7 +2162,7 @@ test('P3/P4/P7 native owner decision input relays the exact answer once to the s
   assert.equal(writer.messages.length, 1);
   assert.match(writer.messages[0][0].content, /\n\nFix F1 only; leave F2 unchanged\.$/);
   assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
-  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
+  await managementAction(owner, submitDecision, false);
   assert.equal(writer.messages.length, 1);
 });
 
@@ -2187,14 +2253,19 @@ test('P7 uncertain decision delivery retains the exact wait and prevents resend 
   assert.deepEqual((await f.state()).ownerWaits[ownerId], { ...wait, decisionId: wait.id });
   await f.supervisor.emit('session_shutdown');
   await f.supervisorCommand('start');
-  await assert.rejects(answerOwnerDecision(owner), /No fresh pending decision/);
-  await assert.rejects(owner.command('continuation-owner', 'resume'), /Owner wait rejected/);
+  await managementAction(owner, submitDecision, false);
+  await managementAction(owner, releaseDecision, false);
+  const binding = (await f.state()).workers[ownerId];
+  const release = await sendAction(f.root, { type: 'owner-wait', kind: 'resume-user', workerId: ownerId,
+    coordinatorId: binding.coordinatorId, sessionId: binding.sessionId, sessionFile: binding.sessionFile }, 'supervisor');
+  assert.equal(release.accepted, false);
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { ...wait, decisionId: wait.id });
   assert.equal(writer.messages.length, 1);
 });
 
 test('P3 owner child wait persists; user selection gate blocks child notices and delegation', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const child = (await f.worker.spawn(task)).details;
@@ -2221,7 +2292,7 @@ test('P3 owner child wait persists; user selection gate blocks child notices and
 
 test('P3 an already-dispatched child cannot delegate across its owner user wait; stale direct owner resume is fenced', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const writer = (await f.worker.spawn(task)).details;
@@ -2243,7 +2314,7 @@ test('P3 an already-dispatched child cannot delegate across its owner user wait;
   assert.equal((await f.state()).resumed[f.workerId()], undefined);
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'user');
 
-  await f.worker.command('continuation-owner', 'resume');
+  await managementAction(f.worker, releaseDecision);
   const released = await f.state();
   assert.equal(released.ownerWaits[f.workerId()].kind, 'released');
   assert.equal(released.workers[writer.workerId].recipient.id, released.workers[f.workerId()].coordinatorId);
@@ -2282,7 +2353,7 @@ test('a retained coordinator endpoint cannot wake a session after its assignment
 
 test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const first = (await f.worker.spawn(task)).details;
@@ -2290,9 +2361,9 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'other-terminal',
     agent_session: { ...f.agents[0].agent_session, value: other.file } });
   await other.emit('session_start');
-  await other.command('continuation-coordinator', 'owner');
-  await other.command('continuation-worker', 'start');
-  await other.command('continuation-delegate', 'read-only Review only the approved result.');
+  await registerManualOwner(other);
+  await other.continuation.start(other.ctx);
+  await authorizeDelegation(other, 'read-only', 'Review only the approved result.');
   const second = (await other.spawn({ key: 'review', task: 'Review stage one without edits.', role: 'read-only' })).details;
   const state = await f.state();
   assert.notEqual(state.workers[first.workerId].recipient.id, state.workers[second.workerId].recipient.id);
@@ -2337,7 +2408,7 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
   assert.equal(other.messages.length, 1);
   assert.equal((await f.state()).routes.w.paused, false);
 
-  await f.worker.command('continuation-owner', 'resume');
+  await managementAction(f.worker, releaseDecision);
   assert.equal((await f.state()).ownerWaits[f.workerId()].kind, 'released');
   assert.equal(f.worker.messages.length, 0, 'explicit release does not preempt selected ordinary user input');
   assert.equal((await f.observation()).hold, false, 'owner confirmation is guarded, not an external approval hold');
@@ -2380,7 +2451,7 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
 
 test('P5 read-only exact-task claims prevent duplicate dispatch under another key without relying on writer exclusion', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-delegate', 'read-only Inspect approved results without edits.');
+  await authorizeDelegation(f.worker, 'read-only', 'Inspect approved results without edits.');
   const assignment = { key: 'inspect-once', task: 'Inspect approved stage-one results without changes.', role: 'read-only' };
   await f.worker.spawn(assignment);
   await assert.rejects(f.worker.spawn({ ...assignment, key: 'same-task-another-key' }), /EEXIST/);
@@ -2401,7 +2472,7 @@ test('P1/P3 no native scoped grant, cancelled grant, or copied session entry con
     return true;
   });
   await f.authorize();
-  await assert.rejects(f.authorize('A different scope'), /Revoke the current delegation tree/);
+  await managementAction(f.worker, authorizeDelegationAction, false);
   const replacement = await f.replaceWorker();
   for (const e of f.worker.entries.filter(e => e.customType === 'pi-continuation-delegation'))
     replacement.pi.appendEntry(e.customType, { ...e.data, sessionId: replacement.id });
@@ -2409,9 +2480,23 @@ test('P1/P3 no native scoped grant, cancelled grant, or copied session entry con
   assert.deepEqual(f.effects, []);
 });
 
+test('P1 manual scope input cannot authorize a replacement supervisor', async t => {
+  const f = await fixture(t);
+  f.worker.select(title => title.startsWith('Choose the maximum role') ? 'writer' : authorizeDelegationAction);
+  f.worker.answer(async () => {
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    return 'Implement the agreed fixture.';
+  });
+  await f.worker.command('continuation', '');
+  assert.match(f.worker.notifications.at(-1)[0], /Supervisor or selected session changed/);
+  assert.equal(f.worker.confirmations.length, 0);
+  assert.ok(!(await readdir(f.root)).some(name => /^delegation-[a-f0-9-]{36}\.json$/.test(name)));
+});
+
 test('P1 explicit read-only root scope cannot create a writer', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-delegate', 'read-only Inspect the approved implementation without edits.');
+  await authorizeDelegation(f.worker, 'read-only', 'Inspect the approved implementation without edits.');
   await assert.rejects(f.worker.spawn(task), /Read-only delegates cannot create writers/);
   assert.deepEqual(f.effects, []);
   assert.equal((await f.attempts()).length, 0);
@@ -2427,7 +2512,7 @@ test('P7 writer claims follow verified Git checkout identity, not a parent cwd s
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'another-terminal', cwd: parent.ctx.cwd,
     agent_session: { ...f.agents[0].agent_session, value: parent.file } });
   await parent.emit('session_start', { reason: 'startup' });
-  await parent.command('continuation-delegate', 'writer Implement another part of the same checkout.');
+  await authorizeDelegation(parent, 'writer', 'Implement another part of the same checkout.');
   await assert.rejects(parent.spawn({ ...task, key: 'another-parent', task: 'A different writer assignment' }), /held for inspection.*writer claim/);
   assert.deepEqual(f.effects, ['split'], 'ambiguous original writer retains checkout ownership');
   assert.equal((await readdir(f.root)).filter(p => p.startsWith('delegation-writer-')).length, 1);
@@ -2443,7 +2528,7 @@ for (const unavailable of [true, false]) {
     f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal', cwd: existing.ctx.cwd,
       agent_session: { ...f.agents[0].agent_session, value: existing.file } });
     await existing.emit('session_start', { reason: 'startup' });
-    await existing.command('continuation-worker', 'start');
+    await existing.continuation.start(existing.ctx);
     const [binding] = Object.values((await f.state()).workers);
     assert.equal(binding.sessionId, existing.id);
     assert.equal(binding.paused, false);
@@ -2517,8 +2602,7 @@ test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting 
   assert.equal(owner.confirmations.length, confirmations + 1);
   assert.match(owner.confirmations.at(-1)[0], /read-only reviewer/);
   await assert.rejects(owner.spawn({ ...task, key: 'second-writer', task: 'Second writer.' }), /cannot create writers/);
-  await assert.rejects(owner.command('continuation-delegate', 'writer Second writer.'), /check \/continuation for reviewer recovery/);
-  await assert.rejects(owner.command('continuation-delegate', 'recover-reviewers'), /check \/continuation for reviewer recovery/);
+  await managementAction(owner, authorizeDelegationAction, false);
   const result = (await owner.spawn(recoveredReview)).details;
   await assert.rejects(owner.spawn(recoveredReview), { code: 'EEXIST' });
   const after = await f.state();
@@ -2534,7 +2618,7 @@ test('P1/P3/P4/P7 exact owner confirms reviewer-only recovery without rewriting 
   const next = (await owner.spawn({ ...recoveredReview, key: 'review-under-C', task: 'Review A again under C.' })).details;
   assert.equal(next.status, 'dispatched');
   assert.deepEqual(await history(), before);
-  await owner.command('continuation-delegate', 'revoke');
+  await managementAction(owner, revokeDelegationAction);
   await assert.rejects(owner.spawn({ ...recoveredReview, key: 'after-revoke' }), /scope revoked/);
 });
 
@@ -2552,7 +2636,8 @@ for (const [name, block, message] of [
     return true;
   }), /supervisor evidence changed/],
   ['revocation during confirmation', f => f.children[0].native.confirm(async () => {
-    await f.children[0].native.command('continuation-delegate', 'revoke');
+    const path = join(f.root, `delegation-${(await f.attempt()).grantId}.json`);
+    await atomicJson(path, { ...await readJson(path), revoked: true });
     return true;
   }), /scope revoked/],
 ]) test(`P3/P4/P7 reviewer recovery refuses ${name} without a new attempt`, async t => {
@@ -2652,7 +2737,7 @@ test('P4/P7 a verified delegated binding from a removed independent tree cannot 
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'independent-terminal', cwd: removed,
     agent_session: { ...f.agents[0].agent_session, value: parent.file } });
   await parent.emit('session_start', { reason: 'startup' });
-  await parent.command('continuation-delegate', 'writer Inspect the independent fixture tree.');
+  await authorizeDelegation(parent, 'writer', 'Inspect the independent fixture tree.');
   const child = (await parent.spawn({ key: 'independent-writer', task: 'Inspect fixture.', role: 'writer' })).details;
   await f.supervisorCommand(`pause worker ${child.workerId}`);
   const binding = (await f.state()).workers[child.workerId];
@@ -2677,7 +2762,7 @@ test('P4/P7 baseline: a closed paused binding from a removed separate checkout b
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'old-terminal', cwd: removed,
     agent_session: { ...f.agents[0].agent_session, value: old.file } });
   await old.emit('session_start', { reason: 'startup' });
-  await old.command('continuation-worker', 'start');
+  await old.continuation.start(old.ctx);
   const state = await f.state();
   const binding = Object.values(state.workers)[0];
   binding.paused = true;
@@ -2779,7 +2864,7 @@ test('P3/P4 held supervised parent and revoked authority cannot subdelegate', as
   const before = [...f.effects];
   await assert.rejects(child.native.spawn({ key: 'paused-sub', task: 'Inspect only', role: 'read-only' }), /paused or held/);
   assert.deepEqual(f.effects, before);
-  await f.worker.command('continuation-delegate', 'revoke');
+  await managementAction(f.worker, revokeDelegationAction);
   await assert.rejects(f.worker.spawn({ key: 'revoked', task: 'Inspect another thing', role: 'read-only' }), /revoked/);
   assert.equal(f.children.length, 1);
 });

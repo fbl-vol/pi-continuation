@@ -40,7 +40,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
       });
     });
     function native(id, file, paneId) {
-      const handlers = new Map(), commands = new Map(), tools = new Map(), entries = [], messages = [], input = new Set();
+      const handlers = new Map(), tools = new Map(), entries = [], messages = [], input = new Set();
       let leaf = 'initial-leaf';
       const ctx = { mode: 'tui', cwd: root, isIdle: () => true,
         sessionManager: { getSessionId: () => id, getSessionFile: () => file,
@@ -49,13 +49,13 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
           editor: async () => undefined, custom: async () => undefined,
           onTerminalInput: fn => { input.add(fn); return () => input.delete(fn); }, notify: () => {} } };
       const pi = { on: (name, fn) => handlers.set(name, [...(handlers.get(name) ?? []), fn]),
-        registerCommand: (name, command) => commands.set(name, command.handler),
+        registerCommand: () => {},
         registerTool: tool => tools.set(tool.name, tool.execute),
         appendEntry: (customType, data) => { leaf = randomUUID(); entries.push({ id: leaf, type: 'custom', customType, data }); },
         sendMessage: (...args) => messages.push(args),
         sendUserMessage: () => assert.fail('Plain enrollment must not send another task') };
       const observer = bindContinuation(pi, { root, socketPath, paneId });
-      return { pi, ctx, entries, messages, commands, tools, observer,
+      return { pi, ctx, entries, messages, tools, observer,
         rawInput: () => { for (const fn of input) fn({ data: '/continuation\r' }); },
         assistant: text => { leaf = randomUUID(); entries.push({ id: leaf, type: 'message',
           message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] } }); },
@@ -80,7 +80,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     });
     await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
     await worker.emit('session_start');
-    await worker.commands.get('continuation-worker')(checkpoint, worker.ctx);
+    await worker.observer.registerPinned(worker.ctx, checkpoint);
     const workerId = worker.entries.find(entry => entry.customType === 'pi-continuation-worker').data.workerId;
     if (recovery) {
       worker.rawInput();
@@ -96,7 +96,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     assert.equal(observation.outcome, recovery ? 'approval' : 'completed');
     assert.equal(worker.messages.length, 0);
     supervisor.ctx.isIdle = () => false;
-    const command = args => supervisor.commands.get('continuation-supervisor')(args, supervisor.ctx);
+    const command = args => supervisor.observer.supervisor.command(args, supervisor.ctx);
     await command('init');
     await command(`add ${workerId} w`);
     let state = await readJson(join(root, 'supervisor.json'));

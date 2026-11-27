@@ -14,6 +14,19 @@ checks that Join, Pause and Stop act on the selected session without discarding
 the reviewer receipt. Both use disposable Linux Pi/Herdr sessions and a scripted
 local model.
 
+To verify command consolidation on the same native surface:
+
+```sh
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --command-picker
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --pinned-checkpoint --no-supervisor
+python3 scripts/check-native-launch.py --pi-version 1.6.1 --owner-decision-negative
+```
+
+These checks inspect the actual slash picker, register a pinned worker with one
+explicit initial turn before manually binding it paused, and assert that a paused
+writer or interrupted input cannot release an owner decision. They do not migrate
+or reload any installed user sessions.
+
 ## Ordinary owner-chat selection from a package artifact
 
 On Linux with Pi 1.6.1 and Herdr 0.9.5:

@@ -103,13 +103,13 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     bindCoordinator(coordinatorPi, { root, paneId: coordinatorRecord.paneId, socketPath: herdrPath });
     await coordinatorHandlers.get('session_start')({}, coordinatorCtx);
     stopCoordinator = () => coordinatorHandlers.get('session_shutdown')();
-    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false, legacySupervisorCommand: true });
     await pi.command('init', ctx);
     await pi.command(`add ${workerId} w1`, ctx);
     await assert.rejects(pi.command(`activate worker ${workerId}`, ctx), /Activation disabled/);
     assert.equal((await readJson(join(root, 'supervisor.json'))).workers[workerId].paused, true);
     await handlers.get('session_shutdown')();
-    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: true });
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: true, legacySupervisorCommand: true });
     await pi.command('init', ctx);
     await pi.command(`add ${workerId} w1`, ctx);
     await pi.command(`add ${siblingId} w2`, ctx);
@@ -205,7 +205,7 @@ test('explicit activation and evidence deliver once to exact stop, without a liv
     assert.equal(coordinatorMessages.length, noticesBefore + 1);
     assert.equal((await readJson(join(root, 'supervisor.json'))).notices[exhausted[0].id].status, 'sent');
     await handlers.get('session_shutdown')();
-    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false });
+    bindSupervisor(pi, { root, socketPath: herdrPath, allowExperimentalActivation: false, legacySupervisorCommand: true });
     await pi.command('init', ctx);
     assert.equal((await readJson(join(root, 'supervisor.json'))).paused, true);
     assert.equal((await pi.tool('call', { workerId: siblingId, stop: siblingStop,

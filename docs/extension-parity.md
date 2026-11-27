@@ -28,12 +28,11 @@ The old workflow rechecked Herdr identity/state near delivery and refused blocke
 
 ### User-approved start workflow amendment (since alpha.2)
 
-The approved `start-v1` workflow adds two explicit opt-ins, not automatic worker discovery: `/continuation-supervisor start` enables the one owner in the current private state scope; `/continuation-worker start` confirms enrollment/activation of that exact worker, derives its route and creates a private checkpoint from native projected task/result text. No user-maintained checkpoint declaration or copied ID is required for a fresh worker. Missing/conflicting ownership is refused, never guessed. Existing explicit controls remain available; an existing manually pinned checkpoint is not replaced or overwritten by start.
+The approved `start-v1` workflow has two explicit opt-ins, not automatic worker discovery. In `/continuation`, **Start supervisor here** enables the one owner in the current private state scope. **Join this session to supervision** confirms enrollment/activation of that exact worker, derives its route and creates a private checkpoint from native projected task/result text. No user-maintained checkpoint declaration or copied ID is required for a fresh worker. Missing/conflicting ownership is refused, never guessed. An existing manually pinned checkpoint is not replaced or overwritten by Join or Return.
 
-Since v0.3.2, bare `/continuation-worker` (also whitespace-only
-arguments) selects the same confirmed `start` path. Explicit checkpoint paths and
-`--start` remain advanced forms; their checkpoints must be existing files before
-registration. This user-approved command default changes no confirmation, hold,
+**Register with an existing checkpoint** in `/continuation` binds an existing file
+and leaves the registration paused. The user can observe only or explicitly
+supply an initial task before confirming. The menu changes no confirmation, hold,
 pause, ownership or return semantics and does not repair existing registrations.
 
 For start-opted-in workers, raw typing immediately fences old-stop delivery; ordinary submitted tasks release only that provisional typing fence. Escape/interruption, observed external prompts and failed settled runs remain holds. Repeating confirmed worker start returns control for reassessment without answering a pending decision, resetting bounds/history or replaying a delivered stop. It may enable that worker and a newly created route, never lift an independently paused existing global/route scope. Supervisor start explicitly enables the global scope; existing worker/route pauses remain. The alpha.1 advanced-only workflow is unchanged.
@@ -78,14 +77,16 @@ remain. No automatic replacement, live migration or delivery retry is introduced
 ### User-approved supervised delegation amendment (since v0.3.0)
 
 An unsupervised planning session or a supervised worker may delegate within an
-explicit user-authorized assignment. `/continuation-delegate <writer|read-only> <assignment scope>`
-is the originating session's guarded native authorization, pinned to its exact
+explicit user-authorized assignment. In the originating session, `/continuation` →
+**Authorize scoped delegation** prompts for the role ceiling and agreed assignment
+scope. This guarded native authorization is pinned to the exact
 session/cwd, role ceiling and the intended **already-running** supervisor session/owner. It is
 not worker enrollment. Brainstorming, a model-supplied approval flag or quoted tool
 text cannot create this grant. The agent-callable `continuation_spawn` uses that
 scope without per-worker confirmations; verified children inherit it for scoped
-subdelegation. `/continuation-delegate revoke` in the originating session revokes
-further delegation throughout that tree without changing existing supervision.
+subdelegation. `/continuation` → **Revoke delegation** in the originating session
+or launched coordinating owner revokes further delegation throughout that tree
+without changing existing supervision.
 
 The operation durably claims a stable assignment key and exact task, creates only
 a new unfocused Herdr pane, starts native Pi through ordinary extension loading,
@@ -227,8 +228,9 @@ bypass checkout ownership. Legacy/uncertain attempts remain held. See the [contr
 ### Approved coordinating-owner amendment (since v0.4.0)
 
 A coordinating owner is an exact Pi session that explicitly registers as a non-writing
-material-notice recipient (`/continuation-coordinator owner`) and then separately
-starts supervision (`/continuation-worker start`) under the existing global supervisor.
+material-notice recipient through **Register manual coordinator** in `/continuation`,
+and then separately selects **Join this session to supervision** under the existing
+global supervisor.
 The two confirmations are independent. A normal coordinator remains distinct from a
 worker; a supervised owner is neither an implementation writer nor the global
 supervisor. The owner can obtain a scoped `writer` delegation grant for its assignment.
@@ -248,12 +250,12 @@ An owner may durably declare `continuation_owner_wait` with named exact child ID
 a user-decision wait. Child wait suppresses repetitive owner-stop attention and only
 a matching child material notice wakes the owner; receipt and native stop checks
 remain intact. A user wait suppresses automatic wake, inherited child delegation
-and direct stale owner continuation. In the legacy recovery path, human
-`/continuation-owner resume` confirmation
-after the actual decision persists a release fence rather than flushing notices;
+and direct stale owner continuation. In the legacy recovery path, confirming
+**Release this owner decision wait** in `/continuation` after the actual decision
+persists a release fence rather than flushing notices;
 only the following ordinary user-input turn's successful settlement clears it.
 Pending notices then deliver without preempting the selected instruction. Aborted
-or held turns and reload retain the fence. That command is not a decision, hold
+or held turns and reload retain the fence. That action is not a decision, hold
 clear, scope activation, review finding selection or permission to apply unselected
 fixes. No timer, synthetic completion or automatic selection inference is added.
 Only isolated fake-session tests cover this amendment; installation, live enrollment,

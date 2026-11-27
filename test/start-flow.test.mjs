@@ -73,19 +73,22 @@ test('blank start sends no task and the first ordinary task persists its journal
   assert.equal(f.worker.messages.length, 1);
 });
 
-for (const argument of ['', '  \t ']) test('bare worker command uses confirmed start: ' + JSON.stringify(argument),
-  { timeout: 10000 }, async t => {
+test('the management Join action uses confirmed managed start', { timeout: 10000 }, async t => {
     const f = await startFixture(t, { blank: true });
     await f.supervisorCommand('start');
+    f.worker.select((_title, choices) => {
+      assert.ok(choices.includes('Join this session to supervision'));
+      return 'Join this session to supervision';
+    });
     f.worker.confirm(false);
-    await f.worker.command('continuation-worker', argument);
+    await f.worker.command('continuation', '');
     assert.equal(f.worker.confirmations[0][0], 'Start worker supervision?');
     assert.equal(f.workerId(), undefined);
     assert.deepEqual((await f.state()).workers, {});
     assert.equal((await readdir(f.root)).some(name => /^worker-.*\.json$/.test(name)), false);
 
     f.worker.confirm(true);
-    await f.worker.command('continuation-worker', argument);
+    await f.worker.command('continuation', '');
     const binding = (await f.state()).workers[f.workerId()];
     assert.ok(binding, JSON.stringify(f.worker.notifications));
     assert.equal(binding.sessionId, f.worker.id);
@@ -100,8 +103,14 @@ for (const argument of ['', '  \t ']) test('bare worker command uses confirmed s
 for (const initialTask of [false, true]) test(`advanced registration rejects directory checkpoints before confirmation (initial task: ${initialTask})`,
   { timeout: 10000 }, async t => {
     const f = await startFixture(t);
-    const argument = initialTask ? `--start ${JSON.stringify({ checkpoint: f.root, message: 'Approved task' })}` : f.root;
-    await f.worker.command('continuation-worker', argument);
+    f.worker.select((title, choices) => {
+      const action = title === 'Register this exact session paused'
+        ? initialTask ? 'Send an initial task' : 'Observe only' : 'Register with an existing checkpoint';
+      assert.ok(choices.includes(action));
+      return action;
+    });
+    f.worker.answer(title => title.includes('checkpoint') ? f.root : 'Approved task');
+    await f.worker.command('continuation', '');
     assert.equal(f.worker.confirmations.length, 0);
     assert.equal(f.workerId(), undefined);
     assert.equal((await readdir(f.root)).some(name => /^(worker|ready|observation)-/.test(name)), false);
@@ -246,8 +255,12 @@ test('start does not answer an unresolved user decision or generate another work
   await turn(f, 'Record the choice without selecting either option.', question);
   await disposition(f, 'pause', question);
   const before = await f.observation();
-  f.worker.raw('/continuation-worker start\r');
-  await f.workerStart();
+  f.worker.raw('/continuation\r');
+  f.worker.select((_title, choices) => {
+    assert.ok(choices.includes('Return this session to supervision'));
+    return 'Return this session to supervision';
+  });
+  await f.worker.command('continuation', '');
   const after = await f.observation();
   assert.equal(after.stop, before.stop);
   assert.equal(after.finalReply, question);
@@ -279,7 +292,7 @@ test('missing/cancelled/self/forged starts activate nothing and replacement is n
   await f.workerStart();
   assert.equal(f.workerId(), undefined);
   await f.supervisorCommand('start');
-  await f.supervisor.command('continuation-worker', 'start');
+  await f.supervisor.continuation.start(f.supervisor.ctx);
   assert.deepEqual((await f.state()).workers, {});
   f.worker.confirm(false);
   await f.workerStart();

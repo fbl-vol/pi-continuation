@@ -31,7 +31,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
-  startOwnerServer = ownerServer, retainedSend = sendAction } = {}) {
+  startOwnerServer = ownerServer, retainedSend = sendAction, legacySupervisorCommand = false } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
@@ -783,7 +783,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           setScopePaused(state, 'global', undefined, false);
           await commit();
           await reconcile(ctx);
-          notify(ctx, 'Supervisor started; use /continuation-worker start in each selected worker'); return;
+          notify(ctx, 'Supervisor started; use Join this session to supervision in /continuation in each selected worker'); return;
         }
         const localRoles = ctx.sessionManager.getBranch?.() ?? [];
         if (localRoles.some(e => e.type === 'custom' &&
@@ -793,7 +793,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (verb === 'start' && !allowExperimentalActivation)
           throw new Error('Start requires the ordinary extension profile');
         if (!bootstrap && !await ctx.ui.confirm('Start continuation supervisor?', verb === 'start' ?
-          'Enable this supervisor and accept only workers explicitly opting in with /continuation-worker start. Existing worker and route pauses remain unchanged.' :
+          'Enable this supervisor and accept only workers explicitly joining supervision. Existing worker and route pauses remain unchanged.' :
           'Claim one supervisor owner; all new scopes remain paused.')) return;
         await ensureRoot(root);
         const token = randomUUID();
@@ -855,7 +855,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           });
           if (Object.keys(state.assignmentOutcomes).length) void queue(() => wake(ctx));
           notify(ctx, verb === 'start' ?
-            'Supervisor started; use /continuation-worker start in each selected worker' :
+            'Supervisor started; use Join this session to supervision in /continuation in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
         } catch (error) {
           const closingAnnotations = annotations?.close(); annotations = undefined;
@@ -867,7 +867,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         }
         return;
       }
-      if (!active()) { notify(ctx, 'Run /continuation-supervisor init first', 'warning'); return; }
+      if (!active()) { notify(ctx, 'Claim or start the supervisor before managing its scopes', 'warning'); return; }
       if (verb === 'status') {
         const workers = {};
         for (const [workerId, binding] of Object.entries(state.workers)) {
@@ -990,7 +990,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       }
       notify(ctx, 'Unknown continuation-supervisor action', 'warning');
   };
-  pi.registerCommand('continuation-supervisor', {
+  if (legacySupervisorCommand) pi.registerCommand('continuation-supervisor', {
     description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
     handler: command,
   });

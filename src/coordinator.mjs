@@ -235,39 +235,32 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     return record;
   }
 
-  pi.registerCommand('continuation-coordinator', {
-    description: 'Register this exact Pi session as a material-notice recipient; does not grant approval',
-    handler: async (args, ctx) => {
-      if (ctx.mode !== 'tui' || !paneId || process.env.HERDR_ENV !== '1')
-        throw new Error('Requires a Herdr-managed Pi TUI');
-      if (coordinator) { ctx.ui.notify(`Coordinator already registered: ${coordinator.id}`); return; }
-      const owner = args.trim() === 'owner';
-      if (args.trim() && !owner) throw new Error('Usage: /continuation-coordinator [owner]');
-      const before = currentSession(ctx);
-      if (owner) {
-        const state = await readSupervisor(root);
-        if (!state.acceptStarts || !await ownerAlive(root, state.ownerToken) ||
-            Object.values(state.workers).some(w => w.sessionId === before.id || w.paneId === paneId))
-          throw new Error('Start the intended global supervisor first; register owner before worker enrollment');
-        const live = (await snapshot(socketPath)).agents.find(a => a.pane_id === paneId);
-        if (live?.agent !== 'pi' || live.agent_session?.source !== 'herdr:pi' ||
-            live.agent_session.kind !== 'path' || live.agent_session.value !== before.file ||
-            (live.foreground_cwd || live.cwd) !== ctx.cwd)
-          throw new Error('Owner requires an exact saved Herdr Pi session');
-      }
-      if (!await ctx.ui.confirm(owner ? 'Register non-writing owner?' : 'Register coordinator?',
-        owner ? 'Receive only exact child material notices. To supervise this coordinating session, run /continuation-worker start afterward. This is not a writer or global supervisor.' :
-          'Receive material notices in this exact session; no continuation or approval authority.')) return;
-      try {
-        const session = currentSession(ctx);
-        if (owner && (session.id !== before.id || session.file !== before.file ||
-            session.leaf !== before.leaf || !ctx.isIdle()))
-          throw new Error('Owner session changed during confirmation');
-        const record = await register(ctx, randomUUID(), owner);
-        ctx.ui.notify(`Coordinator ${record.id} registered`);
-      } catch (error) { throw report('register', error); }
-    },
-  });
+  const mayRegisterOwner = (state, session) => state?.acceptStarts &&
+    !Object.values(state.workers).some(w => w.sessionId === session.id || w.paneId === paneId);
+  async function registerManual(ctx, owner) {
+    if (coordinator) throw new Error('Coordinator already registered');
+    const before = currentSession(ctx);
+    if (owner) {
+      const state = await readSupervisor(root);
+      if (!mayRegisterOwner(state, before) || !await ownerAlive(root, state.ownerToken))
+        throw new Error('Start the intended global supervisor first; register owner before worker enrollment');
+      const live = (await snapshot(socketPath)).agents.find(a => a.pane_id === paneId);
+      if (live?.agent !== 'pi' || live.agent_session?.source !== 'herdr:pi' ||
+          live.agent_session.kind !== 'path' || live.agent_session.value !== before.file ||
+          (live.foreground_cwd || live.cwd) !== ctx.cwd)
+        throw new Error('Owner requires an exact saved Herdr Pi session');
+    }
+    if (!await confirmOwner(ctx, owner ? 'Register non-writing owner?' : 'Register coordinator?',
+      owner ? 'Receive only exact child material notices. To supervise this owner, use Join this session to supervision in /continuation afterward. This is not a writer or global supervisor.' :
+        'Receive material notices in this exact session; no continuation or approval authority.')) return;
+    try {
+      const session = currentSession(ctx);
+      if (session.id !== before.id || session.file !== before.file || session.leaf !== before.leaf || !ctx.isIdle())
+        throw new Error('Session changed during coordinator confirmation');
+      const record = await register(ctx, randomUUID(), owner);
+      ctx.ui.notify(`Coordinator ${record.id} registered`);
+    } catch (error) { throw report('register', error); }
+  }
   const ownerRequest = async (ctx, kind, children, decision, findings) => {
     if (!coordinator || coordinator.role !== 'owner')
       throw new Error('Exact registered coordinating owner required');
@@ -377,21 +370,18 @@ export function bindCoordinator(pi, { root = defaultRoot(), paneId = process.env
     await decisionUI.finishDecisionCommand(ctx, evidence);
     ctx.ui.notify('Decision delivered to the existing writer; exact owner wait released.', 'info');
   };
-  pi.registerCommand('continuation-owner', {
-    description: 'Submit the pending decision (decide) or explicitly release a legacy wait (resume)',
-    handler: (args, ctx) => {
-      if (args.trim() === 'decide') return submitDecision(ctx);
-      if (args.trim() !== 'resume') throw new Error('Usage: /continuation-owner decide | resume');
-      return releaseDecision(ctx);
-    },
-  });
   pi.on('session_shutdown', async () => {
     generation++; coordinator = undefined; releaseInput = false; selectionTurn = false;
     chatInput = chatTurn = deliveryOutcome = undefined;
     blockerWatcher?.close(); blockerWatcher = undefined; lastBlocker = undefined;
     await close?.(); close = undefined;
   });
-  return { registerOwner: (ctx, id) => register(ctx, id, true),
+  return { registerManual,
+    manualRegistration(ctx, state) {
+      if (coordinator || !ctx.isIdle()) return undefined;
+      return { owner: !!mayRegisterOwner(state, currentSession(ctx)) };
+    },
+    registerOwner: (ctx, id) => register(ctx, id, true),
     async replaceOwner(ctx, before, next) {
       if (coordinator?.id !== before || coordinator.role !== 'owner') throw new Error('Retained coordinator changed');
       await close?.();

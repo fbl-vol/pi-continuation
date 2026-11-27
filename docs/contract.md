@@ -20,9 +20,10 @@ New run/checkpoint error holds include optional `holdError: { kind: "run" | "che
 
 ## Supervised coordinating owners (since v0.4.0)
 
-`/continuation-coordinator owner` registers an exact non-writing recipient in the
-current Pi session; `/continuation-worker start` independently confirms worker
-supervision for that same session. The global supervisor remains separate. The
+**Register manual coordinator** → **Non-writing coordinating owner** in
+`/continuation` registers an exact non-writing recipient in the current Pi session.
+**Join this session to supervision** independently confirms worker supervision
+for that same session. The global supervisor remains separate. The
 owner registration must match its worker binding in session, file, pane and owner
 state; ordinary coordinators still cannot enroll as workers. The scoped delegation
 parent retains a writer *ceiling*, not a writer claim: only the verified coordinating
@@ -49,7 +50,7 @@ completion. A matching material notice consumes a child wait only after the
 existing receipt confirms delivery. A user wait defers all notices to that owner
 and rejects further delegation, including inherited already-dispatched children.
 Direct owner continuation is refused at the disposition and effect boundary.
-**Submit owner decision** (`/continuation-owner decide`) captures the exact entered
+`/continuation` → **Submit owner decision** captures the exact entered
 text, bound to the current owner, assignment, wait ID and settled stop. The
 supervisor checks the exact existing writer, records a one-use relay intent, and
 releases only that wait after the writer receiver confirms delivery. This uses
@@ -64,11 +65,11 @@ release the wait; an uncertain relay retains the fence and cannot be retried
 through the legacy path. Use matching extension versions in participating sessions.
 
 For legacy or unsubmitted waits, the confirmed own-session
-`/continuation-owner resume` records a durable release
+`/continuation` → **Release this owner decision wait** records a durable release
 fence after the user has supplied the decision; it does not flush pending notices.
 Only a subsequent ordinary interactive/RPC user turn that completes without a
 hold clears that fence, after which pending notices may deliver. Aborted/held
-turns, synthetic messages and reload do not clear it. Neither command grants
+turns, synthetic messages and reload do not clear it. Neither action grants
 approval, selects findings, clears a worker hold or activates scopes. Waits and
 release fences live in the retained supervisor snapshot and survive reload. There is no
 second scheduler, polling service or automatic user-selection wake. This source
@@ -161,7 +162,7 @@ Two nudges without evidenced checkpoint progress exhaust only that worker's budg
 
 Preparation holds the old registry lock and a per-worker exclusive `mkdir` effect mutex. It persists `prepared` (neither owner acts), reserves/pauses only the selected old worker through the separate adapter, then persists `owned`. Failure never automatically rolls back. The adapter retains selected-worker history, pauses, budget and pending actions privately; sibling workers remain untouched.
 
-After separately authorized transfer, `/continuation-supervisor handoff <JSON reference>` attaches that exact witness to a newly bound paused worker. It activates nothing, marks the inherited stop handled/no-resend and starts with exhausted initial budget against the checkpoint. A later stop requires evidenced progress. Old pending notices are not silently reconstructed/redelivered. Missing/changed witness prevents activation/acceptance; ownership loss isolates the worker.
+After separately authorized transfer, `/continuation` → **Manual supervisor controls** → **Attach an ownership handoff** accepts the JSON reference for that exact witness and attaches it to a newly bound paused worker. It activates nothing, marks the inherited stop handled/no-resend and starts with exhausted initial budget against the checkpoint. A later stop requires evidenced progress. Old pending notices are not silently reconstructed/redelivered. Missing/changed witness prevents activation/acceptance; ownership loss isolates the worker.
 
 Availability reads outside the mutex never grant effect authority. Activation/delivery lock and revalidate ownership. Addressed delivery/notice attempts persist sticky `used` before effects, including rejected/uncertain attempts. Unattached bindings check the deterministic witness path too; skipping attachment cannot bypass transfer. A standalone effect records conservative usage so later preparation requires reconciliation.
 
