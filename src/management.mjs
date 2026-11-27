@@ -223,6 +223,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           report('read manual delegation', error, ctx);
           return {};
         });
+        const manualCoordinator = coordinator.manualRegistration(ctx, view.running ? view.state : undefined);
         if (!current()) refuse('Session changed while reading supervision');
         const choices = ['Delivery preferences',
           ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
@@ -240,7 +241,8 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
           ...labels, ...(previous.length ? [previousChoice] : []),
           ...(manualDelegation?.authorize ? ['Authorize scoped delegation'] : []),
-          ...(manualDelegation?.revoke ? ['Revoke delegation'] : []), 'Close'];
+          ...(manualDelegation?.revoke ? ['Revoke delegation'] : []),
+          ...(manualCoordinator ? ['Register manual coordinator'] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
@@ -276,6 +278,14 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (choice === 'Revoke delegation' && manualDelegation?.revoke) {
           await freshView();
           return delegation.revokeDelegation(ctx, manualDelegation.revoke);
+        }
+        if (choice === 'Register manual coordinator' && manualCoordinator) {
+          const ownerRole = 'Non-writing coordinating owner';
+          const role = await select('Choose a manual coordinator role',
+            ['Notice recipient', ...(manualCoordinator.owner ? [ownerRole] : []), 'Cancel']);
+          if (role !== 'Notice recipient' && !(role === ownerRole && manualCoordinator.owner)) return;
+          await freshView();
+          return coordinator.registerManual(ctx, role === ownerRole);
         }
         if (choice === 'This assignment: delivery') {
           const path = join(root, `delegation-${view.own.binding.coordinatorId}.json`);

@@ -229,8 +229,9 @@ bypass checkout ownership. Legacy/uncertain attempts remain held. See the [contr
 ### Approved coordinating-owner amendment (since v0.4.0)
 
 A coordinating owner is an exact Pi session that explicitly registers as a non-writing
-material-notice recipient (`/continuation-coordinator owner`) and then separately
-starts supervision (`/continuation-worker start`) under the existing global supervisor.
+material-notice recipient through **Register manual coordinator** in `/continuation`,
+and then separately selects **Join this session to supervision** under the existing
+global supervisor.
 The two confirmations are independent. A normal coordinator remains distinct from a
 worker; a supervised owner is neither an implementation writer nor the global
 supervisor. The owner can obtain a scoped `writer` delegation grant for its assignment.

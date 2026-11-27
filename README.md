@@ -228,11 +228,11 @@ only disposable Linux Pi/Herdr evidence. Owner use of the choices has bounded
 fake Git/Herdr effect samples, not native end-to-end, live settings or
 cross-platform acceptance; the owner workflow is not part of this package.
 
-For v0.4.0 or for advanced manual setup with an intended global supervisor running,
-an intended owner can register
-`/continuation-coordinator owner`, then `/continuation-worker start`, then authorize
-its bounded `writer` scope through `/continuation` → **Authorize scoped delegation**. The owner is a
-supervised non-writer and an exact recipient for its delegated children, not another
+For advanced manual setup with an intended global supervisor running, open
+`/continuation` → **Register manual coordinator** → **Non-writing coordinating owner**.
+Then reopen `/continuation` to **Join this session to supervision** and **Authorize scoped delegation**
+with the bounded `writer` scope. The owner is a supervised non-writer and an exact
+recipient for its delegated children, not another
 supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
 user-decision wait. Child notices never answer a decision. In current source, use
 **Submit owner decision** in that exact owner pane and enter the chosen scope once.
@@ -268,7 +268,7 @@ fix and passes after it, when reproducible, before pushing or opening a PR.
 Only for a **separately authorized disposable** environment, `pi install /absolute/path/to/pi-continuation` installs the normal package (and changes Pi settings). Start/reload Pi through its ordinary loading mechanism; no special launcher or first `-e` ordering is required. For the released alpha.1 or advanced explicit setup, the command sequence is:
 
 1. In an existing worker, `/continuation-worker <existing-checkpoint-path>` enrolls its exact saved session and captures its current idle report for supervisor review, without sending a new task. Save its worker ID; scopes remain paused. If it is already working, wait for a fresh settled report. For a new first task only, optional `/continuation-worker --start {"checkpoint":"/existing/checkpoint.md","message":"Initial user task"}` explicitly supplies that turn. Interrupted setup sends nothing; inspect before retrying. With `--start`, wait for the observed initial-run notice; if none arrives within 30 seconds, it is held—do not blindly resend. Later keyboard input to a registered worker creates a human-input hold.
-2. Optionally, `/continuation-coordinator` in the intended existing coordinator; save its ID.
+2. Optionally, in the intended coordinator use `/continuation` → **Register manual coordinator** → **Notice recipient**; save its ID.
 3. In the dedicated supervisor, `/continuation-supervisor init`, then `/continuation-supervisor add <worker-id> <workspace-id>`. New scopes start paused. `/continuation-supervisor coordinator <workspace-id> <coordinator-id>` pins the recipient, possibly in another workspace.
 4. Confirm any other continuation owner has stopped. Explicitly confirm `/continuation-supervisor activate worker <id>`, `activate route <workspace-id>`, and `activate global`. One scope never lifts another. No experimental environment flag is required by the ordinary entry profile. `pause` has corresponding scoped forms; `status` reports scopes and pending work. `/continuation` → **Clear this session hold** is the confirmed own-session recovery after resolving the reason. It may make the current unchanged held report available for supervisor reassessment; it is not action approval or activation and does not lift other pauses or reset budgets.
 

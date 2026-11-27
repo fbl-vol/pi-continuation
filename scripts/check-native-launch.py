@@ -160,7 +160,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
-        automatic_rollover, pi_version, manual_delegation):
+        automatic_rollover, pi_version, manual_delegation, manual_coordinator):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -267,12 +267,17 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             def visible(pane):
                 return subprocess.check_output([herdr, 'pane', 'read', pane, '--source', 'visible'],
                                                cwd=work, env=env, text=True, timeout=8)
-            def select_menu(pane, action):
-                screen = until(f'menu offers {action}', lambda: text if action in (text := visible(pane)) else None)
-                lines = [line.strip() for line in screen.splitlines()]
-                first = lines.index('→ Delivery preferences')
-                target = lines.index(action)
-                cli('agent', 'send-keys', pane, *(['down'] * (target - first)), 'enter')
+            def select_menu(pane, action, first='Delivery preferences'):
+                def choices():
+                    lines = [line.strip() for line in visible(pane).splitlines()]
+                    if f'→ {first}' not in lines:
+                        return None
+                    start = lines.index(f'→ {first}')
+                    if action == first:
+                        return 0
+                    return lines[start:].index(action) if action in lines[start:] else None
+                steps, = until(f'menu offers {action}', lambda: (steps,) if (steps := choices()) is not None else None)
+                cli('agent', 'send-keys', pane, *(['down'] * steps), 'enter')
 
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
@@ -282,6 +287,28 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if manual_coordinator:
+                cli('agent', 'prompt', planner, '/continuation')
+                select_menu(planner, 'Register manual coordinator')
+                select_menu(planner, 'Non-writing coordinating owner', first='Notice recipient')
+                until('manual owner confirmation', lambda: 'Register non-writing owner?' in visible(planner))
+                assert not list(state_dir.glob('coordinator-*.json'))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('registered owner', lambda: 'registered' in visible(planner))
+                record_path, = state_dir.glob('coordinator-*.json')
+                record = json.loads(record_path.read_text())
+                assert record['role'] == 'owner' and record['paneId'] == planner
+                assert json.loads(state_path.read_text())['workers'] == {}
+                until('planner settled', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/continuation')
+                select_menu(planner, 'Join this session to supervision')
+                until('independent join confirmation', lambda: 'Start worker supervision?' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                binding = until('manual owner joined', lambda: next(iter(json.loads(state_path.read_text())['workers'].values()), None))
+                assert binding['role'] == 'owner' and binding['coordinatorId'] == record['id']
+                assert binding['sessionId'] == record['sessionId'] and binding['sessionFile'] == record['sessionFile']
+                print('Native manual owner passed: registration and join separately confirmed for the same exact session', flush=True)
+                return
             if manual_delegation:
                 cli('agent', 'prompt', planner, '/continuation')
                 select_menu(planner, 'Authorize scoped delegation')
@@ -854,6 +881,7 @@ if __name__ == '__main__':
     parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
     parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
     parser.add_argument('--manual-delegation', action='store_true', help='grant and revoke a manual scope through /continuation')
+    parser.add_argument('--manual-coordinator', action='store_true', help='register a manual owner and separately join supervision')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
@@ -878,6 +906,6 @@ if __name__ == '__main__':
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
                 args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
-                args.automatic_rollover, args.pi_version, args.manual_delegation)
+                args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator)
         finally:
             model.shutdown()

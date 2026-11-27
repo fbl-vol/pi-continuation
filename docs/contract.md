@@ -20,9 +20,10 @@ New run/checkpoint error holds include optional `holdError: { kind: "run" | "che
 
 ## Supervised coordinating owners (since v0.4.0)
 
-`/continuation-coordinator owner` registers an exact non-writing recipient in the
-current Pi session; `/continuation-worker start` independently confirms worker
-supervision for that same session. The global supervisor remains separate. The
+**Register manual coordinator** → **Non-writing coordinating owner** in
+`/continuation` registers an exact non-writing recipient in the current Pi session.
+**Join this session to supervision** independently confirms worker supervision
+for that same session. The global supervisor remains separate. The
 owner registration must match its worker binding in session, file, pane and owner
 state; ordinary coordinators still cannot enroll as workers. The scoped delegation
 parent retains a writer *ceiling*, not a writer claim: only the verified coordinating

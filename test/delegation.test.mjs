@@ -248,9 +248,42 @@ for (const readiness of ['ready', 'replaced', 'blocked']) {
   });
 }
 
+async function registerManualCoordinator(native, role, available = true) {
+  native.select((title, choices) => {
+    if (!title.startsWith('Choose a manual coordinator role')) {
+      assert.ok(choices.includes('Register manual coordinator'));
+      return 'Register manual coordinator';
+    }
+    assert.equal(choices.includes(role), available);
+    return available ? role : 'Cancel';
+  });
+  try {
+    await native.command('continuation', '');
+    assert.notEqual(native.notifications.at(-1)?.[1], 'warning', native.notifications.at(-1)?.[0]);
+  } finally { native.select(undefined); }
+}
+const registerManualOwner = (native, available) => registerManualCoordinator(native, 'Non-writing coordinating owner', available);
+
+test('P1 manual notice recipient confirms separate registration and cannot join as a worker', async t => {
+  const f = await fixture(t);
+  f.worker.confirm(false);
+  await registerManualCoordinator(f.worker, 'Notice recipient');
+  assert.ok(!f.worker.entries.some(e => e.customType === 'pi-continuation-coordinator'));
+  f.worker.confirm(true);
+  await registerManualCoordinator(f.worker, 'Notice recipient');
+  const entry = f.worker.entries.find(e => e.customType === 'pi-continuation-coordinator').data;
+  const record = await readJson(join(f.root, `coordinator-${entry.id}.json`));
+  assert.equal(record.sessionId, f.worker.id);
+  assert.equal(record.role, undefined);
+  await managementAction(f.worker, 'Register manual coordinator', false);
+  await f.workerStart();
+  assert.equal(f.workerId(), undefined);
+  assert.match(f.worker.notifications.at(-1)[0], /ordinary coordinator cannot become a worker/);
+});
+
 test('P1/P6 supervised non-writing owner delegates the sole writer and pins exact child recipient', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   const ownerId = f.workerId();
   const owner = (await f.state()).workers[ownerId];
@@ -2032,8 +2065,7 @@ test('planner chat records an ordered backlog without interrupting A, and restar
 test('P1 an existing ordinary worker cannot silently upgrade into a coordinating owner', async t => {
   const f = await fixture(t);
   await f.workerStart();
-  await assert.rejects(f.worker.command('continuation-coordinator', 'owner'),
-    /register owner before worker enrollment/);
+  await registerManualOwner(f.worker, false);
   assert.equal((await f.state()).workers[f.workerId()].role, undefined);
 });
 
@@ -2233,7 +2265,7 @@ test('P7 uncertain decision delivery retains the exact wait and prevents resend 
 
 test('P3 owner child wait persists; user selection gate blocks child notices and delegation', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const child = (await f.worker.spawn(task)).details;
@@ -2260,7 +2292,7 @@ test('P3 owner child wait persists; user selection gate blocks child notices and
 
 test('P3 an already-dispatched child cannot delegate across its owner user wait; stale direct owner resume is fenced', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const writer = (await f.worker.spawn(task)).details;
@@ -2321,7 +2353,7 @@ test('a retained coordinator endpoint cannot wake a session after its assignment
 
 test('P6 same-workspace sibling owners receive only their assigned notices; user wait defers without sibling pause', async t => {
   const f = await fixture(t);
-  await f.worker.command('continuation-coordinator', 'owner');
+  await registerManualOwner(f.worker);
   await f.workerStart();
   await f.authorize();
   const first = (await f.worker.spawn(task)).details;
@@ -2329,7 +2361,7 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'other-terminal',
     agent_session: { ...f.agents[0].agent_session, value: other.file } });
   await other.emit('session_start');
-  await other.command('continuation-coordinator', 'owner');
+  await registerManualOwner(other);
   await other.command('continuation-worker', 'start');
   await authorizeDelegation(other, 'read-only', 'Review only the approved result.');
   const second = (await other.spawn({ key: 'review', task: 'Review stage one without edits.', role: 'read-only' })).details;
