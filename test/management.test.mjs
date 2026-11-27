@@ -309,7 +309,7 @@ test('current pane labels are separate from retained closed and changed registra
     f.agents.push({ ...f.agents[0], pane_id: pane,
       agent_session: { ...f.agents[0].agent_session, value: past.file } });
     await past.emit('session_start');
-    await past.command('continuation-worker', 'start');
+    await past.continuation.start(past.ctx);
   }
   const planner = await planningSession(f);
   f.agents.splice(f.agents.findIndex(a => a.pane_id === 'w:p3'), 1);
@@ -324,7 +324,8 @@ test('current pane labels are separate from retained closed and changed registra
   planner.select((title, choices) => { menus.push({ title, choices }); return answers[menus.length - 1]; });
   await planner.command('continuation', '');
   assert.deepEqual(menus[0].choices, ['Delivery preferences', 'Join this session to supervision', '1. worker — Supervised',
-    'Previous / unavailable registrations (2)', 'Authorize scoped delegation', 'Register manual coordinator', 'Close']);
+    'Previous / unavailable registrations (2)', 'Authorize scoped delegation', 'Register manual coordinator',
+    'Register with an existing checkpoint', 'Close']);
   assert.match(menus[0].title, /Current workers \(1\)/);
   assert.equal(menus.length, 3);
   assert.equal(menus[1].title, 'Previous / unavailable registrations');
@@ -397,7 +398,7 @@ test('duplicate pane labels select only the addressed worker and preserve siblin
   f.agents.push({ ...f.agents[0], pane_id: 'w:p3',
     agent_session: { ...f.agents[0].agent_session, value: other.file } });
   await other.emit('session_start');
-  await other.command('continuation-worker', 'start');
+  await other.continuation.start(other.ctx);
   const planner = await planningSession(f);
   snapshotPanes(f, [{ pane_id: 'w:p1', label: 'Same pane name' }, { pane_id: 'w:p3', label: 'Same pane name' }]);
   planner.select((_title, choices) => {

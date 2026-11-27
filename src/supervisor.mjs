@@ -783,7 +783,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           setScopePaused(state, 'global', undefined, false);
           await commit();
           await reconcile(ctx);
-          notify(ctx, 'Supervisor started; use /continuation-worker start in each selected worker'); return;
+          notify(ctx, 'Supervisor started; use Join this session to supervision in /continuation in each selected worker'); return;
         }
         const localRoles = ctx.sessionManager.getBranch?.() ?? [];
         if (localRoles.some(e => e.type === 'custom' &&
@@ -793,7 +793,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         if (verb === 'start' && !allowExperimentalActivation)
           throw new Error('Start requires the ordinary extension profile');
         if (!bootstrap && !await ctx.ui.confirm('Start continuation supervisor?', verb === 'start' ?
-          'Enable this supervisor and accept only workers explicitly opting in with /continuation-worker start. Existing worker and route pauses remain unchanged.' :
+          'Enable this supervisor and accept only workers explicitly joining supervision. Existing worker and route pauses remain unchanged.' :
           'Claim one supervisor owner; all new scopes remain paused.')) return;
         await ensureRoot(root);
         const token = randomUUID();
@@ -855,7 +855,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
           });
           if (Object.keys(state.assignmentOutcomes).length) void queue(() => wake(ctx));
           notify(ctx, verb === 'start' ?
-            'Supervisor started; use /continuation-worker start in each selected worker' :
+            'Supervisor started; use Join this session to supervision in /continuation in each selected worker' :
             'Supervisor claimed; global pause remains ' + state.paused);
         } catch (error) {
           const closingAnnotations = annotations?.close(); annotations = undefined;

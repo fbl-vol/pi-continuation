@@ -438,7 +438,7 @@ test('P7 an already-existing linked tree has independent writer ownership', asyn
     f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
       agent_session: { ...f.agents[0].agent_session, value: existing.file } });
     await existing.emit('session_start', { reason: 'startup' });
-    await existing.command('continuation-worker', 'start');
+    await existing.continuation.start(existing.ctx);
     await f.worker.command('start-implementation', `Implement W123-D04 in ${alternate}.`);
     const writer = (await f.children[0].native.spawn(task)).details;
     assert.equal((await f.state()).workers[writer.workerId].cwd, alternate);
@@ -458,7 +458,7 @@ test('P1/P7 a live writer offers a confirmed alternate tree, leaving the origina
     workspace_id: 'other', tab_id: 'other:t1',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   const original = Object.values((await f.state()).workers).find(w => w.sessionId === existing.id);
   const scope = 'Implement W123-D04 here.';
   f.worker.select(() => undefined);
@@ -499,7 +499,7 @@ test('P1/P7 one occupied-checkout choice creates the alternate tree in a new spa
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   let selections = 0;
   f.worker.select((title, choices) => {
     selections++;
@@ -530,7 +530,7 @@ test('P1/P7 failed supervisor activation after a worktree choice leaves no tree 
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal',
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   await f.supervisorCommand('pause global');
   assert.ok(subscription, 'Supervisor subscription must be observed before testing its loss');
 
@@ -700,7 +700,7 @@ test('P1/P4 one start resumes an ordinarily paused supervisor without a second c
     workspace_id: 'other', tab_id: 'other:t1', cwd: other, foreground_cwd: other,
     agent_session: { ...f.agents[0].agent_session, value: existing.file } });
   await existing.emit('session_start', { reason: 'startup' });
-  await existing.command('continuation-worker', 'start');
+  await existing.continuation.start(existing.ctx);
   const workerId = existing.entries.find(e => e.customType === 'pi-continuation-worker').data.workerId;
   await f.supervisorCommand(`pause worker ${workerId}`);
   await f.supervisorCommand('pause route other');
@@ -2362,7 +2362,7 @@ test('P6 same-workspace sibling owners receive only their assigned notices; user
     agent_session: { ...f.agents[0].agent_session, value: other.file } });
   await other.emit('session_start');
   await registerManualOwner(other);
-  await other.command('continuation-worker', 'start');
+  await other.continuation.start(other.ctx);
   await authorizeDelegation(other, 'read-only', 'Review only the approved result.');
   const second = (await other.spawn({ key: 'review', task: 'Review stage one without edits.', role: 'read-only' })).details;
   const state = await f.state();
@@ -2528,7 +2528,7 @@ for (const unavailable of [true, false]) {
     f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'existing-terminal', cwd: existing.ctx.cwd,
       agent_session: { ...f.agents[0].agent_session, value: existing.file } });
     await existing.emit('session_start', { reason: 'startup' });
-    await existing.command('continuation-worker', 'start');
+    await existing.continuation.start(existing.ctx);
     const [binding] = Object.values((await f.state()).workers);
     assert.equal(binding.sessionId, existing.id);
     assert.equal(binding.paused, false);
@@ -2762,7 +2762,7 @@ test('P4/P7 baseline: a closed paused binding from a removed separate checkout b
   f.agents.push({ ...f.agents[0], pane_id: 'w:p2', terminal_id: 'old-terminal', cwd: removed,
     agent_session: { ...f.agents[0].agent_session, value: old.file } });
   await old.emit('session_start', { reason: 'startup' });
-  await old.command('continuation-worker', 'start');
+  await old.continuation.start(old.ctx);
   const state = await f.state();
   const binding = Object.values(state.workers)[0];
   binding.paused = true;

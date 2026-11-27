@@ -36,7 +36,7 @@ async function fixture(t) {
   const checkpoint = join(root, 'checkpoint.md');
   await writeFile(checkpoint, 'Remaining already-approved work.');
   await emit('session_start');
-  await commands.get('continuation-worker')(checkpoint, ctx);
+  await observer.registerPinned(ctx, checkpoint);
   const [file] = (await readdir(root)).filter(name => name.startsWith('observation-'));
   const rawInput = () => { for (const fn of input) fn({ data: '/continuation\r' }); };
   const assistant = (text, stopReason = 'stop') => {

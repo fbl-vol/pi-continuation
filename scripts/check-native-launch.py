@@ -160,7 +160,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
-        automatic_rollover, pi_version, manual_delegation, manual_coordinator):
+        automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -287,6 +287,38 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            def join_supervision(pane):
+                cli('agent', 'prompt', pane, '/continuation')
+                select_menu(pane, 'Join this session to supervision')
+
+            if pinned_checkpoint:
+                checkpoint = work/'fixture-checkpoint.md'
+                checkpoint.write_text('Already-agreed fixture work, still paused.\n')
+                task = 'Initial pinned checkpoint fixture task. Reply with one sentence.'
+                model.allow_response.set()
+                cli('agent', 'prompt', planner, '/continuation')
+                select_menu(planner, 'Register with an existing checkpoint')
+                until('checkpoint input', lambda: 'Enter the path to an existing checkpoint file' in visible(planner))
+                cli('pane', 'send-text', planner, str(checkpoint))
+                cli('agent', 'send-keys', planner, 'enter')
+                select_menu(planner, 'Send an initial task', first='Observe only')
+                until('initial task input', lambda: 'Enter the exact initial task' in visible(planner))
+                cli('pane', 'send-text', planner, task)
+                cli('agent', 'send-keys', planner, 'enter')
+                until('pinned worker confirmation', lambda: 'Register continuation worker?' in visible(planner))
+                assert not list(state_dir.glob('ready-*.json'))
+                cli('agent', 'send-keys', planner, 'enter')
+                ready = until('pinned worker ready', lambda: next(state_dir.glob('ready-*.json'), None))
+                worker_id = ready.stem.removeprefix('ready-')
+                record = json.loads((state_dir/f'worker-{worker_id}.json').read_text())
+                assert record['checkpoint'] == str(checkpoint) and record['paused']
+                path = state_dir/f'observation-{worker_id}.json'
+                until('matching initial run observed and settled', lambda: (observation := json.loads(path.read_text()))
+                      and not observation.get('bootstrapPending') and observation['outcome'] == 'completed')
+                assert Path(record['sessionFile']).read_text().count(task) == 1
+                assert not state_path.exists() or json.loads(state_path.read_text())['workers'] == {}
+                print('Native pinned registration passed: exact initial task sent once, still paused and not joined', flush=True)
+                return
             if manual_coordinator:
                 cli('agent', 'prompt', planner, '/continuation')
                 select_menu(planner, 'Register manual coordinator')
@@ -300,8 +332,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert record['role'] == 'owner' and record['paneId'] == planner
                 assert json.loads(state_path.read_text())['workers'] == {}
                 until('planner settled', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
-                cli('agent', 'prompt', planner, '/continuation')
-                select_menu(planner, 'Join this session to supervision')
+                join_supervision(planner)
                 until('independent join confirmation', lambda: 'Start worker supervision?' in visible(planner))
                 cli('agent', 'send-keys', planner, 'enter')
                 binding = until('manual owner joined', lambda: next(iter(json.loads(state_path.read_text())['workers'].values()), None))
@@ -417,7 +448,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 panes.append(occupied)
                 until('occupied checkout shell', lambda: shell_alone(occupied))
                 cli('agent', 'start', 'smoke-existing', '--kind', 'pi', '--pane', occupied)
-                cli('agent', 'prompt', occupied, '/continuation-worker start')
+                join_supervision(occupied)
                 until('independent worker confirmation', lambda: 'Start worker supervision?' in visible(occupied))
                 cli('agent', 'send-keys', occupied, 'enter')
                 until('independent live writer', lambda: len(json.loads(state_path.read_text())['workers']) == 1)
@@ -797,11 +828,12 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 if evidence:
                     (evidence/'manual-rename-renewal.json').write_text(json.dumps(renewal, ensure_ascii=False, indent=2))
             if checkpoint_recovery:
-                recovery_pane = cli('pane', 'split', planner, '--direction', 'down', '--cwd', str(work))['pane']['pane_id']
+                recovery_pane = cli('workspace', 'create', '--label', 'recovery-worker',
+                                    '--cwd', str(work))['root_pane']['pane_id']
                 panes.append(recovery_pane)
                 until('recovery shell', lambda: shell_alone(recovery_pane))
                 cli('agent', 'start', 'recovery-worker', '--kind', 'pi', '--pane', recovery_pane)
-                cli('agent', 'prompt', recovery_pane, '/continuation-worker start')
+                join_supervision(recovery_pane)
                 until('recovery worker confirmation', lambda: 'Start worker supervision?' in visible(recovery_pane))
                 cli('agent', 'send-keys', recovery_pane, 'enter')
                 def recovery_binding():
@@ -882,6 +914,7 @@ if __name__ == '__main__':
     parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
     parser.add_argument('--manual-delegation', action='store_true', help='grant and revoke a manual scope through /continuation')
     parser.add_argument('--manual-coordinator', action='store_true', help='register a manual owner and separately join supervision')
+    parser.add_argument('--pinned-checkpoint', action='store_true', help='register a paused pinned worker with an initial task')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
@@ -906,6 +939,7 @@ if __name__ == '__main__':
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
                 args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
-                args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator)
+                args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator,
+                args.pinned_checkpoint)
         finally:
             model.shutdown()

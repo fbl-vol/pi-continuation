@@ -79,7 +79,7 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
     pi.on('session_start', (_event, ctx) => {
       if (ctx.hasUI && ctx.mode === 'tui') promptScope.installEditor(ctx.ui);
     });
-    worker = bindObservation(pi, { ...bindings, promptScope, launchGuard: () => true });
+    worker = bindObservation(pi, { ...bindings, promptScope, launchGuard: () => true, legacyWorkerCommand: true });
     bindSupervisor(pi, bindings);
     bindCoordinator(pi, bindings);
   };

@@ -54,7 +54,7 @@ function currentHeldReport(prior, ctx, version, session) {
 
 export function bindObservation(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, launchGuard = () => false, promptScope,
-  reviewCurrentReports = false, isInterrupt = data => data === '\u001b' } = {}) {
+  reviewCurrentReports = false, legacyWorkerCommand = false, isInterrupt = data => data === '\u001b' } = {}) {
   let worker;
   let preparing;
   let starting = false;
@@ -328,7 +328,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     try { return await startWorker(ctx); }
     finally { starting = false; }
   };
-  pi.registerCommand('continuation-worker', {
+  if (legacyWorkerCommand) pi.registerCommand('continuation-worker', {
     description: 'Start or return to supervision (default): [start] | advanced registration: <checkpoint> or --start {"checkpoint":"/path","message":"task"}',
     handler: (argument, ctx) => {
       const input = argument.trim();
@@ -351,9 +351,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         return;
       }
       if (worker || preparing) { ctx.ui.notify('Registration already active in this session', 'info'); return; }
-      const input = argument.trim();
-      let checkpointPath = input;
-      let initialMessage = '';
+      const input = typeof argument === 'string' ? argument.trim() : '';
+      let { checkpoint: checkpointPath, message: initialMessage = '' } = typeof argument === 'string'
+        ? { checkpoint: input } : argument;
       if (input.startsWith('--start ')) {
         let ambiguousPath = false;
         try { await access(resolve(ctx.cwd, input)); ambiguousPath = true; } catch { /* Not a pathname. */ }
@@ -370,6 +370,9 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
         }
         checkpointPath = request.checkpoint;
         initialMessage = request.message;
+      }
+      if (initialMessage && !ctx.isIdle()) {
+        ctx.ui.notify('Wait until idle before supplying an initial task', 'warning'); return;
       }
       const workerId = randomUUID();
       const checkpoint = managed ? managedCheckpointPath(root, workerId) : resolve(ctx.cwd, checkpointPath);
@@ -755,6 +758,7 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
       await observe(report, ctx);
     },
     start: requestStart, clearHold,
+    registerPinned: (ctx, checkpoint, message) => registerWorker({ checkpoint, message }, ctx),
     onRetainedAssignment(handler) { retainedAssignment = handler; },
     async adoptRetained(ctx, prior, next, stillCurrent) {
       const session = currentSession(ctx);

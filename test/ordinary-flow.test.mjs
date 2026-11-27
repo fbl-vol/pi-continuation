@@ -80,7 +80,7 @@ for (const settledState of ['idle', 'done']) for (const recovery of [false, true
     });
     await new Promise(resolve => herdr.listen(endpoint(socketPath), resolve));
     await worker.emit('session_start');
-    await worker.commands.get('continuation-worker')(checkpoint, worker.ctx);
+    await worker.observer.registerPinned(worker.ctx, checkpoint);
     const workerId = worker.entries.find(entry => entry.customType === 'pi-continuation-worker').data.workerId;
     if (recovery) {
       worker.rawInput();

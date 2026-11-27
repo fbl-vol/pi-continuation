@@ -10,7 +10,7 @@ import { createPromptScope } from '../src/prompt-scope.mjs';
 import { bindContinuation } from '../src/ordinary.mjs';
 
 const bindObservation = (pi, options) => bindWorkerObservation(pi,
-  { ...options, launchGuard: () => true });
+  { ...options, launchGuard: () => true, legacyWorkerCommand: true });
 
 function fakePi(sessionId, sessionFile) {
   const handlers = new Map();
@@ -64,7 +64,8 @@ async function guardedFixture(t, configure = () => {}, options = {}) {
 test('P1 ordinary profile registers a paused exact session without first-option startup', async t => {
   const s = await guardedFixture(t, () => {}, { ordinary: true });
   assert.equal(s.observer.registered, false);
-  await s.pi.command(s.checkpoint, s.ctx);
+  assert.equal(s.pi.command, undefined, 'ordinary loading does not register the legacy command');
+  await s.observer.registerPinned(s.ctx, s.checkpoint);
   assert.equal(s.observer.registered, true);
   assert.deepEqual(s.sent, []);
   // Worker-prefixed entries can also be sockets (including truncated Unix paths).
@@ -86,7 +87,7 @@ test('P1/P2 ordinary enrollment captures an already-idle report without sending 
     const append = worker.pi.appendEntry;
     worker.pi.appendEntry = (...args) => { append(...args); leaf = 'registration-leaf'; };
   }, { ordinary: true });
-  await s.pi.command(s.checkpoint, s.ctx);
+  await s.observer.registerPinned(s.ctx, s.checkpoint);
   const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
   const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
   assert.equal(saved.outcome, 'completed');
@@ -108,7 +109,7 @@ for (const trailing of [
         stopReason: 'stop', content: [{ type: 'text', text: 'Older completed report' }] } },
       { id: 'later', ...trailing });
     }, { ordinary: true });
-    await s.pi.command(s.checkpoint, s.ctx);
+    await s.observer.registerPinned(s.ctx, s.checkpoint);
     const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
     const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
     assert.equal(saved.outcome, 'unknown');
@@ -126,7 +127,7 @@ for (const reason of ['error', 'missing reply']) {
         stopReason: reason === 'error' ? 'error' : 'stop',
         content: [{ type: 'text', text: reason === 'error' ? 'Provider failed' : '' }] } });
     }, { ordinary: true });
-    await s.pi.command(s.checkpoint, s.ctx);
+    await s.observer.registerPinned(s.ctx, s.checkpoint);
     const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
     const saved = JSON.parse(await readFile(join(s.root, name), 'utf8'));
     assert.equal(saved.hold, true);
@@ -141,7 +142,7 @@ test('P2 enrollment while working never substitutes a prior idle reply for a fre
     worker.entries.push({ id: 'old', type: 'message', message: { role: 'assistant',
       stopReason: 'stop', content: [{ type: 'text', text: 'Previous turn' }] } });
   }, { ordinary: true });
-  await s.pi.command(s.checkpoint, s.ctx);
+  await s.observer.registerPinned(s.ctx, s.checkpoint);
   s.ctx.isIdle = () => true;
   await s.emit('agent_settled');
   const [name] = (await readdir(s.root)).filter(path => path.startsWith('observation-'));
@@ -560,10 +561,10 @@ test('registration refuses a worker launched after another extension', async () 
   const prior = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
   try {
-    bindWorkerObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1',
+    const observer = bindWorkerObservation(worker.pi, { root, socketPath: 'socket', paneId: 'w1:p1',
       launchGuard: () => false });
     await worker.emit('session_start');
-    await worker.pi.command(checkpoint, worker.ctx);
+    await observer.registerPinned(worker.ctx, checkpoint);
     assert.equal(worker.entries.length, 0);
     assert.match(worker.notices[0][0], /first option/);
     assert.equal(worker.terminalInput.size, 0);

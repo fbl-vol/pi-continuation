@@ -242,7 +242,8 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           ...labels, ...(previous.length ? [previousChoice] : []),
           ...(manualDelegation?.authorize ? ['Authorize scoped delegation'] : []),
           ...(manualDelegation?.revoke ? ['Revoke delegation'] : []),
-          ...(manualCoordinator ? ['Register manual coordinator'] : []), 'Close'];
+          ...(manualCoordinator ? ['Register manual coordinator'] : []),
+          ...(!worker.registered && !view.own && !supervisor.active ? ['Register with an existing checkpoint'] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
@@ -278,6 +279,20 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (choice === 'Revoke delegation' && manualDelegation?.revoke) {
           await freshView();
           return delegation.revokeDelegation(ctx, manualDelegation.revoke);
+        }
+        if (choice === 'Register with an existing checkpoint' && !worker.registered && !view.own && !supervisor.active) {
+          const checkpoint = (await worker.inputDecision(ctx, 'Enter the path to an existing checkpoint file'))?.trim();
+          if (!checkpoint) return;
+          if (!current()) refuse('Session changed; reopen the management menu');
+          const mode = await select('Register this exact session paused',
+            ['Observe only', ...(ctx.isIdle() ? ['Send an initial task'] : []), 'Cancel']);
+          let message;
+          if (mode === 'Send an initial task') {
+            message = await worker.inputDecision(ctx, 'Enter the exact initial task to send after registration');
+            if (!message?.trim()) return;
+            if (!current()) refuse('Session changed; reopen the management menu');
+          } else if (mode !== 'Observe only') return;
+          return worker.registerPinned(ctx, checkpoint, message);
         }
         if (choice === 'Register manual coordinator' && manualCoordinator) {
           const ownerRole = 'Non-writing coordinating owner';
