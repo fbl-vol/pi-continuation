@@ -95,6 +95,69 @@ export async function managementSnapshot(root, socketPath, ctx) {
     own: workers.find(w => w.binding.sessionId === session.id && w.binding.sessionFile === session.file) };
 }
 
+async function chooseSupervisorControl(view, select, input) {
+  const { state } = view;
+  const routes = Object.keys(state.routes);
+  const pending = Object.entries(state.inflight);
+  const uncertain = Object.values(state.notices).filter(notice => notice.status === 'uncertain');
+  const choose = (title, options) => select(title, [...options, 'Cancel']);
+  const token = async title => {
+    const value = (await input(title))?.trim();
+    if (value && /\s/.test(value)) refuse('Enter one exact ID, without spaces');
+    return value;
+  };
+  const choice = await choose('Manual supervisor controls', [
+    'Show supervisor status', 'Pause or activate a scope', 'Bind a pinned worker',
+    ...(routes.length ? ['Bind a route notice recipient'] : []),
+    ...(view.workers.some(row => row.binding.paused) ? ['Attach an ownership handoff'] : []),
+    ...(pending.length ? ['Resolve an ambiguous action'] : []),
+    ...(uncertain.length ? ['Resolve an uncertain notice'] : []),
+  ]);
+  let command, row;
+  if (choice === 'Show supervisor status') command = 'status';
+  if (choice === 'Pause or activate a scope') {
+    const kind = await choose('Select one scope', ['Global', ...(routes.length ? ['Route'] : []),
+      ...(view.workers.length ? ['Worker'] : [])]);
+    let id = '';
+    if (kind === 'Route') {
+      id = await choose('Select a route', routes);
+      if (!routes.includes(id)) return;
+    } else if (kind === 'Worker') {
+      const labels = view.workers.map(w => `${w.name} · ${w.binding.workerId}`);
+      row = view.workers[labels.indexOf(await choose('Select an exact worker', labels))];
+      if (!row) return;
+      id = row.binding.workerId;
+    } else if (kind !== 'Global') return;
+    const verb = await choose(`Control ${kind.toLowerCase()}${id ? ` ${id}` : ''}`, ['Pause', 'Activate']);
+    if (verb === 'Pause' || verb === 'Activate') command = `${verb.toLowerCase()} ${kind.toLowerCase()} ${id}`;
+  }
+  if (choice === 'Bind a pinned worker') {
+    const id = await token('Enter the exact worker ID from pinned-checkpoint registration');
+    const route = id && await token('Enter the worker’s workspace ID');
+    if (route) command = `add ${id} ${route}`;
+  }
+  if (choice === 'Bind a route notice recipient') {
+    const route = await choose('Choose the route for the notice recipient', routes);
+    const id = routes.includes(route) && await token('Enter the exact coordinator ID');
+    if (id) command = `coordinator ${route} ${id}`;
+  }
+  if (choice === 'Attach an ownership handoff') {
+    const witness = (await input('Enter the exact ownership handoff JSON reference'))?.trim();
+    if (witness) command = `handoff ${witness}`;
+  }
+  if (choice === 'Resolve an ambiguous action') {
+    const labels = pending.map(([id, intent]) => `${id} · ${intent.id}`);
+    const selected = pending[labels.indexOf(await choose('Choose an exact worker and pending action', labels))];
+    if (selected) command = `resolve ${selected[0]} ${selected[1].id}`;
+  }
+  if (choice === 'Resolve an uncertain notice') {
+    const labels = uncertain.map(notice => `${notice.route} · ${notice.id}`);
+    const notice = uncertain[labels.indexOf(await choose('Choose an exact uncertain notice', labels))];
+    if (notice) command = `resolve-notice ${notice.id}`;
+  }
+  return { command, row };
+}
+
 function rolloverDetails(state, binding) {
   const blocker = ownerRolloverBlocker(state, { ...binding, id: binding.coordinatorId });
   return blocker ? [`Queued assignment ${blocker.queuedId ?? ''} could not start: ${blocker.reason}`, blocker.next] : [];
@@ -243,7 +306,9 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
           ...(manualDelegation?.authorize ? ['Authorize scoped delegation'] : []),
           ...(manualDelegation?.revoke ? ['Revoke delegation'] : []),
           ...(manualCoordinator ? ['Register manual coordinator'] : []),
-          ...(!worker.registered && !view.own && !supervisor.active ? ['Register with an existing checkpoint'] : []), 'Close'];
+          ...(!worker.registered && !view.own && !supervisor.active ? ['Register with an existing checkpoint'] : []),
+          ...(supervisor.active ? ['Manual supervisor controls'] :
+            !view.running && !worker.registered ? ['Claim supervisor for manual bindings'] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
@@ -316,7 +381,15 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
             await saveAssignmentDeliveryPreferences(root, grant.id, draft);
           });
         }
+        if (choice === 'Manual supervisor controls' && supervisor.active && view.state) {
+          const selected = await chooseSupervisorControl(view, select, title => worker.inputDecision(ctx, title));
+          if (!selected?.command) return;
+          await freshView(selected.row);
+          return supervisor.command(selected.command, ctx);
+        }
         await freshView();
+        if (choice === 'Claim supervisor for manual bindings' && !view.running && !worker.registered)
+          return supervisor.command('init', ctx);
         if (choice === 'Pause global supervision') return supervisor.command('pause global', ctx);
         if (choice === 'Start global supervision' || choice === 'Start supervisor here') return supervisor.command('start', ctx);
         if (choice === 'Return this session to supervision' || choice === 'Join this session to supervision') return worker.start(ctx);

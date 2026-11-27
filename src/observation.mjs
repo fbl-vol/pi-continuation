@@ -520,10 +520,10 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
     try {
       supervisor = await readSupervisor(root);
       if (!supervisor.acceptStarts || !await ownerAlive(root, supervisor.ownerToken)) {
-        ctx.ui.notify('Run /continuation-supervisor start in the intended supervisor first', 'warning'); return;
+        ctx.ui.notify('Start supervision from /continuation in the intended supervisor first', 'warning'); return;
       }
     } catch (error) {
-      if (error.code === 'ENOENT') ctx.ui.notify('Run /continuation-supervisor start first', 'warning');
+      if (error.code === 'ENOENT') ctx.ui.notify('Start supervision from /continuation in the intended supervisor first', 'warning');
       else report('find supervisor', error, ctx);
       return;
     }

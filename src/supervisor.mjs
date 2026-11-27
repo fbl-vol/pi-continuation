@@ -31,7 +31,7 @@ const heldReport = 'Report held; requested action was not accepted. Do not retry
   'Clear is not action approval, scope activation or permission to replay a delivered action.';
 export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.env.HERDR_SOCKET_PATH,
   paneId = process.env.HERDR_PANE_ID, allowExperimentalActivation = process.env.PI_CONTINUATION_EXPERIMENTAL_ACTIVATION === '1',
-  startOwnerServer = ownerServer, retainedSend = sendAction } = {}) {
+  startOwnerServer = ownerServer, retainedSend = sendAction, legacySupervisorCommand = false } = {}) {
   const bootstrapId = process.env.PI_CONTINUATION_SUPERVISOR_START;
   let state, displayState, annotations;
   const annotationReport = diagnostics('annotations');
@@ -867,7 +867,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
         }
         return;
       }
-      if (!active()) { notify(ctx, 'Run /continuation-supervisor init first', 'warning'); return; }
+      if (!active()) { notify(ctx, 'Claim or start the supervisor before managing its scopes', 'warning'); return; }
       if (verb === 'status') {
         const workers = {};
         for (const [workerId, binding] of Object.entries(state.workers)) {
@@ -990,7 +990,7 @@ export function bindSupervisor(pi, { root = defaultRoot(), socketPath = process.
       }
       notify(ctx, 'Unknown continuation-supervisor action', 'warning');
   };
-  pi.registerCommand('continuation-supervisor', {
+  if (legacySupervisorCommand) pi.registerCommand('continuation-supervisor', {
     description: 'Start automatic enrollment: start | explicit setup/status/control: init | status | add <worker-id> <route> | handoff <JSON reference> | coordinator <route> <id> | activate/pause <global|route|worker> [id] | resolve <worker-id> <action-id>',
     handler: command,
   });

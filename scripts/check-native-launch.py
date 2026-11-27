@@ -160,7 +160,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
-        automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint):
+        automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint, command_picker):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -262,8 +262,6 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             for name, pane in [('smoke-supervisor', supervisor), ('smoke-planner', planner)]:
                 until(f'{name} shell available', lambda: shell_alone(pane))
                 cli('agent', 'start', name, '--kind', 'pi', '--pane', pane)
-            if not no_supervisor:
-                cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
             def visible(pane):
                 return subprocess.check_output([herdr, 'pane', 'read', pane, '--source', 'visible'],
                                                cwd=work, env=env, text=True, timeout=8)
@@ -279,17 +277,32 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 steps, = until(f'menu offers {action}', lambda: (steps,) if (steps := choices()) is not None else None)
                 cli('agent', 'send-keys', pane, *(['down'] * steps), 'enter')
 
+            def management_action(pane, action):
+                cli('agent', 'prompt', pane, '/continuation')
+                select_menu(pane, action)
+
+            if command_picker:
+                cli('pane', 'send-text', planner, '/cont')
+                screen = until('native continuation autocomplete', lambda: text if
+                               'Manage this session and known supervised workers' in (text := visible(planner)) else None)
+                assert all(f'continuation-{part}' not in screen for part in
+                           ('coordinator', 'delegate', 'owner', 'supervisor', 'worker'))
+                cli('agent', 'send-keys', planner, 'esc', 'ctrl+u')
+                cli('pane', 'send-text', planner, '/start-impl')
+                until('native start autocomplete', lambda: 'Launch a supervised coordinating owner' in visible(planner))
+                print('Native slash picker passed: /continuation and /start-implementation, no role-specific commands', flush=True)
+                return
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             if no_supervisor:
                 assert not state_path.exists()
             else:
+                management_action(supervisor, 'Start supervisor here')
                 until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
             def join_supervision(pane):
-                cli('agent', 'prompt', pane, '/continuation')
-                select_menu(pane, 'Join this session to supervision')
+                management_action(pane, 'Join this session to supervision')
 
             if pinned_checkpoint:
                 checkpoint = work/'fixture-checkpoint.md'
@@ -318,6 +331,29 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 assert Path(record['sessionFile']).read_text().count(task) == 1
                 assert not state_path.exists() or json.loads(state_path.read_text())['workers'] == {}
                 print('Native pinned registration passed: exact initial task sent once, still paused and not joined', flush=True)
+                if no_supervisor:
+                    management_action(supervisor, 'Claim supervisor for manual bindings')
+                    until('manual claim confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('manual claim committed', lambda: state_path.exists())
+                    claimed = json.loads(state_path.read_text())
+                    assert claimed['paused'] and not claimed['acceptStarts'] and not claimed['workers']
+                    until('supervisor settled', lambda: cli('agent', 'get', supervisor)['agent']['agent_status'] in ('idle', 'done'))
+                    management_action(supervisor, 'Manual supervisor controls')
+                    select_menu(supervisor, 'Bind a pinned worker', first='Show supervisor status')
+                    until('worker ID input', lambda: 'Enter the exact worker ID' in visible(supervisor))
+                    cli('pane', 'send-text', supervisor, worker_id)
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('workspace ID input', lambda: 'workspace ID' in visible(supervisor))
+                    route = cli('agent', 'get', planner)['agent']['workspace_id']
+                    cli('pane', 'send-text', supervisor, route)
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    until('exact pinned worker confirmation', lambda: 'Register exact worker?' in visible(supervisor))
+                    cli('agent', 'send-keys', supervisor, 'enter')
+                    binding = until('worker bound', lambda: json.loads(state_path.read_text())['workers'].get(worker_id))
+                    assert binding['paused'] and binding['checkpoint'] == str(checkpoint) and binding['route'] == route
+                    assert json.loads(state_path.read_text())['routes'][route]['paused']
+                    print('Native manual supervisor passed: claim and pinned binding kept Join disabled and scopes paused', flush=True)
                 return
             if manual_coordinator:
                 cli('agent', 'prompt', planner, '/continuation')
@@ -438,7 +474,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 retained['routes']['fixture-held-route'] = {'paused': True, 'reason': 'Independent test route pause'}
                 state_path.write_text(json.dumps(retained) + '\n')
             if paused_supervisor:
-                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                management_action(supervisor, 'Pause global supervision')
                 until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('global pause persisted', lambda: json.loads(state_path.read_text())['paused'])
@@ -652,7 +688,12 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                       json.loads(observation_path.read_text())['outcome'] == 'completed')
                 assert json.loads(state_path.read_text())['ownerWaits'][owner['workerId']] == wait
                 if owner_decision_negative:
-                    cli('agent', 'prompt', supervisor, f"/continuation-supervisor pause worker {writer_attempt['workerId']}")
+                    management_action(supervisor, 'Manual supervisor controls')
+                    select_menu(supervisor, 'Pause or activate a scope', first='Show supervisor status')
+                    select_menu(supervisor, 'Worker', first='Global')
+                    select_menu(supervisor, f"Writer · W123 · {writer_attempt['workerId']}",
+                                first=f"Owner · W123 · {owner['workerId']}")
+                    select_menu(supervisor, 'Pause', first='Pause')
                     until('writer pause confirmation', lambda: 'pause worker?' in visible(supervisor))
                     cli('agent', 'send-keys', supervisor, 'enter')
                     until('writer independently paused', lambda: json.loads(state_path.read_text())['workers'][writer_attempt['workerId']]['paused'])
@@ -722,7 +763,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     panes.append(supervisor)
                     until('replacement shell ready', lambda: shell_alone(supervisor))
                     cli('agent', 'start', name, '--kind', 'pi', '--pane', supervisor)
-                    cli('agent', 'prompt', supervisor, '/continuation-supervisor start')
+                    management_action(supervisor, 'Start supervisor here')
                     until('replacement start confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                     cli('agent', 'send-keys', supervisor, 'enter')
                     until('replacement committed', lambda: json.loads(state_path.read_text())['ownerToken'] != old['ownerToken'])
@@ -844,7 +885,7 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 worker_id = binding['workerId']
                 # Keep unrelated supervisor judgment out of this bounded recovery
                 # probe. The independent global pause must survive the repair.
-                cli('agent', 'prompt', supervisor, '/continuation-supervisor pause global')
+                management_action(supervisor, 'Pause global supervision')
                 until('global pause confirmation', lambda: 'pause global?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('global pause', lambda: json.loads(state_path.read_text())['paused'])
@@ -915,6 +956,7 @@ if __name__ == '__main__':
     parser.add_argument('--manual-delegation', action='store_true', help='grant and revoke a manual scope through /continuation')
     parser.add_argument('--manual-coordinator', action='store_true', help='register a manual owner and separately join supervision')
     parser.add_argument('--pinned-checkpoint', action='store_true', help='register a paused pinned worker with an initial task')
+    parser.add_argument('--command-picker', action='store_true', help='inspect the ordinary Pi slash autocomplete')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
@@ -940,6 +982,6 @@ if __name__ == '__main__':
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
                 args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
                 args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator,
-                args.pinned_checkpoint)
+                args.pinned_checkpoint, args.command_picker)
         finally:
             model.shutdown()

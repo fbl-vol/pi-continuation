@@ -80,7 +80,7 @@ export async function createContinuationRuntime(sdk, { cwd, sessionManager, agen
       if (ctx.hasUI && ctx.mode === 'tui') promptScope.installEditor(ctx.ui);
     });
     worker = bindObservation(pi, { ...bindings, promptScope, launchGuard: () => true, legacyWorkerCommand: true });
-    bindSupervisor(pi, bindings);
+    bindSupervisor(pi, { ...bindings, legacySupervisorCommand: true });
     bindCoordinator(pi, bindings);
   };
   const factories = [

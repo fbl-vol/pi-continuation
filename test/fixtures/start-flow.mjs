@@ -116,7 +116,7 @@ export async function startFixture(t, { blank = false, sessionManagerFactory, st
   }
   await worker.emit('session_start');
   supervisor.ctx.isIdle = () => false; // No fake model wake; tests choose dispositions explicitly.
-  const supervisorCommand = argument => supervisor.command('continuation-supervisor', argument);
+  const supervisorCommand = argument => supervisor.continuation.supervisor.command(argument, supervisor.ctx);
   const workerStart = () => worker.continuation.start(worker.ctx);
   const state = () => readJson(join(root, 'supervisor.json'));
   const workerId = () => worker.entries.find(e => e.customType === 'pi-continuation-worker')?.data.workerId;

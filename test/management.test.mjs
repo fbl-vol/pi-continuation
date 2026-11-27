@@ -49,6 +49,43 @@ async function resume(f) {
     reportHash: checkpointHash(await readFile(binding.checkpoint, 'utf8')) });
 }
 
+test('manual supervisor menu binds the exact pinned worker paused and activates only that worker', async t => {
+  const f = await startFixture(t);
+  const checkpoint = join(f.root, 'existing checkpoint.md');
+  await writeFile(checkpoint, 'Remaining approved work.');
+  await f.worker.continuation.registerPinned(f.worker.ctx, checkpoint);
+  await f.supervisor.emit('session_start');
+  const workerId = f.workerId();
+  const menu = async (...actions) => {
+    f.supervisor.select((_title, choices) => {
+      const match = actions.shift();
+      const action = typeof match === 'function' ? choices.find(match) : match;
+      assert.ok(choices.includes(action), JSON.stringify(choices));
+      return action;
+    });
+    await f.supervisor.command('continuation', '');
+    assert.deepEqual(actions, []);
+    assert.notEqual(f.supervisor.notifications.at(-1)?.[1], 'warning');
+  };
+  await menu('Claim supervisor for manual bindings');
+  assert.equal((await f.state()).acceptStarts, false);
+  assert.equal((await f.state()).paused, true);
+  f.supervisor.answer(title => title.includes('worker ID') ? workerId : 'w');
+  await menu('Manual supervisor controls', 'Bind a pinned worker');
+  const bound = await f.state();
+  assert.equal(bound.workers[workerId].sessionId, f.worker.id);
+  assert.equal(bound.workers[workerId].checkpoint, checkpoint);
+  assert.equal(bound.workers[workerId].paused, true);
+  assert.equal(bound.routes.w.paused, true);
+  await menu('Manual supervisor controls', 'Pause or activate a scope', 'Worker',
+    label => label.endsWith(workerId), 'Activate');
+  const active = await f.state();
+  assert.equal(active.workers[workerId].paused, false);
+  assert.equal(active.routes.w.paused, true);
+  assert.equal(active.paused, true);
+  assert.deepEqual(f.worker.messages, []);
+});
+
 test('delivery defaults save only the explicit draft and persist across menu openings', async t => {
   const f = await started(t);
   const planner = await planningSession(f);
@@ -437,7 +474,7 @@ test('owner replacement during the menu cannot redirect own Return or clear its 
     await f.supervisor.emit('session_shutdown');
     const next = f.native('s:p2');
     next.ctx.isIdle = () => false;
-    await next.command('continuation-supervisor', 'start');
+    await next.continuation.supervisor.command('start', next.ctx);
     return 'Return this session to supervision';
   });
   await f.worker.command('continuation', '');

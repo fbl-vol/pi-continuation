@@ -37,10 +37,9 @@ test('human attachment preserves pauses and conservative budget; retired ownersh
     }
   }));
   const events = new Map();
-  const commands = new Map();
   const notices = [];
   const pi = { on: (event, handler) => events.set(event, handler),
-    registerCommand: (name, definition) => commands.set(name, definition.handler), registerTool: () => {},
+    registerTool: () => {},
     sendMessage: () => assert.fail('current transferred stop must never be replayed') };
   const ctx = { mode: 'tui', isIdle: () => true,
     sessionManager: { getSessionId: () => randomUUID() },
@@ -67,8 +66,8 @@ test('human attachment preserves pauses and conservative budget; retired ownersh
     identity: { sessionId: record.sessionId, sessionFile: record.sessionFile, checkpoint: record.checkpoint },
     target: { root, workerId: record.workerId },
   }, () => {});
-  bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
-  const command = args => commands.get('continuation-supervisor')(args, ctx);
+  const supervisor = bindSupervisor(pi, { root, socketPath, allowExperimentalActivation: true });
+  const command = args => supervisor.command(args, ctx);
   const saved = () => readJson(join(root, 'supervisor.json'));
   await command('init');
   await command(`add ${record.workerId} w1`);

@@ -77,7 +77,7 @@ async function fixture(t, { coordinatorInput = false, ordinary = false, priorHan
   });
   const ch = new Map(), sh = new Map();
   const notices = [], wakes = [];
-  let command, tool;
+  let tool;
   const cctx = { mode: 'tui', isIdle: () => true, sessionManager: {
     getSessionId: () => coordinator.sessionId, getSessionFile: () => coordinator.sessionFile,
     getLeafId: () => 'coordinator-leaf', getBranch: () => [{ type: 'custom',
@@ -95,13 +95,12 @@ async function fixture(t, { coordinatorInput = false, ordinary = false, priorHan
     const previous = sh.get(name);
     sh.set(name, previous ? (...args) => Promise.all([previous(...args), fn(...args)]) : fn);
   },
-    registerCommand: (name, definition) => {
-      if (name === 'continuation-supervisor') command = definition.handler;
-    },
+    registerCommand: () => {},
     registerTool: definition => { if (definition.name === 'continuation_disposition') tool = definition.execute; },
     sendMessage: message => wakes.push(message) };
-  if (ordinary) bindContinuation(supervisorPi, { root, socketPath });
-  else bindSupervisor(supervisorPi, { root, socketPath, allowExperimentalActivation: true });
+  const supervisor = ordinary ? bindContinuation(supervisorPi, { root, socketPath }).supervisor :
+    bindSupervisor(supervisorPi, { root, socketPath, allowExperimentalActivation: true });
+  const { command } = supervisor;
   t.after(async () => {
     await sh.get('session_shutdown')?.();
     await ch.get('session_shutdown')?.();

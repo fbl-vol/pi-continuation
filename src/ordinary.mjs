@@ -17,5 +17,5 @@ export function bindContinuation(pi, options = {}) {
   const delegation = bindDelegation(pi, worker, { ...options, registerOwner: coordinator.registerOwner,
     replaceOwner: coordinator.replaceOwner });
   bindManagement(pi, worker, supervisor, coordinator, { ...options, delegation });
-  return Object.assign(worker, { delegation });
+  return Object.assign(worker, { delegation, supervisor });
 }
