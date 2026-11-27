@@ -160,7 +160,7 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
-        automatic_rollover, pi_version):
+        automatic_rollover, pi_version, manual_delegation):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -267,6 +267,13 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             def visible(pane):
                 return subprocess.check_output([herdr, 'pane', 'read', pane, '--source', 'visible'],
                                                cwd=work, env=env, text=True, timeout=8)
+            def select_menu(pane, action):
+                screen = until(f'menu offers {action}', lambda: text if action in (text := visible(pane)) else None)
+                lines = [line.strip() for line in screen.splitlines()]
+                first = lines.index('→ Delivery preferences')
+                target = lines.index(action)
+                cli('agent', 'send-keys', pane, *(['down'] * (target - first)), 'enter')
+
             state_dir = home/'.pi-continuation'
             state_path = state_dir/'supervisor.json'
             if no_supervisor:
@@ -275,6 +282,30 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                 until('supervisor confirmation', lambda: 'Start continuation supervisor?' in visible(supervisor))
                 cli('agent', 'send-keys', supervisor, 'enter')
                 until('active supervisor', lambda: state_path.exists() and json.loads(state_path.read_text())['acceptStarts'])
+            if manual_delegation:
+                cli('agent', 'prompt', planner, '/continuation')
+                select_menu(planner, 'Authorize scoped delegation')
+                until('delegation role selector', lambda: 'Choose the maximum role' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                until('delegation scope input', lambda: 'Enter the agreed assignment scope' in visible(planner))
+                scope = 'Review only the disposable fixture.'
+                cli('pane', 'send-text', planner, scope)
+                cli('pane', 'send-keys', planner, 'enter')
+                confirmation = until('delegation confirmation', lambda: text if
+                                     'Authorize scoped supervised delegation?' in (text := visible(planner)) else None)
+                assert 'Role ceiling: read-only' in confirmation and scope in confirmation
+                assert not list(state_dir.glob('delegation-*.json'))
+                cli('agent', 'send-keys', planner, 'enter')
+                path = until('confirmed read-only grant', lambda: next(state_dir.glob('delegation-*.json'), None))
+                grant = json.loads(path.read_text())
+                assert grant['role'] == 'read-only' and grant['scope'] == scope and not grant['revoked']
+                until('planner settled', lambda: cli('agent', 'get', planner)['agent']['agent_status'] in ('idle', 'done'))
+                cli('agent', 'prompt', planner, '/continuation')
+                select_menu(planner, 'Revoke delegation')
+                until('same grant revoked', lambda: json.loads(path.read_text()) == {**grant, 'revoked': True})
+                assert json.loads(state_path.read_text())['workers'] == {}
+                print('Native manual delegation passed: guarded read-only grant, explicit revoke, no worker enrollment', flush=True)
+                return
             if delivery_preferences:
                 cli('agent', 'prompt', planner, '/continuation')
                 until('delivery menu entry', lambda: 'Delivery preferences' in visible(planner))
@@ -587,13 +618,8 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
                     return
                 def open_owner_decision():
                     pane = owner['paneId']
-                    action = 'Submit owner decision'
                     cli('agent', 'prompt', pane, '/continuation')
-                    screen = until('owner decision menu', lambda: text if action in (text := visible(pane)) else None)
-                    lines = [line.strip() for line in screen.splitlines()]
-                    first = lines.index('→ Delivery preferences')
-                    target = lines.index(action)
-                    cli('agent', 'send-keys', pane, *(['down'] * (target - first)), 'enter')
+                    select_menu(pane, 'Submit owner decision')
                     until('exact native owner decision prompt', lambda: 'Submit decision to the existing writer' in visible(pane))
 
                 open_owner_decision()
@@ -827,6 +853,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-supervisor', action='store_true', help='bootstrap a new supervisor in the same invocation')
     parser.add_argument('--restart-supervisor', action='store_true', help='replace a gracefully stopped supervisor from retained state')
     parser.add_argument('--delivery-preferences', action='store_true', help='inspect native delivery menu and cancel')
+    parser.add_argument('--manual-delegation', action='store_true', help='grant and revoke a manual scope through /continuation')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
@@ -851,6 +878,6 @@ if __name__ == '__main__':
                 args.worktree_choice, args.paused_supervisor, args.no_supervisor, args.restart_supervisor,
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
                 args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
-                args.automatic_rollover, args.pi_version)
+                args.automatic_rollover, args.pi_version, args.manual_delegation)
         finally:
             model.shutdown()

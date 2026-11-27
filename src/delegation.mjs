@@ -2128,59 +2128,58 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     await claim(path, recovery);
     ctx.ui.notify('Read-only reviewer delegation restored for this supervisor. Writer delegation remains unavailable.', 'info');
   }
-  pi.registerCommand('continuation-delegate', {
-    description: 'Authorize scoped delegation: <writer|read-only> <scope> | revoke',
-    handler: async (argument, ctx) => {
-      if (ctx.mode !== 'tui' || !socketPath || !paneId || !ctx.isIdle()) refuse('Idle Herdr Pi TUI required');
-      await ensureRoot(root);
-      if (argument.trim() === 'revoke') {
-        const ref = reference(ctx);
-        if (!ref) refuse('No scope to revoke');
-        const grant = await readJson(grantPath(root, ref.grantId));
-        const source = ref.spawnId && grant.ownerLaunch ? await readJson(spawnPath(root, ref.spawnId)) : undefined;
-        const binding = !ref.spawnId ? grant.parent : source?.role === 'owner' && source.grantId === grant.id ? source.child : undefined;
-        if (!binding || !sameSession(currentSession(ctx), binding) || paneId !== binding.paneId)
-          refuse('Revoke in the originating session or the launched coordinating owner');
-        grant.revoked = true;
-        await atomicJson(grantPath(root, grant.id), grant);
-        ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
-        return;
-      }
-      const existing = reference(ctx);
-      if (existing && !existing.spawnId && !(await readJson(grantPath(root, existing.grantId))).revoked)
-        refuse('Revoke the current delegation tree before authorizing another scope in this planning session');
-      if (existing?.spawnId) {
-        const inherited = await readJson(grantPath(root, existing.grantId));
-        if (inherited.ownerLaunch && (await readSupervisor(root)).ownerToken !== inherited.ownerToken)
-          refuse('Stale assignment authority cannot be replaced here; check /continuation for reviewer recovery');
-      }
-      const [role, ...words] = argument.trim().split(/\s+/);
-      const scope = words.join(' ');
-      if (!['writer', 'read-only'].includes(role) || !scope || Buffer.byteLength(scope) > 8000)
-        refuse('Explicit writer/read-only role and bounded assignment scope required');
-      const checkout = role === 'writer' ? await checkoutIdentity(ctx.cwd) : undefined;
-      const state = await readSupervisor(root);
-      await delegationOwner(root, { ownerToken: state.ownerToken, supervisorSession: state.supervisorSession });
-      const live = await snapshot(socketPath);
-      const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
-      if (state.routes[parent.workspaceId]?.paused) refuse('Route is paused');
-      const version = generation;
-      if (!await worker.confirmDelegation(ctx, 'Authorize scoped supervised delegation?', `Role ceiling: ${role}\nScope: ${scope}\nCwd: ${ctx.cwd}\nSupervisor session: ${state.supervisorSession}\n\n${delegationInstructions}\n` +
-          'Authorize this session and its new workers to delegate within this scope to the current running supervisor. No per-worker enrollment confirmation. You retain independent pauses.')) return;
-      if (generation !== version || !ctx.isIdle() || !sameSession(currentSession(ctx), parent))
-        refuse('Session changed during delegation authorization');
-      const id = randomUUID();
-      const grant = { id, parent, cwd: await realpath(ctx.cwd), scope, role, checkout, ownerToken: state.ownerToken,
-        supervisorSession: state.supervisorSession, revoked: false };
-      await delegationOwner(root, grant);
-      await claim(grantPath(root, id), grant);
-      pi.appendEntry('pi-continuation-delegation', { grantId: id, sessionId: parent.sessionId });
-      ctx.ui.notify('Scoped delegation authorized; this planning session need not enroll as a worker', 'info');
-    },
-  });
+  async function manualGrant(ctx) {
+    const ref = reference(ctx);
+    if (!ref) return {};
+    const grant = await readJson(grantPath(root, ref.grantId));
+    const source = ref.spawnId && grant.ownerLaunch ? await readJson(spawnPath(root, ref.spawnId)) : undefined;
+    const binding = !ref.spawnId ? grant.parent : source?.role === 'owner' && source.grantId === grant.id ? source.child : undefined;
+    const canRevoke = !grant.revoked && binding && paneId === binding.paneId && sameSession(currentSession(ctx), binding);
+    return { ref, grant, canRevoke };
+  }
+  const canAuthorize = ({ ref, grant }, ownerToken) => !ref || (ref.spawnId
+    ? !grant.ownerLaunch || grant.ownerToken === ownerToken : grant.revoked);
+  async function manualDelegationActions(ctx, ownerToken) {
+    if (!ctx.isIdle()) return {};
+    const current = await manualGrant(ctx);
+    return { authorize: !!ownerToken && canAuthorize(current, ownerToken),
+      revoke: current.canRevoke ? current.grant.id : undefined };
+  }
+  async function revokeDelegation(ctx, grantId) {
+    const { grant, canRevoke } = await manualGrant(ctx);
+    if (!ctx.isIdle() || !canRevoke || grant.id !== grantId)
+      refuse('Delegation changed; revoke in the exact originating session or launched coordinating owner');
+    await atomicJson(grantPath(root, grant.id), { ...grant, revoked: true });
+    ctx.ui.notify('Delegation revoked for this tree; existing workers and scope pauses are unchanged', 'info');
+  }
+  async function authorizeDelegation(ctx, role, scope, ownerToken) {
+    if (!ctx.isIdle() || !['writer', 'read-only'].includes(role) || !scope || Buffer.byteLength(scope) > 8000)
+      refuse('Explicit writer/read-only role and bounded assignment scope required in an idle Herdr pane');
+    const existing = await manualGrant(ctx);
+    const state = await readSupervisor(root);
+    if (state.ownerToken !== ownerToken || !canAuthorize(existing, ownerToken))
+      refuse('Delegation or supervisor changed; reopen /continuation');
+    const checkout = role === 'writer' ? await checkoutIdentity(ctx.cwd) : undefined;
+    await delegationOwner(root, { ownerToken: state.ownerToken, supervisorSession: state.supervisorSession });
+    const live = await snapshot(socketPath);
+    const parent = nativeBinding(live.agents.find(a => a.pane_id === paneId), currentSession(ctx), ctx.cwd);
+    if (state.routes[parent.workspaceId]?.paused) refuse('Route is paused');
+    const version = generation;
+    if (!await worker.confirmDelegation(ctx, 'Authorize scoped supervised delegation?', `Role ceiling: ${role}\nScope: ${scope}\nCwd: ${ctx.cwd}\nSupervisor session: ${state.supervisorSession}\n\n${delegationInstructions}\n` +
+        'Authorize this session and its new workers to delegate within this scope to the current running supervisor. No per-worker enrollment confirmation. You retain independent pauses.')) return;
+    if (generation !== version || !ctx.isIdle() || !sameSession(currentSession(ctx), parent))
+      refuse('Session changed during delegation authorization');
+    const id = randomUUID();
+    const grant = { id, parent, cwd: await realpath(ctx.cwd), scope, role, checkout, ownerToken: state.ownerToken,
+      supervisorSession: state.supervisorSession, revoked: false };
+    await delegationOwner(root, grant);
+    await claim(grantPath(root, id), grant);
+    pi.appendEntry('pi-continuation-delegation', { grantId: id, sessionId: parent.sessionId });
+    ctx.ui.notify('Scoped delegation authorized; this planning session need not enroll as a worker', 'info');
+  }
   pi.registerTool({
     name: 'continuation_spawn', label: 'Delegate supervised worker', executionMode: 'sequential',
-    description: 'Create one new Herdr Pi worker, verify its saved-session identity, enroll with the intended running supervisor BEFORE sending its assignment. Requires a human /continuation-delegate scope grant or inherited delegated grant. Stable key identifies one assignment; rejected/uncertain attempts are held, never blindly retry or change the key. Does not create supervisors or activate paused scopes.',
+    description: 'Create one new Herdr Pi worker, verify its saved-session identity, enroll with the intended running supervisor BEFORE sending its assignment. Requires a human scope grant via /continuation or inherited delegated grant. Stable key identifies one assignment; rejected/uncertain attempts are held, never blindly retry or change the key. Does not create supervisors or activate paused scopes.',
     promptGuidelines: [delegationInstructions, 'Use continuation_spawn only for explicitly authorized delegation, never brainstorming. Keep the same key for an assignment; inspect held attempts instead of retrying.'],
     parameters: Type.Object({ key: Type.String({ minLength: 1, maxLength: 120 }),
       task: Type.String({ minLength: 1, maxLength: 16000 }), role: Type.Union([Type.Literal('writer'), Type.Literal('read-only')]) }),
@@ -2332,7 +2331,7 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     queueInput = queueTurn = undefined;
     await closeBootstrap?.(); closeBootstrap = undefined;
   });
-  return { recoverReviewers, async reviewerRecoveryStatus(ctx) {
+  return { manualDelegationActions, authorizeDelegation, revokeDelegation, recoverReviewers, async reviewerRecoveryStatus(ctx) {
     try { return { available: await recoverReviewers(ctx, true) }; }
     catch (error) {
       return { available: false, reason: error instanceof MissingGracefulEnd ? error.message : undefined };

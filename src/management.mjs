@@ -218,6 +218,11 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         const previousChoice = `Previous / unavailable registrations (${previous.length})`;
         const reviewerRecovery = view.running && view.own?.current && view.own.binding.role === 'owner'
           ? await delegation?.reviewerRecoveryStatus(ctx) : undefined;
+        const manualDelegation = await delegation?.manualDelegationActions(ctx,
+          view.running ? view.state?.ownerToken : undefined).catch(error => {
+          report('read manual delegation', error, ctx);
+          return {};
+        });
         if (!current()) refuse('Session changed while reading supervision');
         const choices = ['Delivery preferences',
           ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
@@ -233,7 +238,9 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
             ...(!view.state.ownerWaits[view.own.binding.workerId].decisionId ? ['Release this owner decision wait'] : [])] : []),
           ...(supervisor.active ? ['Pause global supervision', 'Start global supervision'] :
             view.running ? [view.own ? 'Return this session to supervision' : 'Join this session to supervision'] : ['Start supervisor here']),
-          ...labels, ...(previous.length ? [previousChoice] : []), 'Close'];
+          ...labels, ...(previous.length ? [previousChoice] : []),
+          ...(manualDelegation?.authorize ? ['Authorize scoped delegation'] : []),
+          ...(manualDelegation?.revoke ? ['Revoke delegation'] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
         if (!choice || choice === 'Close') return;
@@ -257,6 +264,18 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (choice === 'Restore read-only reviewer delegation' && reviewerRecovery?.available) {
           await freshView(view.own);
           return await delegation.recoverReviewers(ctx);
+        }
+        if (choice === 'Authorize scoped delegation' && manualDelegation?.authorize) {
+          const role = await select('Choose the maximum role for this delegation', ['read-only', 'writer', 'Cancel']);
+          if (role !== 'read-only' && role !== 'writer') return;
+          const scope = await worker.inputDecision(ctx, 'Enter the agreed assignment scope for this delegation');
+          if (scope === undefined) return;
+          const fresh = await freshView();
+          return delegation.authorizeDelegation(ctx, role, scope.trim().replace(/\s+/g, ' '), fresh.state.ownerToken);
+        }
+        if (choice === 'Revoke delegation' && manualDelegation?.revoke) {
+          await freshView();
+          return delegation.revokeDelegation(ctx, manualDelegation.revoke);
         }
         if (choice === 'This assignment: delivery') {
           const path = join(root, `delegation-${view.own.binding.coordinatorId}.json`);

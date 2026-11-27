@@ -78,14 +78,16 @@ remain. No automatic replacement, live migration or delivery retry is introduced
 ### User-approved supervised delegation amendment (since v0.3.0)
 
 An unsupervised planning session or a supervised worker may delegate within an
-explicit user-authorized assignment. `/continuation-delegate <writer|read-only> <assignment scope>`
-is the originating session's guarded native authorization, pinned to its exact
+explicit user-authorized assignment. In the originating session, `/continuation` →
+**Authorize scoped delegation** prompts for the role ceiling and agreed assignment
+scope. This guarded native authorization is pinned to the exact
 session/cwd, role ceiling and the intended **already-running** supervisor session/owner. It is
 not worker enrollment. Brainstorming, a model-supplied approval flag or quoted tool
 text cannot create this grant. The agent-callable `continuation_spawn` uses that
 scope without per-worker confirmations; verified children inherit it for scoped
-subdelegation. `/continuation-delegate revoke` in the originating session revokes
-further delegation throughout that tree without changing existing supervision.
+subdelegation. `/continuation` → **Revoke delegation** in the originating session
+or launched coordinating owner revokes further delegation throughout that tree
+without changing existing supervision.
 
 The operation durably claims a stable assignment key and exact task, creates only
 a new unfocused Herdr pane, starts native Pi through ordinary extension loading,

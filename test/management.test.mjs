@@ -324,7 +324,7 @@ test('current pane labels are separate from retained closed and changed registra
   planner.select((title, choices) => { menus.push({ title, choices }); return answers[menus.length - 1]; });
   await planner.command('continuation', '');
   assert.deepEqual(menus[0].choices, ['Delivery preferences', 'Join this session to supervision', '1. worker — Supervised',
-    'Previous / unavailable registrations (2)', 'Close']);
+    'Previous / unavailable registrations (2)', 'Authorize scoped delegation', 'Close']);
   assert.match(menus[0].title, /Current workers \(1\)/);
   assert.equal(menus.length, 3);
   assert.equal(menus[1].title, 'Previous / unavailable registrations');

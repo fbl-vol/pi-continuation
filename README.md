@@ -125,8 +125,8 @@ v0.5.0 requires confirmed manual recovery for this case.
 
 For advanced explicit delegation outside `/start-implementation`, with an already installed ordinary extension and an **already-running intended supervisor**, the planning session need not enroll in continuation:
 
-1. In the planning session, authorize the assignment once with
-   `/continuation-delegate writer <bounded assignment scope>` (or `read-only`) and confirm that scope.
+1. In the planning session, open `/continuation` → **Authorize scoped delegation**.
+   Choose `writer` or `read-only`, enter the agreed assignment scope, and confirm.
 2. The agent calls `continuation_spawn` with a stable `key`, `task`, and `role`
    (`writer` or `read-only`). It creates a new unfocused Herdr pane, starts normal
    Pi, verifies native identity, enrolls with that exact supervisor, and only then
@@ -146,8 +146,9 @@ of brainstorming or a model-controlled activation flag. Normal startup must load
 this extension in the child profile/project; no installation/settings/SDK launcher
 is performed. Missing loading or changed supervisor identity holds the attempt.
 Global, route and parent-worker pauses/holds remain independent and are not lifted.
-`/continuation-delegate revoke` in the originating planning session stops further
-delegation for the tree; existing worker supervision is unchanged. Revoke the
+`/continuation` → **Revoke delegation** in the originating planning session or the
+launched coordinating owner stops further delegation for the tree; existing worker
+supervision is unchanged. Revoke the
 current tree before authorizing a different scope in that same planning session.
 
 Keep the same key for an assignment. Duplicate keys/exact tasks are refused;
@@ -230,7 +231,7 @@ cross-platform acceptance; the owner workflow is not part of this package.
 For v0.4.0 or for advanced manual setup with an intended global supervisor running,
 an intended owner can register
 `/continuation-coordinator owner`, then `/continuation-worker start`, then authorize
-its bounded `writer` delegation scope with `/continuation-delegate`. The owner is a
+its bounded `writer` scope through `/continuation` → **Authorize scoped delegation**. The owner is a
 supervised non-writer and an exact recipient for its delegated children, not another
 supervisor. `continuation_owner_wait` records a child wait for named worker IDs or a
 user-decision wait. Child notices never answer a decision. In current source, use
