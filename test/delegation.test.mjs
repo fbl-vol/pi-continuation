@@ -1440,12 +1440,19 @@ for (const fault of ['none', 'before closeout commit', 'lost receipt acknowledge
       await owner.emit('agent_settled', { aborted });
     };
     const waitForState = async (predicate, explanation) => {
-      for (let i = 0; i < 200; i++) {
-        const current = await f.state();
-        if (predicate(current)) return current;
+      // Rollover does Git, IPC and durable writes on the hosted runner.
+      const deadline = performance.now() + 8000;
+      let current = await f.state();
+      while (!predicate(current) && performance.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 10));
+        current = await f.state();
       }
-      assert.fail(explanation);
+      if (!predicate(current)) {
+        const progress = { sends, closed: Boolean(current.closedAssignments[oldGrant]),
+          retained: Object.keys(current.retainedAssignments).length,
+          blocker: current.assignmentOutcomes[oldGrant]?.blocker };
+        assert.fail(`${explanation}; last observed: ${JSON.stringify(progress)}`);
+      }
     };
     await settleOutcome({ ...outcome, revision: 'f'.repeat(40) });
     assert.equal((await f.state()).assignmentOutcomes[oldGrant], undefined);
