@@ -232,6 +232,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
       if (ctx.mode !== 'tui' || !paneId || !socketPath || process.env.HERDR_ENV !== '1') {
         ctx.ui.notify('Herdr-managed Pi TUI required', 'warning'); return;
       }
+      const menuEvidence = worker.takeReadOnlyMenuEvidence(ctx);
       const session = currentSession(ctx);
       const version = worker.interactionVersion;
       const current = () => unchanged(currentSession(ctx), session) &&
@@ -311,7 +312,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
             !view.running && !worker.registered ? ['Claim supervisor for manual bindings'] : []), 'Close'];
         const title = `Continuation · ${here}${view.running ? '' : ' · supervisor unavailable'}`;
         const choice = await select(`${title}\nCurrent workers (${rows.length})`, choices);
-        if (!choice || choice === 'Close') return;
+        if (!choice || choice === 'Close') return await worker.finishReadOnlyMenu(ctx, menuEvidence);
         if (choice === 'Delivery preferences')
           return editPreferences('Delivery preferences · defaults for new assignments',
             await readDeliveryPreferences(root), draft => saveDeliveryPreferences(root, draft));
@@ -398,7 +399,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (inspectingPrevious) {
           const previousLabels = previous.map((item, index) => `${index + 1}. ${item.name} — ${item.status.label}`);
           const selected = await select('Previous / unavailable registrations', [...previousLabels, 'Close']);
-          if (!selected || selected === 'Close') return;
+          if (!selected || selected === 'Close') return await worker.finishReadOnlyMenu(ctx, menuEvidence);
           row = previous[previousLabels.indexOf(selected)];
         }
         if (!row) return;
@@ -409,13 +410,13 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         const action = await select(`${selected.name} · ${selected.status.label}`, ['Details',
           ...(canControl ? ['Pause this worker', 'Stop supervising this worker'] : []),
           ...(canReturn ? ['Return this session to supervision'] : []), 'Close']);
-        if (!action || action === 'Close') return;
+        if (!action || action === 'Close') return await worker.finishReadOnlyMenu(ctx, menuEvidence);
         const latest = await freshView(row);
         if (action === 'Details') {
           const selected = latest.workers.find(w => w.binding.workerId === row.binding.workerId);
           const reason = selected.current && selected === latest.own ? reviewerRecovery?.reason : undefined;
           ctx.ui.notify(details(latest, selected, reason), 'info');
-          return;
+          return await worker.finishReadOnlyMenu(ctx, menuEvidence);
         }
         if (action === 'Return this session to supervision') return worker.start(ctx);
         await requestControl(root, socketPath, paneId, ctx, worker, view, row,

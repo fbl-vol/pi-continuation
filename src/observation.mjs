@@ -67,6 +67,8 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   let lastObserved;
   let stopVersion = 0;
   let commandReport;
+  let menuSubmitVersion;
+  let typingNotSubmitted = false;
   let commandLeaf;
   let shutdownVersion;
   let previousAssistantId;
@@ -198,13 +200,24 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
   };
   const watchTerminalInput = ctx => {
     // Fence immediately, even before Pi knows whether typing will submit a task
-    // or open a native menu. Only a confirmed start may recover a parked report.
+    // or open a native menu. A positively observed read-only menu submission
+    // can restore its exact parked report; other actions keep their own guards.
     stopTerminalInput = ctx.ui.onTerminalInput(data => {
       if (preparing) { preparing.interrupted = true; stopVersion++; return; }
       // Native dialog keys reach this hook too. Our own confirmation must not
       // fence itself; Escape and concurrent external UI still interrupt it.
       if (prompts?.confirming && !isInterrupt(data)) return;
-      if (!worker || (hold && (!worker.managedInput || !isInterrupt(data)))) return;
+      if (!worker) return;
+      const submittingMenu = data === '\r' && ctx.ui.getEditorText?.().trim() === '/continuation';
+      if (hold && (!worker.managedInput || !isInterrupt(data))) {
+        if (data === '\r') {
+          menuSubmitVersion = submittingMenu && typingNotSubmitted && holdReason === 'typing' ? stopVersion : undefined;
+          typingNotSubmitted = false;
+        }
+        return;
+      }
+      menuSubmitVersion = undefined;
+      typingNotSubmitted = worker.managedInput && !hold && !isInterrupt(data) && data !== '\r';
       if (worker.managedInput && !hold) {
         parkedReport = lastObserved?.stop ? lastObserved : undefined;
         commandReport = lastObserved?.outcome === 'completed' && !lastObserved.hold ? lastObserved : undefined;
@@ -744,6 +757,25 @@ export function bindObservation(pi, { root = defaultRoot(), socketPath = process
           !ctx.isIdle() || promptsFor(ctx).blocked ||
           lastObserved?.version !== stopVersion) return;
       return { workerId: worker.workerId, stop: commandReport.stop, version: stopVersion };
+    },
+    takeReadOnlyMenuEvidence(ctx) {
+      const submitted = menuSubmitVersion === stopVersion;
+      menuSubmitVersion = undefined;
+      if (submitted && worker?.managedInput && holdReason === 'typing' && commandReport &&
+          commandLeaf === currentSession(ctx).leaf) return { worker, report: commandReport, version: stopVersion };
+    },
+    async finishReadOnlyMenu(ctx, evidence) {
+      if (!evidence) return;
+      await pendingWrite;
+      const session = currentSession(ctx);
+      if (worker !== evidence.worker || !hold || holdReason !== 'typing' || stopVersion !== evidence.version ||
+          commandReport !== evidence.report || commandLeaf !== session.leaf ||
+          commandReport.session?.id !== session.id || commandReport.session?.file !== session.file ||
+          !ctx.isIdle() || promptsFor(ctx).blocked) return;
+      hold = false; holdReason = undefined; parkedReport = undefined;
+      commandReport = undefined; commandLeaf = undefined;
+      stopVersion++;
+      await observe(evidence.report, ctx);
     },
     selectManagement(ctx, title, choices) { return promptsFor(ctx).select(title, choices); },
     inputDecision(ctx, title) { return promptsFor(ctx).input(title); },

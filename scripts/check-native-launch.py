@@ -160,7 +160,8 @@ def capture_sidebar(herdr, work, env, resize, evidence):
 def run(root, model, package, baseline, evidence, nested, checkpoint_recovery, preflight_recovery, new_space,
         worktree_choice, paused_supervisor, no_supervisor, restart_supervisor, delivery_preferences, reviewer_recovery,
         owner_decision, owner_decision_negative, owner_chat, planner_queue, parallel_assignment, retained_rollover,
-        automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint, command_picker):
+        automatic_rollover, pi_version, manual_delegation, manual_coordinator, pinned_checkpoint, command_picker,
+        read_only_menu):
     model.reviewer_recovery = reviewer_recovery
     model.retained_rollover = retained_rollover or automatic_rollover
     model.automatic_rollover = automatic_rollover
@@ -304,6 +305,32 @@ rows = [["state_icon", "state_text", "workspace"], ["agent"], ["$pi_continuation
             def join_supervision(pane):
                 management_action(pane, 'Join this session to supervision')
 
+            if read_only_menu:
+                join_supervision(planner)
+                until('worker join confirmation', lambda: 'Start worker supervision?' in visible(planner))
+                cli('agent', 'send-keys', planner, 'enter')
+                binding = until('worker joined', lambda: next(iter(json.loads(state_path.read_text())['workers'].values()), None))
+                path = state_dir/f"observation-{binding['workerId']}.json"
+                model.allow_response.set()
+                cli('agent', 'prompt', planner, 'Read-only menu fixture task. Reply with one sentence.')
+                def settled():
+                    report = json.loads(path.read_text())
+                    return report if report['outcome'] == 'completed' and not report['hold'] else None
+                before = until('settled worker report', settled)
+                for closing in ('Close', 'Escape'):
+                    cli('pane', 'send-text', planner, '/continuation')
+                    cli('pane', 'send-keys', planner, 'enter')
+                    until('provisional hold while menu is open', lambda: 'Current workers (1)' in visible(planner)
+                          and json.loads(path.read_text()).get('holdReason') == 'typing')
+                    if closing == 'Close':
+                        select_menu(planner, 'Close')
+                        after = until('same settled stop restored without a hold', settled, 5)
+                        assert after['stop'] == before['stop'] and after['finalReply'] == before['finalReply']
+                    else:
+                        cli('pane', 'send-keys', planner, 'esc')
+                        until('Escape remains an interruption', lambda: json.loads(path.read_text()).get('holdReason') == 'interruption')
+                print('Native read-only menu passed: Close restores only the parked stop; Escape remains held', flush=True)
+                return
             if pinned_checkpoint:
                 checkpoint = work/'fixture-checkpoint.md'
                 checkpoint.write_text('Already-agreed fixture work, still paused.\n')
@@ -957,6 +984,7 @@ if __name__ == '__main__':
     parser.add_argument('--manual-coordinator', action='store_true', help='register a manual owner and separately join supervision')
     parser.add_argument('--pinned-checkpoint', action='store_true', help='register a paused pinned worker with an initial task')
     parser.add_argument('--command-picker', action='store_true', help='inspect the ordinary Pi slash autocomplete')
+    parser.add_argument('--read-only-menu', action='store_true', help='verify Close restores a parked report but Escape still interrupts')
     parser.add_argument('--reviewer-recovery', action='store_true', help='recover only reviewer delegation in the surviving owner')
     parser.add_argument('--owner-decision', action='store_true', help='submit a single decision in the exact owner pane')
     parser.add_argument('--owner-decision-negative', action='store_true', help='verify native pause and Escape refusal')
@@ -982,6 +1010,6 @@ if __name__ == '__main__':
                 args.delivery_preferences, args.reviewer_recovery, args.owner_decision, args.owner_decision_negative,
                 args.owner_chat, args.planner_queue, args.parallel_assignment, args.retained_rollover,
                 args.automatic_rollover, args.pi_version, args.manual_delegation, args.manual_coordinator,
-                args.pinned_checkpoint, args.command_picker)
+                args.pinned_checkpoint, args.command_picker, args.read_only_menu)
         finally:
             model.shutdown()
