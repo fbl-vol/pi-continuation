@@ -4,7 +4,7 @@ import { access, readFile, readdir, rm, mkdir } from 'node:fs/promises';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startFixture } from './fixtures/start-flow.mjs';
-import { readJson } from '../src/store.mjs';
+import { atomicJson, readJson } from '../src/store.mjs';
 import { sendAction } from '../src/ipc.mjs';
 import { managedCheckpointText } from '../src/checkpoint.mjs';
 import { checkpointHash } from '../src/policy.mjs';
@@ -32,6 +32,109 @@ const disposition = async (f, action, evidence) => {
   return f.supervisor.dispose({ workerId: f.workerId(), stop: observation.stop, action,
     evidence, reportHash: checkpointHash(checkpoint) });
 };
+
+test('P7 a lost reply after a sent continuation is counted once without pausing or resending', async t => {
+  let action, beforeResult, requests = 0;
+  const f = await startFixture(t, {
+    async sendWorkerAction(root, intent) {
+      action = intent;
+      beforeResult = await readJson(join(root, 'supervisor.json'));
+      requests++;
+      assert.deepEqual(await sendAction(root, intent), { accepted: true, id: intent.id });
+      throw new Error('Synthetic lost IPC response after the real receiver sent');
+    },
+  });
+  await start(f);
+  const evidence = 'Stage one verified; stage two remains approved.';
+  await turn(f, 'Work on the approved stages.', evidence);
+  await disposition(f, 'resume', evidence);
+  const id = f.workerId();
+  const state = await f.state();
+  assert.deepEqual(await readJson(join(f.root, `receipt-${action.id}.json`)), { id: action.id, status: 'sent' });
+  assert.equal(state.inflight[id], undefined);
+  assert.equal(state.workers[id].paused, false);
+  assert.equal(state.resumed[id], action.stop);
+  assert.equal(state.budgets[id].count, 1);
+  await f.supervisor.emit('session_shutdown');
+  beforeResult.routes.w.paused = true;
+  await atomicJson(join(f.root, 'supervisor.json'), beforeResult);
+  await f.supervisorCommand('start');
+  const recovered = await f.state();
+  assert.equal(recovered.inflight[id], undefined);
+  assert.equal(recovered.resumed[id], action.stop);
+  assert.deepEqual(recovered.budgets[id], state.budgets[id]);
+  assert.equal(recovered.workers[id].paused, false);
+  assert.equal(recovered.routes.w.paused, true);
+  await disposition(f, 'resume', evidence);
+  assert.equal(requests, 1);
+  assert.equal(f.worker.messages.length, 1);
+});
+
+for (const independentPause of [false, true]) {
+  test(`P7 late sent receipt after the ambiguity pause preserves only independent pauses (${independentPause})`, async t => {
+    let action, receiptPath, sent, requests = 0;
+    const f = await startFixture(t, {
+      async sendWorkerAction(root, intent) {
+        action = intent;
+        requests++;
+        assert.deepEqual(await sendAction(root, intent), { accepted: true, id: intent.id });
+        receiptPath = join(root, `receipt-${intent.id}.json`);
+        sent = await readJson(receiptPath);
+        await rm(receiptPath); // Make the real receiver's result unavailable to this one read.
+        throw new Error('Synthetic lost response while the sent receipt is not readable');
+      },
+    });
+    await start(f);
+    const evidence = 'Stage one verified; stage two remains approved.';
+    await turn(f, 'Work on the approved stages.', evidence);
+    assert.match((await disposition(f, 'resume', evidence)).content[0].text, /Ambiguous delivery/);
+    const id = f.workerId();
+    const ambiguous = await f.state();
+    assert.equal(ambiguous.inflight[id].id, action.id);
+    assert.equal(ambiguous.workers[id].paused, true);
+    if (independentPause) await f.supervisorCommand(`pause worker ${id}`);
+    await atomicJson(receiptPath, sent);
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    const recovered = await f.state();
+    assert.equal(recovered.inflight[id], undefined);
+    assert.equal(recovered.resumed[id], action.stop);
+    assert.equal(recovered.budgets[id].count, 1);
+    assert.equal(recovered.workers[id].paused, independentPause);
+    await disposition(f, 'resume', evidence);
+    assert.equal(requests, 1);
+    assert.equal(f.worker.messages.length, 1);
+  });
+}
+
+for (const receipt of ['missing', 'accepted', 'mismatched sent']) {
+  test(`P7 ${receipt} receipt leaves the ordinary continuation held across restart`, async t => {
+    let action, requests = 0;
+    const f = await startFixture(t, {
+      async sendWorkerAction(root, intent) {
+        action = intent;
+        requests++;
+        if (receipt !== 'missing') await atomicJson(join(root, `receipt-${intent.id}.json`),
+          receipt === 'accepted' ? { id: intent.id, status: 'accepted' } : { id: f.worker.id, status: 'sent' });
+        throw new Error('Synthetic lost response with no matching sent receipt');
+      },
+    });
+    await start(f);
+    const evidence = 'Stage one verified; stage two remains approved.';
+    await turn(f, 'Work on the approved stages.', evidence);
+    assert.match((await disposition(f, 'resume', evidence)).content[0].text, /Ambiguous delivery/);
+    await f.supervisor.emit('session_shutdown');
+    await f.supervisorCommand('start');
+    const state = await f.state(), id = f.workerId();
+    assert.equal(state.inflight[id].id, action.id);
+    assert.equal(state.workers[id].paused, true);
+    assert.equal(state.resumed[id], undefined);
+    assert.equal(state.budgets[id], undefined);
+    await disposition(f, 'resume', evidence);
+    assert.equal(requests, 1);
+    assert.deepEqual(f.worker.messages, []);
+  });
+}
 
 test('blank start sends no task and the first ordinary task persists its journal before one-use continuation', { timeout: 10000 }, async t => {
   const f = await startFixture(t, { blank: true });

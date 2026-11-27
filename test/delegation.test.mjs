@@ -43,7 +43,8 @@ for (const [scenario, options, attempts] of [
 });
 
 async function fixture(t, options = {}) {
-  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer, retainedSend: options.retainedSend });
+  const f = await startFixture(t, { blank: true, startOwnerServer: options.startOwnerServer,
+    retainedSend: options.retainedSend, sendWorkerAction: options.sendWorkerAction });
   execFileSync('git', ['init', '--quiet', f.root]);
   await f.supervisorCommand('start');
   const effects = [], children = [], renames = [];
@@ -2087,8 +2088,8 @@ async function managementAction(native, action, available = true) {
   assert.notEqual(native.notifications.at(-1)?.[1], 'warning', native.notifications.at(-1)?.[0]);
 }
 const answerOwnerDecision = owner => managementAction(owner, submitDecision);
-async function decisionFixture(t, findings) {
-  const f = await fixture(t);
+async function decisionFixture(t, findings, options) {
+  const f = await fixture(t, options);
   await f.worker.command('start-implementation', 'Implement the synthetic decision fixture.');
   const owner = f.children[0].native;
   const ownerId = (await f.attempt()).workerId;
@@ -2103,7 +2104,13 @@ async function decisionFixture(t, findings) {
 }
 
 test('owner chat keeps the pending question on clarification or synthetic input and relays one exact finding', async t => {
-  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.', 'Correct the label.']);
+  let beforeResult;
+  const { f, owner, ownerId, writer, writerId } = await decisionFixture(t, ['Correct the index.', 'Correct the label.'], {
+    async sendWorkerAction(root, action) {
+      beforeResult = await readJson(join(root, 'supervisor.json'));
+      return sendAction(root, action);
+    },
+  });
   const wait = (await f.state()).ownerWaits[ownerId];
   const reply = async (source, text) => {
     await owner.emit('input', { source, text });
@@ -2124,6 +2131,10 @@ test('owner chat keeps the pending question on clarification or synthetic input 
   assert.equal(writer.messages.length, 1);
   assert.match(writer.messages[0][0].content, /Fix finding 1 only:\nCorrect the index\.$/);
   assert.equal((await readJson(join(f.root, `receipt-${wait.id}.json`))).status, 'sent');
+  await f.supervisor.emit('session_shutdown');
+  await atomicJson(join(f.root, 'supervisor.json'), beforeResult);
+  await f.supervisorCommand('start');
+  assert.deepEqual((await f.state()).ownerWaits[ownerId], { kind: 'child', children: [writerId] });
   await reply('interactive', 'fix the first only');
   assert.equal(writer.messages.length, 1);
 });
@@ -2240,6 +2251,33 @@ test('P3 model messages and a submit request without native capture cannot answe
   assert.equal(response.accepted, false);
   assert.deepEqual((await f.state()).ownerWaits[ownerId], wait);
   assert.equal(writer.messages.length, 0);
+});
+
+test('P7 a lost reply after a sent owner decision reconciles without resending', async t => {
+  let requests = 0, beforeResult;
+  const { f, owner, ownerId, writer } = await decisionFixture(t, undefined, {
+    async sendWorkerAction(root, action) {
+      requests++;
+      beforeResult = await readJson(join(root, 'supervisor.json'));
+      assert.deepEqual(await sendAction(root, action), { accepted: true, id: action.id });
+      throw new Error('Synthetic lost IPC response after the real receiver sent');
+    },
+  });
+  const wait = (await f.state()).ownerWaits[ownerId];
+  owner.answer('Fix only the selected finding.');
+  await answerOwnerDecision(owner);
+  assert.deepEqual(await readJson(join(f.root, `receipt-${wait.id}.json`)), { id: wait.id, status: 'sent' });
+  assert.equal((await f.state()).ownerWaits[ownerId], undefined);
+  await f.supervisor.emit('session_shutdown');
+  // Restore the last durable snapshot from before the receiver's result was committed.
+  beforeResult.workers[ownerId].paused = true;
+  await atomicJson(join(f.root, 'supervisor.json'), beforeResult);
+  await f.supervisorCommand('start');
+  assert.equal((await f.state()).ownerWaits[ownerId], undefined);
+  assert.equal((await f.state()).workers[ownerId].paused, true);
+  await managementAction(owner, submitDecision, false);
+  assert.equal(requests, 1);
+  assert.equal(writer.messages.length, 1);
 });
 
 test('P7 uncertain decision delivery retains the exact wait and prevents resend after restart', async t => {
