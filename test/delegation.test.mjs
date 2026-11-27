@@ -2557,12 +2557,23 @@ for (const [name, block, message] of [
   await f.supervisorCommand('start');
   await block(f, owner, original);
   const native = f.children[0].native;
-  if (name === 'owner pause' || name === 'decision wait') {
+  if (['missing shutdown witness', 'owner pause', 'decision wait'].includes(name)) {
+    const missingWitness = name === 'missing shutdown witness';
+    const confirmations = native.confirmations.length;
+    const state = await f.state();
     native.select((_title, choices) => {
       assert.ok(!choices.includes('Restore read-only reviewer delegation'));
-      return 'Close';
+      if (!missingWitness) return 'Close';
+      if (choices.includes('Details')) return 'Details';
+      assert.ok(choices.includes('This session: details'));
+      return 'This session: details';
     });
     await native.command('continuation', '');
+    if (missingWitness) {
+      assert.match(native.notifications.at(-1)?.[0], /Reviewer recovery unavailable: .*no proved graceful end/);
+      assert.equal(native.confirmations.length, confirmations);
+      assert.deepEqual(await f.state(), state);
+    }
   }
   await assert.rejects(recoverReviewers(native), message);
   assert.equal((await readdir(f.root)).some(file => file.startsWith('reviewer-recovery-')), false);

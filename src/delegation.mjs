@@ -342,6 +342,8 @@ async function provedSupervisorEnd(root, token, sessionId) {
   return ended?.token === token && ended.sessionId === sessionId && !await ownerAlive(root, token);
 }
 
+class MissingGracefulEnd extends Error {}
+
 async function reviewerRecovery(root, grant, parent, state, preview) {
   if (!isId(state.ownerToken) || state.ownerToken === grant.ownerToken)
     refuse('No replacement supervisor to recover reviewer delegation to');
@@ -352,10 +354,10 @@ async function reviewerRecovery(root, grant, parent, state, preview) {
   if (!preview && !isDeepStrictEqual(await optionalRecord(reviewerRecoveryPath(root, recovery)), recovery))
     refuse('Intended running supervisor changed or is unavailable; in the exact owner use /continuation → Restore read-only reviewer delegation');
   if (!await provedSupervisorEnd(root, grant.ownerToken, grant.supervisorSession))
-    refuse('Prior supervisor has no proved graceful end for this assignment');
+    throw new MissingGracefulEnd('Prior supervisor has no proved graceful end for this assignment');
   if (predecessor?.token === state.ownerToken ||
       !await provedSupervisorEnd(root, predecessor?.token, predecessor?.sessionId))
-    refuse('Predecessor supervisor has no proved graceful end for this replacement');
+    throw new MissingGracefulEnd('Predecessor supervisor has no proved graceful end for this replacement');
   const lock = await optionalRecord(join(root, 'supervisor.lock'));
   if (lock?.token !== state.ownerToken || lock?.sessionId !== state.supervisorSession || lock?.pid !== state.ownerPid ||
       await optionalRecord(join(root, 'supervisor-start-pending.json')))
@@ -2330,8 +2332,10 @@ export function bindDelegation(pi, worker, { root = defaultRoot(), socketPath = 
     queueInput = queueTurn = undefined;
     await closeBootstrap?.(); closeBootstrap = undefined;
   });
-  return { recoverReviewers, async canRecoverReviewers(ctx) {
-    try { return await recoverReviewers(ctx, true); }
-    catch { return false; }
+  return { recoverReviewers, async reviewerRecoveryStatus(ctx) {
+    try { return { available: await recoverReviewers(ctx, true) }; }
+    catch (error) {
+      return { available: false, reason: error instanceof MissingGracefulEnd ? error.message : undefined };
+    }
   } };
 }

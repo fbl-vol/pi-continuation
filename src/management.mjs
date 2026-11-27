@@ -100,11 +100,12 @@ function rolloverDetails(state, binding) {
   return blocker ? [`Queued assignment ${blocker.queuedId ?? ''} could not start: ${blocker.reason}`, blocker.next] : [];
 }
 
-function details(view, row) {
+function details(view, row, reviewerRecoveryReason) {
   const { binding, observation, status } = row;
   return [row.name + ' — ' + status.label,
     `Supervisor: ${view.running ? 'running' : 'unavailable'}`,
     ...(binding.role === 'owner' ? rolloverDetails(view.state, binding) : []),
+    ...(reviewerRecoveryReason ? [`Reviewer recovery unavailable: ${reviewerRecoveryReason}`] : []),
     `Global pause: ${view.state.paused}; workspace pause: ${view.state.routes[binding.route]?.paused}; worker pause: ${binding.paused}`,
     `Hold: ${observation?.hold === true ? observation.holdReason ?? 'held' : observation ? 'none reported' : 'unknown'}`,
     ...(observation?.hold && observation.holdError ? [
@@ -215,12 +216,12 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         const previous = view.workers.filter(row => !row.binding.stopped && !row.current);
         const labels = rows.map((row, index) => `${index + 1}. ${row.name} — ${row.status.label}`);
         const previousChoice = `Previous / unavailable registrations (${previous.length})`;
-        const canRecoverReviewers = view.running && view.own?.current && view.own.binding.role === 'owner' &&
-          await delegation?.canRecoverReviewers(ctx);
+        const reviewerRecovery = view.running && view.own?.current && view.own.binding.role === 'owner'
+          ? await delegation?.reviewerRecoveryStatus(ctx) : undefined;
         if (!current()) refuse('Session changed while reading supervision');
         const choices = ['Delivery preferences',
           ...(view.own?.binding.role === 'owner' ? ['This assignment: delivery'] : []),
-          ...(canRecoverReviewers ? ['Restore read-only reviewer delegation'] : []),
+          ...(reviewerRecovery?.available ? ['Restore read-only reviewer delegation'] : []),
           ...(view.own ? ['This session: details'] : []),
           ...(view.own?.current && ['idle', 'done'].includes(view.own.agent?.agent_status) &&
             worker.hold && view.own.observation?.hold ? ['Clear this session hold'] : []),
@@ -253,7 +254,7 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
             refuse('Owner decision changed; reopen the management menu');
           return coordinator.releaseDecision(ctx);
         }
-        if (choice === 'Restore read-only reviewer delegation' && canRecoverReviewers) {
+        if (choice === 'Restore read-only reviewer delegation' && reviewerRecovery?.available) {
           await freshView(view.own);
           return await delegation.recoverReviewers(ctx);
         }
@@ -294,7 +295,10 @@ export function bindManagement(pi, worker, supervisor, coordinator, { root = def
         if (!action || action === 'Close') return;
         const latest = await freshView(row);
         if (action === 'Details') {
-          ctx.ui.notify(details(latest, latest.workers.find(w => w.binding.workerId === row.binding.workerId)), 'info'); return;
+          const selected = latest.workers.find(w => w.binding.workerId === row.binding.workerId);
+          const reason = selected.current && selected === latest.own ? reviewerRecovery?.reason : undefined;
+          ctx.ui.notify(details(latest, selected, reason), 'info');
+          return;
         }
         if (action === 'Return this session to supervision') return worker.start(ctx);
         await requestControl(root, socketPath, paneId, ctx, worker, view, row,
