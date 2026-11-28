@@ -29,7 +29,8 @@ export async function startFixture(t, { blank = false, sessionManagerFactory, st
                 ({ workspace_id, label: `Workspace ${workspace_id}` })) } });
         socket.write(JSON.stringify({ id: request.id, result }) + '\n');
       } catch (error) {
-        if (error.code === 'pane_not_found') socket.end(JSON.stringify({ id: request.id, error: { code: error.code } }) + '\n');
+        if (['pane_not_found', 'agent_pane_busy'].includes(error.code))
+          socket.end(JSON.stringify({ id: request.id, error: { code: error.code } }) + '\n');
         else socket.destroy();
       }
     });

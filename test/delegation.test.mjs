@@ -62,7 +62,11 @@ async function fixture(t, options = {}) {
     if (method === 'workspace.create' && params.label === 'Continuation Supervisor') {
       effects.push('supervisor-workspace');
       if (options.supervisorWorkspaceLost) throw new Error('lost supervisor workspace response');
-      assert.fail('This fixture only exercises a lost supervisor workspace response');
+      assert.ok(options.supervisorStart);
+      const pane = { pane_id: 'w-supervisor:p1', terminal_id: 'terminal-w-supervisor:p1',
+        workspace_id: 'w-supervisor', tab_id: 'w-supervisor:t1' };
+      children.push({ pane, env: params.env, cwd: params.cwd });
+      return { type: 'workspace_created', workspace: { workspace_id: pane.workspace_id }, root_pane: pane };
     }
     if (method === 'workspace.create') {
       effects.push('workspace');
@@ -111,6 +115,11 @@ async function fixture(t, options = {}) {
       const child = children.find(c => c.pane.pane_id === params.pane_id);
       child.pane.label = params.label;
       return { type: 'ok' };
+    }
+    if (method === 'agent.start' && params.pane_id === 'w-supervisor:p1') {
+      effects.push('supervisor-start');
+      await options.supervisorStart(children[0], params);
+      assert.fail('Unexpected start acknowledgement');
     }
     if (method === 'agent.start') {
       effects.push('start');
@@ -669,6 +678,28 @@ test('P1/P4 a lost supervisor space response remains held and does not create an
   await assert.rejects(f.worker.command('start-implementation', 'Implement W123-D04.'),
     /Supervisor startup .* is unresolved/);
   assert.deepEqual(f.effects, ['supervisor-workspace']);
+});
+
+for (const changedPane of [false, true]) test(`P1/P4 supervisor retries only a known busy refusal on the same pane (changed: ${changedPane})`, {
+  skip: !['linux', 'darwin'].includes(process.platform),
+}, async t => {
+  const requests = [];
+  const f = await fixture(t, { supervisorStart: (child, params) => {
+    requests.push(params);
+    if (requests.length === 1) {
+      if (changedPane) child.pane.terminal_id = 'replacement-terminal';
+      throw Object.assign(new Error('Shell initializing'), { code: 'agent_pane_busy' });
+    }
+    throw new Error('Lost acknowledgement after submission');
+  } });
+  await f.supervisor.emit('session_shutdown');
+  const scope = 'Implement W123-D04.';
+  await assert.rejects(f.worker.command('start-implementation', scope), changedPane ?
+    /held for inspection .*Supervisor pane changed/ : /held for inspection .*disconnected before response/);
+  await assert.rejects(f.worker.command('start-implementation', scope), /Supervisor startup .* is unresolved/);
+  assert.deepEqual(f.effects, changedPane ? ['supervisor-workspace', 'supervisor-start'] :
+    ['supervisor-workspace', 'supervisor-start', 'supervisor-start']);
+  if (!changedPane) assert.deepEqual(requests[0], requests[1]);
 });
 
 test('P1/P4 an existing supervisor lock still prevents startup if its state is missing', async t => {

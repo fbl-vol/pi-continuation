@@ -1800,22 +1800,45 @@ async function startSupervisor(root, socketPath, ctx, parent, scope, allowed) {
         pane.workspace_id !== created.workspace?.workspace_id || pane.workspace_id === parent.workspaceId)
       refuse('Supervisor space creation identity uncertain');
     await atomicJson(path, { ...intent, status: 'start-requested', pane });
-    if (process.platform === 'linux' || process.platform === 'darwin') {
-      const deadline = performance.now() + 10000;
-      while (true) {
+    const unixShell = process.platform === 'linux' || process.platform === 'darwin';
+    const shellDeadline = performance.now() + 10000;
+    const name = `pcs-${BigInt(`0x${id.replaceAll('-', '')}`).toString(36)}`;
+    let started;
+    let shellPid;
+    while (true) {
+      if (unixShell) {
         const result = await request(socketPath, 'pane.process_info', { pane_id: pane.pane_id });
         const info = result.process_info;
-        if (result.type !== 'pane_process_info' || info?.pane_id !== pane.pane_id)
-          refuse('Supervisor shell readiness unavailable');
-        if (info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid &&
-            info.foreground_processes?.length === 1 && info.foreground_processes[0].pid === info.shell_pid) break;
-        if (performance.now() >= deadline) refuse('Supervisor shell did not become ready');
+        if (result.type !== 'pane_process_info' || info?.pane_id !== pane.pane_id ||
+            (shellPid !== undefined && info.shell_pid !== shellPid))
+          refuse('Supervisor shell identity or readiness unavailable');
+        if (!(info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid &&
+              info.foreground_processes?.length === 1 && info.foreground_processes[0].pid === info.shell_pid)) {
+          if (performance.now() >= shellDeadline) refuse('Supervisor shell did not become ready');
+          await delay(150);
+          continue;
+        }
+        shellPid = info.shell_pid;
+      }
+      const target = await request(socketPath, 'pane.get', { pane_id: pane.pane_id });
+      if (target.type !== 'pane_info' || target.pane?.pane_id !== pane.pane_id ||
+          target.pane.terminal_id !== pane.terminal_id || target.pane.workspace_id !== pane.workspace_id ||
+          target.pane.tab_id !== pane.tab_id || target.pane.agent || target.pane.agent_session)
+        refuse('Supervisor pane changed before Pi startup');
+      if (!allowed() || !sameSession(currentSession(ctx), parent))
+        refuse('Planning session changed before supervisor startup');
+      if (unixShell && performance.now() >= shellDeadline) refuse('Supervisor shell did not become ready');
+      try {
+        started = await request(socketPath, 'agent.start', { name, kind: 'pi',
+          pane_id: pane.pane_id, args: [], timeout_ms: 30000 }, { timeoutMs: 35000 });
+        break;
+      } catch (error) {
+        // Herdr rejects busy before submitting any input. Lost replies and all
+        // other errors may have effects and must retain the existing fence.
+        if (error.code !== 'agent_pane_busy' || !unixShell || performance.now() >= shellDeadline) throw error;
         await delay(150);
       }
     }
-    const name = `pcs-${BigInt(`0x${id.replaceAll('-', '')}`).toString(36)}`;
-    const started = await request(socketPath, 'agent.start', { name, kind: 'pi',
-      pane_id: pane.pane_id, args: [], timeout_ms: 30000 }, { timeoutMs: 35000 });
     if (started.type !== 'agent_started') refuse('Supervisor Pi startup was not acknowledged');
     const deadline = performance.now() + 30000;
     while (performance.now() < deadline) {
